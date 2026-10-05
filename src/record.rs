@@ -3,14 +3,14 @@
 use serde::Serialize;
 
 /// One extracted declaration, serialized as a JSON Lines row.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "record", rename_all = "lowercase")]
 pub enum Record {
     Function(FunctionRecord),
     Type(TypeRecord),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct FunctionRecord {
     pub language: Language,
     pub name: String,
@@ -28,7 +28,7 @@ pub struct FunctionRecord {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Param {
     pub name: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -37,7 +37,7 @@ pub struct Param {
     pub optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct TypeRecord {
     pub language: Language,
     pub name: String,
@@ -69,7 +69,7 @@ pub enum TypeKind {
     Alias,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Field {
     pub name: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -88,7 +88,7 @@ pub enum FieldKind {
     Member,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct Location {
     /// Root-relative, `/`-separated.
     pub file: String,
@@ -111,4 +111,19 @@ impl Record {
             Record::Type(t) => &t.location,
         }
     }
+}
+
+/// `id: string, force?: boolean`: parameters as written in a signature.
+pub fn format_params(params: &[Param]) -> String {
+    params
+        .iter()
+        .map(|p| {
+            let optional = if p.optional { "?" } else { "" };
+            match &p.ty {
+                Some(ty) => format!("{}{optional}: {ty}", p.name),
+                None => format!("{}{optional}", p.name),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

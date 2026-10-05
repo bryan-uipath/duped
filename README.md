@@ -19,6 +19,33 @@ duped extract [DIR] [--out records.jsonl]   # every top-level function and type,
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
 ```
 
-Both skip test, mock and fixture files unless you pass `--include-tests`, and both accept `--exclude <glob>` (repeatable, relative to `DIR`). The walk respects `.gitignore` and skips `node_modules`, `dist`, `build`, `out`, `coverage` and `target`.
+`DIR` can also be a single file.
 
-Each JSON Lines row is a `function` (name, scope, params, return type, exported, location, doc) or a `type` (name, kind, fields, extends, exported, location, doc). Type kinds are `interface`, `type`, `class`, `enum`, `union` (literal members become fields) and `alias`.
+### What gets scanned
+
+- `.gitignore` rules apply, even outside a git checkout.
+- Hidden files and directories (such as `.storybook/`) are skipped.
+- `node_modules`, `dist`, `build`, `out`, `coverage` and `target` are always skipped.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/` and `fixtures/`.
+- `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
+
+### Records
+
+Each line of `extract` output is one JSON object. Keys whose value would be empty, `null` or `false` are left out.
+
+| Key | In | Meaning |
+| --- | --- | --- |
+| `record` | all | `function` or `type` |
+| `language` | all | `typescript` or `javascript` |
+| `name` | all | declared name; `default` for an anonymous default export |
+| `scope` | all, optional | enclosing class or namespace, e.g. `Api.Client` |
+| `exported` | all | part of the module's public API, including `export { x }` lists; private and protected class members are `false` |
+| `file`, `start_line`, `end_line` | all | root-relative path and 1-based inclusive lines (from the `export` keyword or first decorator) |
+| `doc` | all, optional | the adjacent `/** … */` comment as plain text |
+| `params` | function | `[{ name, type?, optional? }]`; `this:` is omitted |
+| `returns` | function, optional | return type as written |
+| `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields) or `alias` (no fields) |
+| `fields` | type | `[{ name, type?, optional?, kind }]`, where `kind` is `property`, `method` or `member`; quotes are stripped, so `'id'` and `id` match; overloads and getter/setter pairs share one field |
+| `extends` | type, optional | base types and implemented interfaces, as written |
+
+Overload signatures fold into their implementation, so each function appears once.

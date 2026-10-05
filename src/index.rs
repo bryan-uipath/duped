@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::record::{FieldKind, FunctionRecord, Param, Record, TypeKind, TypeRecord};
+use crate::record::{FieldKind, FunctionRecord, Record, TypeKind, TypeRecord, format_params};
 
 /// Fields shown per type before the list is cut off with `+N more`.
 const MAX_FIELDS: usize = 16;
@@ -45,16 +45,16 @@ pub fn render(records: &[Record]) -> String {
 
 /// e.g. `` fn `Repo.load(id: string, force?): Promise<Item>` — Loads one. (L12) ``
 fn function_line(f: &FunctionRecord) -> String {
-    let qualified = match &f.scope {
-        Some(scope) => format!("{scope}.{}", f.name),
-        None => f.name.clone(),
-    };
     let returns = f
         .returns
         .as_deref()
         .map(|r| format!(": {r}"))
         .unwrap_or_default();
-    let head = format!("fn `{qualified}({}){returns}`", params(&f.params));
+    let head = format!(
+        "fn `{}({}){returns}`",
+        qualified(f.scope.as_deref(), &f.name),
+        format_params(&f.params)
+    );
     finish(head, f.doc.as_deref(), f.location.start_line, f.exported)
 }
 
@@ -68,11 +68,7 @@ fn type_line(t: &TypeRecord) -> String {
         TypeKind::Union => "union",
         TypeKind::Alias => "alias",
     };
-    let name = match &t.scope {
-        Some(scope) => format!("{scope}.{}", t.name),
-        None => t.name.clone(),
-    };
-    let mut head = format!("{kind} `{name}`");
+    let mut head = format!("{kind} `{}`", qualified(t.scope.as_deref(), &t.name));
     if !t.extends.is_empty() {
         write!(head, " extends {}", t.extends.join(", ")).ok();
     }
@@ -110,18 +106,11 @@ fn finish(mut line: String, doc: Option<&str>, start_line: usize, exported: bool
     line
 }
 
-fn params(params: &[Param]) -> String {
-    params
-        .iter()
-        .map(|p| {
-            let optional = if p.optional { "?" } else { "" };
-            match &p.ty {
-                Some(ty) => format!("{}{optional}: {ty}", p.name),
-                None => format!("{}{optional}", p.name),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+fn qualified(scope: Option<&str>, name: &str) -> String {
+    match scope {
+        Some(scope) => format!("{scope}.{name}"),
+        None => name.to_string(),
+    }
 }
 
 #[cfg(test)]
