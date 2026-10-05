@@ -1,0 +1,12 @@
+[package]
+name = "duped"
+version = "0.1.0"
+edition = "2024"
+description = "Find duplicated functions and types across TypeScript, JavaScript, Python, C# and Rust"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
