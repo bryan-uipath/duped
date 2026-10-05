@@ -67,6 +67,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "py" | "pyi" => Some(Language::Python),
         _ => None,
     }
 }
@@ -89,13 +90,22 @@ pub fn is_test_path(rel: &str) -> bool {
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
-            return FILE_MARKERS.iter().any(|marker| segment.contains(marker));
+            return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
+                || is_python_test_file(segment);
         }
         if DIRS.contains(&segment) {
             return true;
         }
     }
     false
+}
+
+/// pytest's conventions: `test_*.py`, `*_test.py` and `conftest.py`.
+fn is_python_test_file(name: &str) -> bool {
+    name == "conftest.py"
+        || name
+            .strip_suffix(".py")
+            .is_some_and(|stem| stem.starts_with("test_") || stem.ends_with("_test"))
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -151,13 +161,19 @@ mod tests {
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
+        assert!(is_test_path("pkg/test_api.py"));
+        assert!(is_test_path("pkg/api_test.py"));
+        assert!(is_test_path("pkg/conftest.py"));
+        assert!(!is_test_path("pkg/testing.py"));
+        assert!(!is_test_path("pkg/latest.py"));
     }
 
     #[test]
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
-        assert_eq!(language_for(Path::new("a.rs")), None);
+        assert_eq!(language_for(Path::new("a.pyi")), Some(Language::Python));
+        assert_eq!(language_for(Path::new("a.txt")), None);
     }
 
     #[test]

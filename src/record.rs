@@ -67,6 +67,12 @@ pub enum TypeKind {
     Union,
     /// Any other alias; recorded for the index, with no fields.
     Alias,
+    #[allow(dead_code)]
+    Struct,
+    #[allow(dead_code)]
+    Trait,
+    #[allow(dead_code)]
+    Record,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +108,7 @@ pub struct Location {
 pub enum Language {
     TypeScript,
     JavaScript,
+    Python,
 }
 
 impl Record {

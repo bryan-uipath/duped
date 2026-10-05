@@ -679,7 +679,7 @@ fn is_private(member: Node) -> bool {
 
 /// Add `field` unless its name is already present; an untyped entry takes the new type.
 /// Overloads and getter/setter pairs share a name.
-fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
+pub(crate) fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
     let Some(field) = field else { return };
     match fields.iter_mut().find(|f| f.name == field.name) {
         Some(existing) => {
@@ -762,7 +762,7 @@ fn qualified(scope: &[String], name: &str) -> String {
 }
 
 /// `{ a:\n  'x  y' }` → `{ a: 'x  y' }`: collapse whitespace runs outside quotes.
-fn collapse_whitespace(text: &str) -> String {
+pub(crate) fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut quote = None;
     let mut escaped = false;
