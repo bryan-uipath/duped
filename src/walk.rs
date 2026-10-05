@@ -67,6 +67,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "rs" => Some(Language::Rust),
         _ => None,
     }
 }
@@ -84,6 +85,7 @@ pub fn is_test_path(rel: &str) -> bool {
         "__fixtures__",
         "__snapshots__",
         "e2e",
+        "benches",
     ];
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
     let mut segments = rel.split('/').peekable();
@@ -148,6 +150,7 @@ mod tests {
         assert!(is_test_path("src/__tests__/a.ts"));
         assert!(is_test_path("src/mocks/handlers.ts"));
         assert!(is_test_path("packages/x/test/helpers.ts"));
+        assert!(is_test_path("benches/parse.rs"));
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
@@ -157,7 +160,8 @@ mod tests {
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
-        assert_eq!(language_for(Path::new("a.rs")), None);
+        assert_eq!(language_for(Path::new("a.rs")), Some(Language::Rust));
+        assert_eq!(language_for(Path::new("a.go")), None);
     }
 
     #[test]
