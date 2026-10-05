@@ -67,6 +67,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "cs" => Some(Language::CSharp),
         _ => None,
     }
 }
@@ -86,12 +87,18 @@ pub fn is_test_path(rel: &str) -> bool {
         "e2e",
     ];
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
+    // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
+    const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
+    const CS_FILE_SUFFIXES: &[&str] = &["Tests.cs", "Test.cs"];
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
-            return FILE_MARKERS.iter().any(|marker| segment.contains(marker));
+            return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
+                || CS_FILE_SUFFIXES
+                    .iter()
+                    .any(|suffix| segment.ends_with(suffix));
         }
-        if DIRS.contains(&segment) {
+        if DIRS.contains(&segment) || DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)) {
             return true;
         }
     }
@@ -151,12 +158,21 @@ mod tests {
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
+        assert!(is_test_path("src/RepoTests.cs"));
+        assert!(is_test_path("src/ParserTest.cs"));
+        assert!(is_test_path("Acme.Core.UnitTests/Helpers.cs"));
+        assert!(is_test_path("Acme.Api.Tests/Fakes.cs"));
+        assert!(!is_test_path("src/TestHelpers.cs"));
+        assert!(!is_test_path("src/Contest.cs"));
+        assert!(!is_test_path("src/RepoTests.ts"));
+        assert!(!is_test_path("Acme.Testing/Repo.cs"));
     }
 
     #[test]
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
+        assert_eq!(language_for(Path::new("Repo.cs")), Some(Language::CSharp));
         assert_eq!(language_for(Path::new("a.rs")), None);
     }
 

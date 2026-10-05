@@ -67,6 +67,9 @@ fn type_line(t: &TypeRecord) -> String {
         TypeKind::Enum => "enum",
         TypeKind::Union => "union",
         TypeKind::Alias => "alias",
+        TypeKind::Struct => "struct",
+        TypeKind::Trait => "trait",
+        TypeKind::Record => "record",
     };
     let mut head = format!("{kind} `{}`", qualified(t.scope.as_deref(), &t.name));
     if !t.extends.is_empty() {
