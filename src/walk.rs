@@ -92,7 +92,7 @@ pub fn is_test_path(rel: &str) -> bool {
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
     // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
     const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
-    const CS_FILE_SUFFIXES: &[&str] = &["Tests.cs", "Test.cs"];
+    const CS_FILE_SUFFIXES: &[&str] = &["Tests.cs"];
     let csharp = rel.ends_with(".cs");
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
@@ -171,7 +171,10 @@ mod tests {
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
         assert!(is_test_path("src/RepoTests.cs"));
-        assert!(is_test_path("src/ParserTest.cs"));
+        assert!(
+            !is_test_path("src/LoadTest.cs"),
+            "`*Test.cs` is often production code"
+        );
         assert!(is_test_path("Acme.Core.UnitTests/Helpers.cs"));
         assert!(is_test_path("Acme.Api.Tests/Fakes.cs"));
         assert!(!is_test_path("src/TestHelpers.cs"));
