@@ -143,3 +143,41 @@ test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
 ```
 
 **Conventional members** are names that don't count toward type similarity, so two unrelated classes don't look alike just because both define `toString`. The TypeScript and JavaScript defaults are `toString`, `toJSON`, `valueOf`, `constructor` and `[Symbol.iterator]`.
+
+## Testing
+
+`cargo test` runs the unit tests, the end-to-end tests and the regression suite in `tests/regression.rs`.
+
+The regression suite scans `tests/fixtures/workspace`, a synthetic pnpm workspace in which each type is planted to produce one expected finding (an importable copy, drift, an edge-shape family, move-down, importable-indirect, boundary, acknowledged pairs) or to be filtered out as noise. The test asserts every expected pair, its tag and relationship, and that nothing else is reported, so a new false positive fails CI as surely as a lost finding.
+
+### Checking a real repository
+
+`real_repository_expectations` runs only when two environment variables are set:
+
+```sh
+DUPED_REGRESSION_ROOT=/path/to/repo \
+DUPED_REGRESSION_EXPECT=/path/to/expected.toml \
+cargo test --release --test regression real_repository
+```
+
+The expectations file belongs to the repository being checked, so keep it outside this one. It scans with `--include-acknowledged --include-same-module` and checks each `[[expect]]` pair; each `[[missing]]` pair must stay unreported, so a fix is noticed and the entry moved to `[[expect]]`.
+
+```toml
+path = "packages"                # what to scan, relative to the root [default: the root]
+args = ["--min-fields", "3"]     # extra `duped types` arguments [optional]
+
+[[expect]]
+a = "@x/api:HostAuth"            # module:Name or module:Scope.Name
+b = "@x/core:AuthContext"
+tag = "importable"               # importable, importable-indirect, move-down, boundary or same-module
+copy = "@x/api"                  # optional checks; omit any you don't care about
+owner = "@x/core"
+home = "@x/base"                 # for move-down
+relationship = "exact"           # from a's side: exact, superset, subset or overlap
+acknowledged = false             # true when hidden as deliberate by default
+
+[[missing]]
+a = "@x/api:Status"
+b = "@x/core:Status"
+reason = "the original is a const object, not a union"
+```

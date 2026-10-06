@@ -1,0 +1,5 @@
+# Pairs the team has decided to keep apart.
+[[acknowledged]]
+a = "@acme/core:Metrics"
+b = "@acme/web:Metrics"
+reason = "web reports its own metrics on purpose"
