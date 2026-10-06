@@ -7,8 +7,10 @@ use globset::GlobSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{Interner, components, jaccard, seed_pairs};
+use super::{Interner, Judge, components, jaccard, seed_pairs};
+use crate::modules::{Home, Tag};
 use crate::record::{Record, TypeKind, TypeRecord, qualified};
+use crate::rules::Rules;
 
 pub struct TypeOptions {
     /// Types with fewer fields are not compared.
@@ -22,6 +24,12 @@ pub struct TypeOptions {
     /// Field names on more than this fraction of types (and more than
     /// [`COMMON_FIELD_FLOOR`] of them) don't seed candidate pairs, but still score.
     pub common_field_fraction: f64,
+    /// Report pairs whose two sides are in one module.
+    pub include_same_module: bool,
+    /// Report pairs acknowledged as deliberate.
+    pub include_acknowledged: bool,
+    /// Per-language rules; conventional members don't count toward similarity.
+    pub rules: Rules,
 }
 
 /// A field name is only "common" once it appears on more types than this, whatever the fraction.
@@ -53,6 +61,10 @@ pub struct TypePair {
     /// Shared field names, in the first type's order.
     pub shared: Vec<String>,
     pub relationship: Relationship,
+    /// Module relationship; `None` when modules aren't tracked.
+    pub tag: Option<Tag>,
+    /// Why the pair is deliberate, when it is.
+    pub acknowledged: Option<String>,
 }
 
 #[derive(Debug)]
@@ -63,6 +75,10 @@ pub struct TypeCluster {
     pub pairs: Vec<usize>,
     /// Field names every member has.
     pub shared: Vec<String>,
+    /// The most actionable pair tag.
+    pub tag: Option<Tag>,
+    /// Where one shared definition could live.
+    pub home: Option<Home>,
 }
 
 #[derive(Debug)]
@@ -71,8 +87,12 @@ pub struct TypeReport {
     pub candidates: usize,
     /// Qualifying pairs, best first.
     pub pairs: Vec<TypePair>,
-    /// Groups of types linked by qualifying pairs, largest first.
+    /// Groups of types linked by reported pairs, most actionable first.
     pub clusters: Vec<TypeCluster>,
+    /// Qualifying pairs left out because both sides share a module.
+    pub hidden_same_module: usize,
+    /// Qualifying pairs left out because they are acknowledged.
+    pub hidden_acknowledged: usize,
 }
 
 /// Which kinds are comparable: object shapes with each other, enums and unions with each other.
@@ -93,7 +113,11 @@ struct Candidate<'r> {
     types: Vec<Option<u32>>,
 }
 
-pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeReport {
+pub fn find_duplicate_types(
+    records: &[Record],
+    options: &TypeOptions,
+    judge: &dyn Judge,
+) -> TypeReport {
     let mut name_ids = Interner::default();
     let mut type_ids = Interner::default();
     let mut candidates = Vec::new();
@@ -108,8 +132,9 @@ pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeRe
         // First declaration of each name wins.
         let mut fields: Vec<&str> = Vec::new();
         let mut keyed: Vec<(u32, Option<u32>)> = Vec::new();
+        let rules = options.rules.get(t.language);
         for field in &t.fields {
-            if fields.contains(&field.name.as_str()) {
+            if fields.contains(&field.name.as_str()) || rules.is_conventional(&field.name) {
                 continue;
             }
             fields.push(&field.name);
@@ -134,6 +159,7 @@ pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeRe
     }
 
     let mut pairs = Vec::new();
+    let (mut hidden_same_module, mut hidden_acknowledged) = (0, 0);
     for group in [Group::Shape, Group::Members] {
         let members: Vec<&Candidate> = candidates.iter().filter(|c| c.group == group).collect();
         let sets: Vec<&[u32]> = members.iter().map(|c| c.names.as_slice()).collect();
@@ -142,23 +168,40 @@ pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeRe
             COMMON_FIELD_FLOOR,
             options.common_field_fraction,
             |i, j| {
-                pairs.extend(score_pair(members[i], members[j], options));
+                let Some(mut pair) = score_pair(members[i], members[j], options) else {
+                    return;
+                };
+                let verdict = judge.verdict(pair.a, pair.b);
+                if matches!(verdict.tag, Some(Tag::SameModule { .. }))
+                    && !options.include_same_module
+                {
+                    hidden_same_module += 1;
+                } else if verdict.acknowledged.is_some() && !options.include_acknowledged {
+                    hidden_acknowledged += 1;
+                } else {
+                    pair.tag = verdict.tag;
+                    pair.acknowledged = verdict.acknowledged;
+                    pairs.push(pair);
+                }
             },
         );
     }
+    // Most actionable tag first, then most similar.
     pairs.sort_by(|x, y| {
-        y.similarity
-            .total_cmp(&x.similarity)
+        tag_rank(&x.tag)
+            .cmp(&tag_rank(&y.tag))
+            .then(y.similarity.total_cmp(&x.similarity))
             .then(y.typed.total_cmp(&x.typed))
             .then(y.shared.len().cmp(&x.shared.len()))
             .then((x.a, x.b).cmp(&(y.a, y.b)))
     });
-
-    let clusters = cluster(&candidates, &pairs);
+    let clusters = cluster(&candidates, &pairs, judge);
     TypeReport {
         candidates: candidates.len(),
         pairs,
         clusters,
+        hidden_same_module,
+        hidden_acknowledged,
     }
 }
 
@@ -217,10 +260,12 @@ fn score_pair(a: &Candidate, b: &Candidate, options: &TypeOptions) -> Option<Typ
         typed,
         shared: shared_fields,
         relationship,
+        tag: None,
+        acknowledged: None,
     })
 }
 
-fn cluster(candidates: &[Candidate], pairs: &[TypePair]) -> Vec<TypeCluster> {
+fn cluster(candidates: &[Candidate], pairs: &[TypePair], judge: &dyn Judge) -> Vec<TypeCluster> {
     let slot: HashMap<usize, usize> = candidates
         .iter()
         .enumerate()
@@ -242,28 +287,45 @@ fn cluster(candidates: &[Candidate], pairs: &[TypePair]) -> Vec<TypeCluster> {
                 .map(|f| f.to_string())
                 .collect();
             // `pairs` is already ranked, so these indices come out best first.
-            let pairs = pairs
+            let cluster_pairs: Vec<usize> = pairs
                 .iter()
                 .enumerate()
                 .filter(|(_, p)| members.binary_search(&p.a).is_ok())
                 .map(|(i, _)| i)
                 .collect();
+            let tag = cluster_pairs.first().and_then(|&i| pairs[i].tag.clone());
+            let home = judge.home(&members);
             TypeCluster {
                 members,
-                pairs,
+                pairs: cluster_pairs,
                 shared,
+                tag,
+                home,
             }
         })
         .collect();
     clusters.sort_by(|x, y| {
-        let best = |c: &TypeCluster| c.pairs.first().map_or(0.0, |&i| pairs[i].similarity);
-        y.members
-            .len()
-            .cmp(&x.members.len())
+        let best = |c: &TypeCluster| best_similarity(c, pairs);
+        tag_rank(&x.tag)
+            .cmp(&tag_rank(&y.tag))
+            .then(y.members.len().cmp(&x.members.len()))
             .then(best(y).total_cmp(&best(x)))
             .then(x.members[0].cmp(&y.members[0]))
     });
     clusters
+}
+
+/// Untagged pairs (modules not tracked) all rank alike.
+fn tag_rank(tag: &Option<Tag>) -> u8 {
+    tag.as_ref().map_or(0, Tag::rank)
+}
+
+fn best_similarity(cluster: &TypeCluster, pairs: &[TypePair]) -> f64 {
+    cluster
+        .pairs
+        .iter()
+        .map(|&i| pairs[i].similarity)
+        .fold(0.0, f64::max)
 }
 
 fn group_of(kind: TypeKind) -> Option<Group> {
@@ -374,6 +436,7 @@ pub fn render_text(
     top: usize,
     pairs_only: bool,
     options: &TypeOptions,
+    judge: &dyn Judge,
 ) -> String {
     let mut out = String::new();
     writeln!(
@@ -386,50 +449,76 @@ pub fn render_text(
         options.min_shared
     )
     .ok();
+    if let Some(summary) = judge.summary() {
+        writeln!(out, "Modules: {summary}.").ok();
+    }
+    let mut hidden = Vec::new();
+    if report.hidden_same_module > 0 {
+        hidden.push(format!(
+            "{} same-module (--include-same-module)",
+            report.hidden_same_module
+        ));
+    }
+    if report.hidden_acknowledged > 0 {
+        hidden.push(format!(
+            "{} acknowledged (--include-acknowledged)",
+            report.hidden_acknowledged
+        ));
+    }
+    if !hidden.is_empty() {
+        writeln!(out, "Hidden pairs: {}.", hidden.join(", ")).ok();
+    }
     if pairs_only {
         for (rank, pair) in report.pairs.iter().take(top).enumerate() {
             writeln!(
                 out,
-                "\n{}. {:.2} similar, {:.2} typed, {} shared: {}",
+                "\n{}. {:.2} similar, {:.2} typed, {} shared: {}{}",
                 rank + 1,
                 pair.similarity,
                 pair.typed,
                 pair.shared.len(),
-                relation_text(records, pair)
+                relation_text(records, pair),
+                pair_notes(pair)
             )
             .ok();
             for index in [pair.a, pair.b] {
-                writeln!(out, "   {}", member_line(type_at(records, index))).ok();
+                writeln!(out, "   {}", member_line(records, index, judge)).ok();
             }
         }
     } else {
         for (rank, cluster) in report.clusters.iter().take(top).enumerate() {
-            let best = cluster
-                .pairs
-                .first()
-                .map_or(0.0, |&i| report.pairs[i].similarity);
+            let tag = cluster
+                .tag
+                .as_ref()
+                .map(|t| format!(", {}", tag_label(t)))
+                .unwrap_or_default();
             writeln!(
                 out,
-                "\n{}. {} types, best {best:.2}",
+                "\n{}. {} types, best {:.2}{tag}",
                 rank + 1,
-                cluster.members.len()
+                cluster.members.len(),
+                best_similarity(cluster, &report.pairs)
             )
             .ok();
+            if let Some(home) = &cluster.home {
+                writeln!(out, "   {}", home.describe()).ok();
+            }
             if !cluster.shared.is_empty() {
                 writeln!(out, "   shared by all: {}", cluster.shared.join(", ")).ok();
             }
             for &index in &cluster.members {
-                writeln!(out, "   {}", member_line(type_at(records, index))).ok();
+                writeln!(out, "   {}", member_line(records, index, judge)).ok();
             }
             const SHOWN_PAIRS: usize = 10;
             for &i in cluster.pairs.iter().take(SHOWN_PAIRS) {
                 let pair = &report.pairs[i];
                 writeln!(
                     out,
-                    "   - {:.2} similar, {:.2} typed: {}",
+                    "   - {:.2} similar, {:.2} typed: {}{}",
                     pair.similarity,
                     pair.typed,
-                    relation_text(records, pair)
+                    relation_text(records, pair),
+                    pair_notes(pair)
                 )
                 .ok();
             }
@@ -455,18 +544,20 @@ pub fn render_text(
 }
 
 /// Everything, untruncated: `{ summary, pairs, clusters }`.
-pub fn to_json(records: &[Record], report: &TypeReport) -> Value {
+pub fn to_json(records: &[Record], report: &TypeReport, judge: &dyn Judge) -> Value {
     let pairs: Vec<Value> = report
         .pairs
         .iter()
         .map(|p| {
             json!({
-                "a": member_json(type_at(records, p.a)),
-                "b": member_json(type_at(records, p.b)),
+                "a": member_json(records, p.a, judge),
+                "b": member_json(records, p.b, judge),
                 "similarity": p.similarity,
                 "typed": p.typed,
                 "relationship": p.relationship,
                 "shared": p.shared,
+                "tag": p.tag,
+                "acknowledged": p.acknowledged,
             })
         })
         .collect();
@@ -475,14 +566,22 @@ pub fn to_json(records: &[Record], report: &TypeReport) -> Value {
         .iter()
         .map(|c| {
             json!({
-                "members": c.members.iter().map(|&i| member_json(type_at(records, i))).collect::<Vec<_>>(),
+                "members": c.members.iter().map(|&i| member_json(records, i, judge)).collect::<Vec<_>>(),
                 "shared": c.shared,
                 "pairs": c.pairs,
+                "tag": c.tag,
+                "home": c.home,
             })
         })
         .collect();
     json!({
-        "summary": { "candidates": report.candidates, "pairs": report.pairs.len(), "clusters": report.clusters.len() },
+        "summary": {
+            "candidates": report.candidates,
+            "pairs": report.pairs.len(),
+            "clusters": report.clusters.len(),
+            "modules": judge.summary(),
+            "hidden": { "same_module": report.hidden_same_module, "acknowledged": report.hidden_acknowledged },
+        },
         "pairs": pairs,
         "clusters": clusters,
     })
@@ -507,16 +606,41 @@ fn kind_name(kind: TypeKind) -> String {
         .unwrap_or_default()
 }
 
-/// e.g. `interface Api.User (6 fields)  src/api.ts:12`
-fn member_line(t: &TypeRecord) -> String {
+/// The tag's kind, e.g. `importable`.
+fn tag_label(tag: &Tag) -> String {
+    serde_json::to_value(tag)
+        .ok()
+        .and_then(|v| v.get("kind")?.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// e.g. `interface Api.User (6 fields)  [@x/core] src/api.ts:12`
+fn member_line(records: &[Record], index: usize, judge: &dyn Judge) -> String {
+    let t = type_at(records, index);
+    let module = judge
+        .module(index)
+        .map(|m| format!("[{m}] "))
+        .unwrap_or_default();
     format!(
-        "{} {} ({} fields)  {}:{}",
+        "{} {} ({} fields)  {module}{}:{}",
         kind_name(t.kind),
         display_name(t),
         t.fields.len(),
         t.location.file,
         t.location.start_line
     )
+}
+
+/// ` — importable: a can import b (acknowledged: doc: mirrors)`
+fn pair_notes(pair: &TypePair) -> String {
+    let mut notes = String::new();
+    if let Some(tag) = &pair.tag {
+        write!(notes, " — {}", tag.describe()).ok();
+    }
+    if let Some(reason) = &pair.acknowledged {
+        write!(notes, " (acknowledged: {reason})").ok();
+    }
+    notes
 }
 
 /// `A = B` exact, `A ⊃ B` superset, `A ⊂ B` subset, `A ~ B` overlap.
@@ -534,12 +658,14 @@ fn relation_text(records: &[Record], pair: &TypePair) -> String {
     )
 }
 
-fn member_json(t: &TypeRecord) -> Value {
+fn member_json(records: &[Record], index: usize, judge: &dyn Judge) -> Value {
+    let t = type_at(records, index);
     json!({
         "name": t.name,
         "scope": t.scope,
         "kind": t.kind,
         "language": t.language,
+        "module": judge.module(index),
         "file": t.location.file,
         "line": t.location.start_line,
         "fields": t.fields.len(),
@@ -549,6 +675,7 @@ fn member_json(t: &TypeRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::NoJudge;
     use crate::record::{Field, FieldKind, Language, Location};
     use globset::{Glob, GlobSetBuilder};
 
@@ -561,6 +688,9 @@ mod tests {
             threshold: 0.7,
             exclude_names: builder.build().unwrap(),
             common_field_fraction: 0.1,
+            include_same_module: false,
+            include_acknowledged: false,
+            rules: Rules::default(),
         }
     }
 
@@ -629,7 +759,7 @@ mod tests {
                 &["id: number", "name: string", "age: number", "email: string"],
             ),
         ];
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         let ab = report
             .pairs
             .iter()
@@ -666,7 +796,7 @@ mod tests {
                 &["Pending", "Running", "Done", "Failed", "Paused"],
             ),
         ];
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         assert_eq!(report.pairs[0].relationship, Relationship::Subset);
         assert_eq!(names(&records, &report.pairs[0]), ("Small", "Big"));
         let reversed = vec![
@@ -677,7 +807,7 @@ mod tests {
                 &["Pending", "Running", "Done", "Failed"],
             ),
         ];
-        let report = find_duplicate_types(&reversed, &options());
+        let report = find_duplicate_types(&reversed, &options(), &NoJudge);
         assert_eq!(report.pairs[0].relationship, Relationship::Superset);
     }
 
@@ -688,7 +818,7 @@ mod tests {
             ty("Shape", TypeKind::Interface, &["a", "b", "c", "d"]),
             ty("Alias", TypeKind::Alias, &[]),
         ];
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         assert!(report.pairs.is_empty());
         assert_eq!(report.candidates, 2);
     }
@@ -705,7 +835,7 @@ mod tests {
             ),
             ty("Tiny", TypeKind::Interface, &["a", "b"]),
         ];
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         // A~B is 3/7 < 0.7; ButtonProps is excluded; Tiny has too few fields.
         assert!(report.pairs.is_empty());
         assert_eq!(report.candidates, 2);
@@ -714,14 +844,17 @@ mod tests {
             threshold: 0.4,
             ..options()
         };
-        assert_eq!(find_duplicate_types(&records, &loose).pairs.len(), 1);
+        assert_eq!(
+            find_duplicate_types(&records, &loose, &NoJudge).pairs.len(),
+            1
+        );
         let strict_shared = TypeOptions {
             threshold: 0.4,
             min_shared: 4,
             ..options()
         };
         assert!(
-            find_duplicate_types(&records, &strict_shared)
+            find_duplicate_types(&records, &strict_shared, &NoJudge)
                 .pairs
                 .is_empty()
         );
@@ -755,6 +888,7 @@ mod tests {
                 threshold: 0.5,
                 ..options()
             },
+            &NoJudge,
         );
         assert_eq!(report.pairs.len(), 1);
         let pair = &report.pairs[0];
@@ -778,7 +912,7 @@ mod tests {
                 &["id", "source", "target", "handle", "label"],
             ),
         ];
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         assert_eq!(report.clusters.len(), 2);
         let first = &report.clusters[0];
         assert_eq!(first.members, vec![0, 2, 4]);
@@ -821,7 +955,7 @@ mod tests {
                 &["a: 1", "b: 2", "c: 3", "d: 4"],
             ),
         ];
-        let pair = &find_duplicate_types(&records, &options()).pairs[0];
+        let pair = &find_duplicate_types(&records, &options(), &NoJudge).pairs[0];
         assert_eq!((pair.typed, pair.relationship), (1.0, Relationship::Exact));
     }
 
@@ -835,7 +969,7 @@ mod tests {
             ),
             ty("B", TypeKind::Interface, &["a: x", "b: x", "c: x", "d: x"]),
         ];
-        let pair = &find_duplicate_types(&records, &options()).pairs[0];
+        let pair = &find_duplicate_types(&records, &options(), &NoJudge).pairs[0];
         assert_eq!(
             (pair.similarity, pair.typed, pair.relationship),
             (1.0, 1.0, Relationship::Exact)
@@ -857,6 +991,7 @@ mod tests {
                 threshold: 0.56,
                 ..options()
             },
+            &NoJudge,
         );
         assert_eq!(report.pairs.len(), 1);
     }
@@ -873,7 +1008,7 @@ mod tests {
                 )
             })
             .collect();
-        let report = find_duplicate_types(&records, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
         assert_eq!(
             (report.pairs.len(), report.clusters.len()),
             (60 * 59 / 2, 1)
@@ -898,8 +1033,34 @@ mod tests {
                 exclude_names: builder.build().unwrap(),
                 ..options()
             },
+            &NoJudge,
         );
         assert!(report.pairs.is_empty());
+    }
+
+    #[test]
+    fn conventional_members_do_not_count() {
+        // Only `toString`/`valueOf` differ; they don't count, so the shapes match exactly.
+        let records = vec![
+            ty("A", TypeKind::Class, &["a", "b", "c", "toString"]),
+            ty("B", TypeKind::Class, &["a", "b", "c", "valueOf"]),
+        ];
+        let pair = &find_duplicate_types(&records, &options(), &NoJudge).pairs[0];
+        assert_eq!(
+            (pair.similarity, pair.relationship),
+            (1.0, Relationship::Exact)
+        );
+        assert_eq!(pair.shared, vec!["a", "b", "c"]);
+
+        // A type left with too few counted fields isn't a candidate.
+        let records = vec![
+            ty("C", TypeKind::Class, &["a", "b", "toString", "toJSON"]),
+            ty("D", TypeKind::Class, &["a", "b", "toString", "toJSON"]),
+        ];
+        assert_eq!(
+            find_duplicate_types(&records, &options(), &NoJudge).candidates,
+            0
+        );
     }
 
     #[test]
@@ -908,12 +1069,12 @@ mod tests {
             ty("A", TypeKind::Interface, &["a", "b", "c", "d"]),
             ty("B", TypeKind::Interface, &["a", "b", "c", "d", "e"]),
         ];
-        let report = find_duplicate_types(&records, &options());
-        let text = render_text(&records, &report, 40, false, &options());
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
+        let text = render_text(&records, &report, 40, false, &options(), &NoJudge);
         assert!(text.contains("1 pairs in 1 clusters from 2 candidate types"));
         assert!(text.contains("interface A (4 fields)  A.ts:1"));
         assert!(text.contains("- 0.80 similar, 0.80 typed: A ⊂ B"));
-        let json = to_json(&records, &report);
+        let json = to_json(&records, &report, &NoJudge);
         assert_eq!(json["pairs"][0]["relationship"], "subset");
         assert_eq!(json["clusters"][0]["members"][1]["name"], "B");
     }

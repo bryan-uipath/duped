@@ -63,11 +63,15 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 
 ### Module graph and actionability
 
-Module boundaries are detected automatically from pnpm/npm/yarn workspaces, Cargo workspaces, pyproject files, and `.sln`/`.csproj` projects, and can be overridden in `duped.toml`. Each cross-module finding is tagged:
+Modules are detected from manifests under the project root: pnpm/npm/yarn workspaces and `package.json` files, Cargo workspaces and crates, `pyproject.toml` (PEP 621, Poetry, uv workspaces), and `.csproj` files with their `ProjectReference`s. Every dependency kind counts, including dev and peer dependencies. `duped.toml` can define, relocate, rewire or ignore modules. Each pair is tagged:
 
 - **importable:** the copy's module already depends on the original's module.
+- **importable-indirect:** it depends on it only through other modules, so a direct dependency is needed first.
 - **move-down:** both depend on a common lower module, so the shared type could live there.
-- **boundary:** neither direction is allowed (for example, a host-injected package). Probably deliberate.
+- **boundary:** no dependency path either way (for example, a host-injected package). Often deliberate.
+- **same-module:** both in one module; hidden by default.
+
+Each cluster also gets a suggested home: a member's module that every other member can import, or else the lowest module they all depend on.
 
 ## CLI (planned)
 
@@ -85,10 +89,11 @@ Every command supports `--json`, and every command supports `--base <ref>` to li
 
 ## Per-repo config: `duped.toml`
 
-- Module overrides and hints about where canonical types belong.
-- Include/exclude globs and test-file patterns.
+- Module overrides: `path`, `deps`, `ignore`.
+- Include/exclude globs.
 - Thresholds: minimum fields, minimum shared fields, similarity.
-- Acknowledged pairs, each with a reason.
+- Acknowledged pairs, each with a reason. Doc comments that say a type mirrors or is a structural twin of the other side count too.
+- Per-language rules: conventional members that don't count toward similarity (such as `toString`), and test-file and test-directory patterns.
 
 ## Skills
 

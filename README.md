@@ -27,8 +27,8 @@ duped types [DIR]                           # types that share most of their pro
 - `.gitignore` rules apply, even outside a git checkout.
 - Hidden files and directories (such as `.storybook/`) are skipped.
 - `node_modules`, `dist`, `build`, `out`, `coverage` and `target` are always skipped.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/` and `fixtures/`.
-- `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/` and `fixtures/`. The patterns are per language and can be changed in `duped.toml`.
+- `--exclude <glob>` (repeatable) is relative to `DIR` (`[scan] exclude` in `duped.toml` is relative to the project root) and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
 
 ### Records
 
@@ -72,5 +72,72 @@ By default it prints clusters, which are groups of types linked by qualifying pa
 | `--exclude-name <glob>` | | skip types by name or `Scope.Name` (repeatable); `*Props` is always skipped unless `--no-default-excludes` |
 | `--common-field-fraction` | `0.1` | field names on more than this fraction of types (and more than 50 of them), such as `id`, don't seed candidate pairs; they still count in scores, and a type made only of common fields is paired through its rarest one |
 | `--top` | `40` | clusters (or pairs) to show |
+| `--include-same-module` | off | also report pairs whose two types are in one module |
+| `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
 
 Every pair is evidence, not a verdict. Read both types before consolidating them.
+
+### Modules and what to do about a pair
+
+`duped` finds the project's modules and tags every pair with what the dependency graph allows:
+
+| Tag | Meaning |
+| --- | --- |
+| `importable` | one side's module already depends on the other's: `vsix can import @x/core` |
+| `importable-indirect` | it depends on it only through other modules; add a direct dependency first |
+| `move-down` | neither depends on the other, but both depend on a lower module that could hold one copy |
+| `boundary` | no dependency path either way; often deliberate |
+| `same-module` | both in one module; hidden unless `--include-same-module` |
+
+Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else the lowest module they all depend on.
+
+Modules come from manifests under the project root:
+
+- `package.json` files with a `name`, limited to the workspace's packages when `pnpm-workspace.yaml` or a root `workspaces` field declares them;
+- Cargo crates, limited to `[workspace] members` when declared; path, renamed and `workspace = true` dependencies resolve;
+- `pyproject.toml` projects (PEP 621 or Poetry; uv workspace members when declared), with names normalised;
+- `.csproj` files, with `ProjectReference`s as dependencies.
+
+Every dependency kind counts (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, dev and build dependencies), because bundled apps often list workspace packages as dev dependencies. Each file belongs to the module with the deepest root containing it; files under none belong to `(root)`. With fewer than two modules, pairs aren't tagged and nothing is hidden.
+
+The **project root** is found from `DIR`, without leaving its git checkout: the nearest directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace, or a `.sln`), else the checkout. Outside a checkout it is `DIR`. `--root` sets it explicitly.
+
+A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other type or its module.
+
+### `duped.toml`
+
+Read from the project root, or from `--config <file>`. Flags win over the file, and the file wins over the defaults; globs from both are combined.
+
+```toml
+[scan]
+exclude = ["examples", "packages/legacy"]   # relative to the project root
+include_tests = false
+
+[types]
+min_fields = 4
+min_shared = 4
+threshold = 0.7
+common_field_fraction = 0.1
+exclude_names = ["*Dto"]                   # in addition to *Props
+default_excludes = true                    # false drops the *Props exclusion
+
+[modules."@x/legacy"]
+ignore = true                              # its files fall to the enclosing module
+
+[modules.shared]
+path = "libs/shared"                       # define a module with no manifest
+
+[modules."@x/app"]
+deps = ["@x/core", "shared"]               # replace detected dependencies
+
+[[acknowledged]]
+a = "@x/canvas:DocumentAnnotationRow"      # Name, Scope.Name, or module:Name
+b = "DocumentAnnotationRow"
+reason = "canvas can't depend on evals"
+
+[rules.typescript]                         # typescript or javascript
+conventional_members = { add = ["dispose"], remove = ["toJSON"] }
+test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
+```
+
+**Conventional members** are names that don't count toward type similarity, so two unrelated classes don't look alike just because both define `toString`. The TypeScript and JavaScript defaults are `toString`, `toJSON`, `valueOf`, `constructor` and `[Symbol.iterator]`.

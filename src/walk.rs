@@ -7,12 +7,19 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 
 use crate::record::Language;
+use crate::rules::Rules;
 
 pub struct WalkOptions {
     pub include_tests: bool,
     /// Globs matched against root-relative `/` paths and their parent directories,
     /// e.g. `examples` or `src/gen/*.ts`.
     pub excludes: Vec<String>,
+    /// The same, but matched against paths relative to the project root, e.g. from `duped.toml`.
+    pub root_excludes: Vec<String>,
+    /// The scanned directory relative to the project root, e.g. `packages`; empty when equal.
+    pub root_prefix: String,
+    /// Which paths are tests, per language.
+    pub rules: Rules,
 }
 
 pub struct SourceFile {
@@ -29,6 +36,7 @@ const SKIPPED_DIRS: &[&str] = &["node_modules", "dist", "build", "out", "coverag
 /// entries are reported on stderr and skipped rather than ending the walk.
 pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
     let excludes = build_globs(&options.excludes)?;
+    let root_excludes = build_globs(&options.root_excludes)?;
     let mut files = Vec::new();
     let walker = WalkBuilder::new(root)
         .require_git(false)
@@ -50,7 +58,15 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             continue;
         };
         let rel = relative(root, &path);
-        if is_excluded(&excludes, &rel) || (!options.include_tests && is_test_path(&rel)) {
+        let is_test = options.rules.get(language).is_test_path(&rel);
+        let root_rel = match options.root_prefix.as_str() {
+            "" => rel.clone(),
+            prefix => format!("{prefix}/{rel}"),
+        };
+        if is_excluded(&excludes, &rel)
+            || is_excluded(&root_excludes, &root_rel)
+            || (!options.include_tests && is_test)
+        {
             continue;
         }
         files.push(SourceFile {
@@ -69,33 +85,6 @@ pub fn language_for(path: &Path) -> Option<Language> {
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         _ => None,
     }
-}
-
-/// Test, mock and fixture paths, e.g. `src/a.test.ts`, `src/a.mock.ts`, `src/mocks/a.ts`.
-pub fn is_test_path(rel: &str) -> bool {
-    const DIRS: &[&str] = &[
-        "test",
-        "tests",
-        "__tests__",
-        "__mocks__",
-        "mocks",
-        "fixtures",
-        "fixture",
-        "__fixtures__",
-        "__snapshots__",
-        "e2e",
-    ];
-    const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
-    let mut segments = rel.split('/').peekable();
-    while let Some(segment) = segments.next() {
-        if segments.peek().is_none() {
-            return FILE_MARKERS.iter().any(|marker| segment.contains(marker));
-        }
-        if DIRS.contains(&segment) {
-            return true;
-        }
-    }
-    false
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -139,21 +128,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_test_paths() {
-        assert!(is_test_path("src/a.test.ts"));
-        assert!(is_test_path("src/a.spec.tsx"));
-        assert!(is_test_path("src/app.e2e-spec.ts"));
-        assert!(is_test_path("src/user.mock.ts"));
-        assert!(is_test_path("src/db.fixture.ts"));
-        assert!(is_test_path("src/__tests__/a.ts"));
-        assert!(is_test_path("src/mocks/handlers.ts"));
-        assert!(is_test_path("packages/x/test/helpers.ts"));
-        assert!(!is_test_path("src/testing.ts"));
-        assert!(!is_test_path("src/latest/a.ts"));
-        assert!(!is_test_path("src/openapi-spec.ts"));
-    }
-
-    #[test]
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
@@ -192,14 +166,20 @@ mod tests {
         assert_eq!(
             rels(&WalkOptions {
                 include_tests: false,
-                excludes
+                excludes,
+                root_excludes: Vec::new(),
+                root_prefix: String::new(),
+                rules: Rules::default(),
             }),
             vec!["src/a.ts", "src/gen/deep/c.ts"]
         );
         assert_eq!(
             rels(&WalkOptions {
                 include_tests: true,
-                excludes: Vec::new()
+                excludes: Vec::new(),
+                root_excludes: Vec::new(),
+                root_prefix: String::new(),
+                rules: Rules::default(),
             })
             .len(),
             5
@@ -210,6 +190,9 @@ mod tests {
             &WalkOptions {
                 include_tests: false,
                 excludes: Vec::new(),
+                root_excludes: Vec::new(),
+                root_prefix: String::new(),
+                rules: Rules::default(),
             },
         )
         .unwrap();
