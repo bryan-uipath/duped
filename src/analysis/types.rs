@@ -7,8 +7,8 @@ use globset::GlobSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{Interner, components, intersection_len, jaccard};
-use crate::record::{Record, TypeKind, TypeRecord};
+use super::{Interner, components, jaccard, seed_pairs};
+use crate::record::{Record, TypeKind, TypeRecord, qualified};
 
 pub struct TypeOptions {
     /// Types with fewer fields are not compared.
@@ -17,7 +17,7 @@ pub struct TypeOptions {
     pub min_shared: usize,
     /// Minimum Jaccard similarity of field names.
     pub threshold: f64,
-    /// Type names to skip, e.g. `*Props`.
+    /// Type names to skip, e.g. `*Props`; matched against both `Name` and `Scope.Name`.
     pub exclude_names: GlobSet,
     /// Field names on more than this fraction of types (and more than
     /// [`COMMON_FIELD_FLOOR`] of them) don't seed candidate pairs, but still score.
@@ -25,13 +25,13 @@ pub struct TypeOptions {
 }
 
 /// A field name is only "common" once it appears on more types than this, whatever the fraction.
-pub const COMMON_FIELD_FLOOR: usize = 50;
+const COMMON_FIELD_FLOOR: usize = 50;
 
 /// How the first type's field names relate to the second's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Relationship {
-    /// Same field names and types.
+    /// Same field names and compatible types.
     Exact,
     /// The first has every field of the second, and more.
     Superset,
@@ -48,7 +48,7 @@ pub struct TypePair {
     pub b: usize,
     /// Jaccard similarity of field names.
     pub similarity: f64,
-    /// Jaccard similarity of (name, normalised type) pairs.
+    /// The same, counting a shared field only when its types match.
     pub typed: f64,
     /// Shared field names, in the first type's order.
     pub shared: Vec<String>,
@@ -76,7 +76,7 @@ pub struct TypeReport {
 }
 
 /// Which kinds are comparable: object shapes with each other, enums and unions with each other.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     Shape,
     Members,
@@ -87,52 +87,64 @@ struct Candidate<'r> {
     group: Group,
     /// Field names in declaration order, deduplicated.
     fields: Vec<&'r str>,
-    /// Sorted ids of field names.
+    /// Sorted field-name ids.
     names: Vec<u32>,
-    /// Sorted ids of `name: normalised type`.
-    typed: Vec<u32>,
+    /// Normalised type id of each entry in `names`; `None` when unannotated.
+    types: Vec<Option<u32>>,
 }
 
 pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeReport {
-    let typed_keys: Vec<Vec<String>> = records.iter().map(typed_keys).collect();
-    let mut names = Interner::default();
-    let mut typed_ids = Interner::default();
+    let mut name_ids = Interner::default();
+    let mut type_ids = Interner::default();
     let mut candidates = Vec::new();
     for (index, record) in records.iter().enumerate() {
         let Record::Type(t) = record else { continue };
         let Some(group) = group_of(t.kind) else {
             continue;
         };
-        if options.exclude_names.is_match(&t.name) {
+        if is_excluded(t, &options.exclude_names) {
             continue;
         }
+        // First declaration of each name wins.
         let mut fields: Vec<&str> = Vec::new();
+        let mut keyed: Vec<(u32, Option<u32>)> = Vec::new();
         for field in &t.fields {
-            if !fields.contains(&field.name.as_str()) {
-                fields.push(&field.name);
+            if fields.contains(&field.name.as_str()) {
+                continue;
             }
+            fields.push(&field.name);
+            let ty = field
+                .ty
+                .as_deref()
+                .map(|ty| type_ids.id(normalize_type(ty)));
+            keyed.push((name_ids.id(field.name.as_str()), ty));
         }
         if fields.len() < options.min_fields {
             continue;
         }
-        let mut name_ids: Vec<u32> = fields.iter().map(|f| names.id(f)).collect();
-        name_ids.sort_unstable();
-        let mut typed: Vec<u32> = typed_keys[index].iter().map(|k| typed_ids.id(k)).collect();
-        typed.sort_unstable();
-        typed.dedup();
+        keyed.sort_unstable_by_key(|&(name, _)| name);
+        let (names, types) = keyed.into_iter().unzip();
         candidates.push(Candidate {
             record: index,
             group,
             fields,
-            names: name_ids,
-            typed,
+            names,
+            types,
         });
     }
 
     let mut pairs = Vec::new();
     for group in [Group::Shape, Group::Members] {
         let members: Vec<&Candidate> = candidates.iter().filter(|c| c.group == group).collect();
-        score_group(&members, options, &mut pairs);
+        let sets: Vec<&[u32]> = members.iter().map(|c| c.names.as_slice()).collect();
+        seed_pairs(
+            &sets,
+            COMMON_FIELD_FLOOR,
+            options.common_field_fraction,
+            |i, j| {
+                pairs.extend(score_pair(members[i], members[j], options));
+            },
+        );
     }
     pairs.sort_by(|x, y| {
         y.similarity
@@ -150,60 +162,36 @@ pub fn find_duplicate_types(records: &[Record], options: &TypeOptions) -> TypeRe
     }
 }
 
-/// Score every pair in one comparable group that shares at least one uncommon field.
-fn score_group(members: &[&Candidate], options: &TypeOptions, pairs: &mut Vec<TypePair>) {
-    let mut postings: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (i, candidate) in members.iter().enumerate() {
-        for &name in &candidate.names {
-            postings.entry(name).or_default().push(i);
-        }
-    }
-    let common_limit = COMMON_FIELD_FLOOR
-        .max((options.common_field_fraction * members.len() as f64).ceil() as usize);
-
-    // `seen[j] == i + 1` marks `j` as already queued for `i`, without clearing between rows.
-    let mut seen = vec![0usize; members.len()];
-    let mut queue = Vec::new();
-    for (i, a) in members.iter().enumerate() {
-        queue.clear();
-        for name in &a.names {
-            let posting = &postings[name];
-            if posting.len() > common_limit {
-                continue;
-            }
-            for &j in posting.iter().filter(|&&j| j > i) {
-                if seen[j] != i + 1 {
-                    seen[j] = i + 1;
-                    queue.push(j);
-                }
-            }
-        }
-        for &j in &queue {
-            if let Some(pair) = score_pair(a, members[j], options) {
-                pairs.push(pair);
-            }
-        }
-    }
+fn is_excluded(t: &TypeRecord, globs: &GlobSet) -> bool {
+    globs.is_match(&t.name)
+        || (t.scope.is_some() && globs.is_match(qualified(t.scope.as_deref(), &t.name)))
 }
 
 fn score_pair(a: &Candidate, b: &Candidate, options: &TypeOptions) -> Option<TypePair> {
-    let (small, large) = (
-        a.names.len().min(b.names.len()),
-        a.names.len().max(b.names.len()),
-    );
-    // Jaccard can't exceed the size ratio, so skip pairs that can never qualify.
-    if (small as f64) < options.threshold * large as f64 {
-        return None;
+    // Walk both sorted name lists; a shared field's types match when equal or either is unknown.
+    let (mut i, mut j, mut shared, mut matched) = (0, 0, 0, 0);
+    while i < a.names.len() && j < b.names.len() {
+        match a.names[i].cmp(&b.names[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += 1;
+                let (ta, tb) = (a.types[i], b.types[j]);
+                if ta.is_none() || tb.is_none() || ta == tb {
+                    matched += 1;
+                }
+                i += 1;
+                j += 1;
+            }
+        }
     }
-    let shared = intersection_len(&a.names, &b.names);
     let similarity = jaccard(a.names.len(), b.names.len(), shared);
     if shared < options.min_shared || similarity < options.threshold {
         return None;
     }
-    let typed_shared = intersection_len(&a.typed, &b.typed);
-    let typed = jaccard(a.typed.len(), b.typed.len(), typed_shared);
+    let typed = jaccard(a.names.len(), b.names.len(), matched);
     let relationship = if shared == a.names.len() && shared == b.names.len() {
-        if typed_shared == a.typed.len() && typed_shared == b.typed.len() {
+        if matched == shared {
             Relationship::Exact
         } else {
             Relationship::Overlap
@@ -286,36 +274,95 @@ fn group_of(kind: TypeKind) -> Option<Group> {
     }
 }
 
-/// `name: type` keys for typed scoring; non-type records yield nothing.
-fn typed_keys(record: &Record) -> Vec<String> {
-    let Record::Type(t) = record else {
-        return Vec::new();
-    };
-    t.fields
-        .iter()
-        .map(|f| {
-            format!(
-                "{}: {}",
-                f.name,
-                normalize_type(f.ty.as_deref().unwrap_or(""))
-            )
-        })
-        .collect()
+/// A comparison key for a type: `string|undefined`, `string | null` and `string` are equal,
+/// as are `Map<string,number>` and `Map<string, number>`. Nullish members are only
+/// dropped from a top-level union, so `() => string | undefined` keeps its return type.
+fn normalize_type(ty: &str) -> String {
+    let compact = compact_whitespace(ty);
+    let parts = split_top_level(&compact);
+    if parts.len() == 1 {
+        return compact;
+    }
+    let mut kept: Vec<&str> = parts
+        .into_iter()
+        .filter(|p| !matches!(*p, "undefined" | "null"))
+        .collect();
+    if kept.is_empty() {
+        return compact;
+    }
+    kept.sort_unstable();
+    kept.dedup();
+    kept.join("|")
 }
 
-/// `string | undefined` and `string` compare equal; whitespace never matters.
-pub fn normalize_type(ty: &str) -> String {
-    let mut ty = ty.split_whitespace().collect::<Vec<_>>().join(" ");
-    loop {
-        let trimmed = ty
-            .strip_suffix("| undefined")
-            .or_else(|| ty.strip_suffix("| null"))
-            .map(|t| t.trim_end().to_string());
-        match trimmed {
-            Some(t) => ty = t,
-            None => return ty,
+/// Drop whitespace unless it separates two identifier characters (`keyof T`),
+/// leaving quoted literals untouched.
+fn compact_whitespace(text: &str) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = String::with_capacity(text.len());
+    let mut quote = None;
+    let mut escaped = false;
+    let mut pending_space = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space && ident(c) && out.chars().last().is_some_and(ident) {
+            out.push(' ');
+        }
+        pending_space = false;
+        if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Split on `|` outside brackets and quotes; a top-level `=>` ends splitting, since
+/// everything after it is one return type.
+fn split_top_level(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start, mut quote) = (0i32, 0, None);
+    let bytes = text.as_bytes();
+    for (i, c) in text.char_indices() {
+        if let Some(q) = quote {
+            if c == q && (i == 0 || bytes[i - 1] != b'\\') {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => quote = Some(c),
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if i > 0 && bytes[i - 1] == b'=' => {
+                if depth == 0 {
+                    return vec![text];
+                }
+            }
+            '>' | ')' | ']' | '}' => depth -= 1,
+            '|' if depth == 0 => {
+                parts.push(&text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
         }
     }
+    parts.push(&text[start..]);
+    parts.retain(|p| !p.is_empty());
+    parts
 }
 
 // ----- output -----
@@ -351,7 +398,7 @@ pub fn render_text(
                 relation_text(records, pair)
             )
             .ok();
-            for &index in [pair.a, pair.b].iter() {
+            for index in [pair.a, pair.b] {
                 writeln!(out, "   {}", member_line(type_at(records, index))).ok();
             }
         }
@@ -448,11 +495,8 @@ fn type_at(records: &[Record], index: usize) -> &TypeRecord {
     }
 }
 
-fn qualified(t: &TypeRecord) -> String {
-    match &t.scope {
-        Some(scope) => format!("{scope}.{}", t.name),
-        None => t.name.clone(),
-    }
+fn display_name(t: &TypeRecord) -> String {
+    qualified(t.scope.as_deref(), &t.name)
 }
 
 /// The kind's serialized name, e.g. `interface`.
@@ -468,7 +512,7 @@ fn member_line(t: &TypeRecord) -> String {
     format!(
         "{} {} ({} fields)  {}:{}",
         kind_name(t.kind),
-        qualified(t),
+        display_name(t),
         t.fields.len(),
         t.location.file,
         t.location.start_line
@@ -485,8 +529,8 @@ fn relation_text(records: &[Record], pair: &TypePair) -> String {
     };
     format!(
         "{} {symbol} {}",
-        qualified(type_at(records, pair.a)),
-        qualified(type_at(records, pair.b))
+        display_name(type_at(records, pair.a)),
+        display_name(type_at(records, pair.b))
     )
 }
 
@@ -533,11 +577,7 @@ mod tests {
                     name: name.to_string(),
                     ty,
                     optional: false,
-                    kind: if ty_is_member(kind) {
-                        FieldKind::Member
-                    } else {
-                        FieldKind::Property
-                    },
+                    kind: FieldKind::Property,
                 }
             })
             .collect();
@@ -556,10 +596,6 @@ mod tests {
             },
             doc: None,
         })
-    }
-
-    fn ty_is_member(kind: TypeKind) -> bool {
-        matches!(kind, TypeKind::Enum | TypeKind::Union)
     }
 
     fn names<'r>(records: &'r [Record], pair: &TypePair) -> (&'r str, &'r str) {
@@ -754,11 +790,116 @@ mod tests {
     #[test]
     fn normalizes_types() {
         assert_eq!(normalize_type("string  |  undefined"), "string");
-        assert_eq!(normalize_type("Foo | null | undefined"), "Foo");
+        assert_eq!(normalize_type("string|undefined"), "string");
+        assert_eq!(normalize_type("undefined | Foo | null"), "Foo");
+        assert_eq!(normalize_type("B | A"), normalize_type("A|B"));
         assert_eq!(
             normalize_type("Map<\n string,\n number>"),
-            "Map< string, number>"
+            "Map<string,number>"
         );
+        assert_eq!(normalize_type("keyof  T"), "keyof T");
+        assert_eq!(normalize_type("'a  b' | 'c'"), "'a  b'|'c'");
+        // The union belongs to the return type, so it stays.
+        assert_eq!(
+            normalize_type("() => string | undefined"),
+            "()=>string|undefined"
+        );
+        assert_eq!(
+            normalize_type("Array<() => void> | null"),
+            "Array<()=>void>"
+        );
+        assert_eq!(normalize_type("null"), "null");
+    }
+
+    #[test]
+    fn unannotated_fields_match_any_type() {
+        let records = vec![
+            ty("Cls", TypeKind::Class, &["a", "b", "c", "d"]),
+            ty(
+                "Iface",
+                TypeKind::Interface,
+                &["a: 1", "b: 2", "c: 3", "d: 4"],
+            ),
+        ];
+        let pair = &find_duplicate_types(&records, &options()).pairs[0];
+        assert_eq!((pair.typed, pair.relationship), (1.0, Relationship::Exact));
+    }
+
+    #[test]
+    fn duplicate_names_keep_the_first_declaration() {
+        let records = vec![
+            ty(
+                "A",
+                TypeKind::Interface,
+                &["a: x", "a: y", "b: x", "c: x", "d: x"],
+            ),
+            ty("B", TypeKind::Interface, &["a: x", "b: x", "c: x", "d: x"]),
+        ];
+        let pair = &find_duplicate_types(&records, &options()).pairs[0];
+        assert_eq!(
+            (pair.similarity, pair.typed, pair.relationship),
+            (1.0, 1.0, Relationship::Exact)
+        );
+    }
+
+    #[test]
+    fn boundary_similarity_qualifies() {
+        // 14/25 = 0.56 exactly; a float-multiplied size check would reject it.
+        let fields: Vec<String> = (0..25).map(|i| format!("f{i}")).collect();
+        let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+        let records = vec![
+            ty("Small", TypeKind::Interface, &fields[..14]),
+            ty("Big", TypeKind::Interface, &fields),
+        ];
+        let report = find_duplicate_types(
+            &records,
+            &TypeOptions {
+                threshold: 0.56,
+                ..options()
+            },
+        );
+        assert_eq!(report.pairs.len(), 1);
+    }
+
+    #[test]
+    fn copies_made_only_of_common_fields_are_found() {
+        // 60 copies of one shape: every field is common, but the copies are still exact pairs.
+        let records: Vec<Record> = (0..60)
+            .map(|i| {
+                ty(
+                    &format!("Rec{i}"),
+                    TypeKind::Interface,
+                    &["id", "name", "createdAt", "updatedAt"],
+                )
+            })
+            .collect();
+        let report = find_duplicate_types(&records, &options());
+        assert_eq!(
+            (report.pairs.len(), report.clusters.len()),
+            (60 * 59 / 2, 1)
+        );
+    }
+
+    #[test]
+    fn excludes_by_scoped_name_too() {
+        let mut scoped = ty("Scoped", TypeKind::Interface, &["a", "b", "c", "d"]);
+        if let Record::Type(t) = &mut scoped {
+            t.scope = Some("Api".into());
+        }
+        let records = vec![
+            scoped,
+            ty("Other", TypeKind::Interface, &["a", "b", "c", "d"]),
+        ];
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("Api.*").unwrap());
+        let report = find_duplicate_types(
+            &records,
+            &TypeOptions {
+                exclude_names: builder.build().unwrap(),
+                ..options()
+            },
+        );
+        assert!(report.pairs.is_empty());
     }
 
     #[test]

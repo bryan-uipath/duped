@@ -56,21 +56,21 @@ Overload signatures fold into their implementation, so each function appears onc
 `duped types` compares every object-shaped type (interfaces, object type aliases, classes) with every other, and every enum or literal union with every other. It reports pairs whose field names overlap, whatever the types are called.
 
 - **similarity:** Jaccard similarity of field names: shared names ÷ all names.
-- **typed:** the same over `name: type` pairs, so it drops when shared fields have different types. `T | undefined`, `T | null` and `T` count as the same type.
+- **typed:** the same, but a shared field only counts when its types match, so it drops when shared fields have different types. Spacing doesn't matter, union order doesn't matter, and `T | undefined`, `T | null` and `T` count as the same type. A field with no type annotation matches any type.
 - **relationship:**
   - `exact` (`A = B`): same names and types.
   - `superset` (`A ⊃ B`) or `subset` (`A ⊂ B`): one has every field of the other, and more. This is how a redeclared union that has fallen behind the original shows up.
   - `overlap` (`A ~ B`): anything else, including same names with different types.
 
-By default it prints clusters, which are groups of types linked by qualifying pairs, largest first. Each cluster lists its members with `file:line`, the fields they all share, and its best pairs. `--pairs` prints a flat ranked list instead, and `--json` prints every pair and cluster.
+By default it prints clusters, which are groups of types linked by qualifying pairs, largest first. Each cluster lists its members with `file:line`, the fields they all share, and its best pairs. `--pairs` prints a flat ranked list instead, and `--json` prints every pair and cluster (ignoring `--top` and `--pairs`).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--threshold` | `0.7` | minimum similarity |
 | `--min-fields` | `4` | skip types with fewer fields |
 | `--min-shared` | `4` | a pair needs at least this many shared field names |
-| `--exclude-name <glob>` | | skip types by name (repeatable); `*Props` is always skipped unless `--no-default-excludes` |
-| `--common-field-fraction` | `0.1` | field names on more than this fraction of types (and more than 50 of them), such as `id`, don't seed candidate pairs; they still count in scores |
+| `--exclude-name <glob>` | | skip types by name or `Scope.Name` (repeatable); `*Props` is always skipped unless `--no-default-excludes` |
+| `--common-field-fraction` | `0.1` | field names on more than this fraction of types (and more than 50 of them), such as `id`, don't seed candidate pairs; they still count in scores, and a type made only of common fields is paired through its rarest one |
 | `--top` | `40` | clusters (or pairs) to show |
 
 Every pair is evidence, not a verdict. Read both types before consolidating them.

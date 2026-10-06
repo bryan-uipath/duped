@@ -44,7 +44,7 @@ struct TypesArgs {
     /// Minimum similarity of field names (Jaccard, 0–1).
     #[arg(long, default_value_t = 0.7, value_parser = fraction)]
     threshold: f64,
-    /// Skip types whose name matches this glob (repeatable), in addition to `*Props`.
+    /// Skip types whose name (or `Scope.Name`) matches this glob (repeatable), in addition to `*Props`.
     #[arg(long = "exclude-name")]
     exclude_names: Vec<String>,
     /// Don't apply the default `*Props` name exclusion.
@@ -59,7 +59,7 @@ struct TypesArgs {
     /// How many clusters (or pairs) to show.
     #[arg(long, default_value_t = 40)]
     top: usize,
-    /// Emit every pair and cluster as JSON (ignores `--top`).
+    /// Emit every pair and cluster as JSON (ignores `--top` and `--pairs`).
     #[arg(long)]
     json: bool,
 }
@@ -95,24 +95,28 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     let (Command::Extract(scan) | Command::Index(scan) | Command::Types(TypesArgs { scan, .. })) =
         &cli.command;
+    // Validate options before scanning or truncating `--out`.
+    let type_options = match &cli.command {
+        Command::Types(args) => Some(analysis::types::TypeOptions {
+            min_fields: args.min_fields,
+            min_shared: args.min_shared,
+            threshold: args.threshold,
+            exclude_names: name_globs(&args.exclude_names, !args.no_default_excludes)?,
+            common_field_fraction: args.common_field_fraction,
+        }),
+        _ => None,
+    };
     let records = scan_records(scan)?;
     let mut out = output(scan)?;
-    match &cli.command {
-        Command::Extract(_) => {
+    match (&cli.command, type_options) {
+        (Command::Extract(_), _) => {
             for record in &records {
                 serde_json::to_writer(&mut out, record)?;
                 out.write_all(b"\n")?;
             }
         }
-        Command::Index(_) => out.write_all(index::render(&records).as_bytes())?,
-        Command::Types(args) => {
-            let options = analysis::types::TypeOptions {
-                min_fields: args.min_fields,
-                min_shared: args.min_shared,
-                threshold: args.threshold,
-                exclude_names: name_globs(&args.exclude_names, !args.no_default_excludes)?,
-                common_field_fraction: args.common_field_fraction,
-            };
+        (Command::Index(_), _) => out.write_all(index::render(&records).as_bytes())?,
+        (Command::Types(args), Some(options)) => {
             let report = analysis::types::find_duplicate_types(&records, &options);
             if args.json {
                 serde_json::to_writer(&mut out, &analysis::types::to_json(&records, &report))?;
@@ -123,6 +127,7 @@ fn run(cli: Cli) -> Result<()> {
                 out.write_all(text.as_bytes())?;
             }
         }
+        (Command::Types(_), None) => unreachable!("type options are built for `types`"),
     }
     out.flush()?;
     Ok(())

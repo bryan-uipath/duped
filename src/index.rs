@@ -2,7 +2,9 @@
 
 use std::fmt::Write;
 
-use crate::record::{FieldKind, FunctionRecord, Record, TypeKind, TypeRecord, format_params};
+use crate::record::{
+    FieldKind, FunctionRecord, Record, TypeKind, TypeRecord, format_params, qualified,
+};
 
 /// Fields shown per type before the list is cut off with `+N more`.
 const MAX_FIELDS: usize = 16;
@@ -104,13 +106,6 @@ fn finish(mut line: String, doc: Option<&str>, start_line: usize, exported: bool
     let local = if exported { "" } else { ", local" };
     write!(line, " (L{start_line}{local})").ok();
     line
-}
-
-fn qualified(scope: Option<&str>, name: &str) -> String {
-    match scope {
-        Some(scope) => format!("{scope}.{name}"),
-        None => name.to_string(),
-    }
 }
 
 #[cfg(test)]
