@@ -55,7 +55,7 @@ TypeScript overload signatures fold into their implementation, so each function 
 ### C#
 
 - Every class, struct, interface, record, enum and delegate is extracted, including nested types. `scope` is the enclosing type chain (`Outer.Inner`); namespaces are not part of it.
-- Fields are properties, fields (one per declarator), events and methods. A record's positional parameters are properties. Constructors, finalizers, operators and indexers are left out.
+- Fields are properties, fields (one per declarator), events and methods; all but methods have `kind: "property"`. A record's positional parameters are properties. Constructors, finalizers, operators and indexers are left out.
 - Function records are methods with a body, including default interface methods; abstract and interface signatures are fields only. Overloads with bodies stay separate.
 - `exported` means `public` (or an interface member without an access modifier, or an explicit interface implementation) on an exported type. `internal` is `false`.
 - Parameter modifiers stay in the type: `this string`, `out int`, `params int[]`.
