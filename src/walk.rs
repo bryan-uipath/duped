@@ -91,7 +91,9 @@ pub fn is_test_path(rel: &str) -> bool {
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
-            return FILE_MARKERS.iter().any(|marker| segment.contains(marker));
+            // Rust's out-of-line `#[cfg(test)] mod tests;` lives in `tests.rs` / `test.rs`.
+            return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
+                || matches!(segment, "tests.rs" | "test.rs");
         }
         if DIRS.contains(&segment) {
             return true;
@@ -151,6 +153,9 @@ mod tests {
         assert!(is_test_path("src/mocks/handlers.ts"));
         assert!(is_test_path("packages/x/test/helpers.ts"));
         assert!(is_test_path("benches/parse.rs"));
+        assert!(is_test_path("src/parser/tests.rs"));
+        assert!(is_test_path("src/test.rs"));
+        assert!(!is_test_path("src/contest.rs"));
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));

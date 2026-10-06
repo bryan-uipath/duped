@@ -26,7 +26,7 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 - `.gitignore` rules apply, even outside a git checkout.
 - Hidden files and directories (such as `.storybook/`) are skipped.
 - `node_modules`, `dist`, `build`, `out`, `coverage` and `target` are always skipped.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`, and Rust `tests.rs` / `test.rs` module files.
 - `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
 
 ### Records
@@ -53,8 +53,8 @@ Overload signatures fold into their implementation, so each function appears onc
 ### Rust
 
 - **Functions:** free `fn`s, `impl` methods, trait methods with a default body, and `extern` functions. Receivers (`self`, `&mut self`) are left out of `params`.
-- **`scope`:** the inline `mod` chain plus the impl or trait type, e.g. `parser.Tokenizer`. `impl<T> Display for Foo<T>` is scoped to `Foo`.
+- **`scope`:** the inline `mod` chain plus the impl or trait type, e.g. `parser.Tokenizer`. `impl<T> Display for Foo<T>` is scoped to `Foo`. Impls without a named target are scoped to the trait: `impl<T> Shout for T`, `for (A, B)` and `for [u8; 4]` give `Shout`, and `dyn Any` gives `Any`.
 - **Types:** structs and unions (`struct`; tuple fields are named `0`, `1`, …), enums (variants become members), traits (`trait`; methods, associated types and consts become fields; supertraits go in `extends`) and type aliases (`alias`). Impl methods are not added to a struct's fields.
-- **`exported`:** plain `pub` only; `pub(crate)` and `pub(super)` count as internal. Methods in `impl Trait for X` take their visibility from the trait, so they're exported unless `X` is a private type defined in the same file. Inherent methods also need `pub`.
-- **`doc` and `start_line`:** `///` and `/** */` comments directly above the item, skipping attributes such as `#[derive]`; `start_line` is the first attribute.
-- **Skipped:** `#[cfg(test)]` items, `#[test]` and `#[…::test]` functions, and macros.
+- **`exported`:** plain `pub` only; `pub(crate)` and `pub(super)` count as internal. Methods in `impl Trait for X` have no `pub` of their own: they're exported unless `X` or the trait is private and defined in the same file (`super::`, `self::` and `crate::` paths are resolved within the file). Inherent methods also need `pub`.
+- **`doc` and `start_line`:** `///` and `/** */` comments above the item, skipping attributes such as `#[derive]`, blank lines and plain `//` comments, as rustc does; `start_line` is the first attribute.
+- **Skipped:** files starting with `#![cfg(test)]`, items under `#[cfg(test)]` or `#[cfg(all(test, …))]`, `#[test]` and `#[…::test(…)]` functions, and macros. These are skipped even with `--include-tests`, which only affects which files are walked.
