@@ -729,7 +729,7 @@ fn has_token(node: Node, token: &str) -> bool {
 }
 
 /// Method field type, e.g. `(id: string, force?: boolean) => void`.
-fn signature(params: &[Param], returns: Option<&str>) -> String {
+pub(crate) fn signature(params: &[Param], returns: Option<&str>) -> String {
     format!(
         "({}) => {}",
         format_params(params),
@@ -737,7 +737,7 @@ fn signature(params: &[Param], returns: Option<&str>) -> String {
     )
 }
 
-fn member(name: &str) -> Field {
+pub(crate) fn member(name: &str) -> Field {
     Field {
         name: name.to_string(),
         ty: None,
@@ -750,7 +750,7 @@ fn unquote(text: &str) -> &str {
     text.trim_matches(|c| c == '\'' || c == '"' || c == '`')
 }
 
-fn join_scope(scope: &[String]) -> Option<String> {
+pub(crate) fn join_scope(scope: &[String]) -> Option<String> {
     (!scope.is_empty()).then(|| scope.join("."))
 }
 
