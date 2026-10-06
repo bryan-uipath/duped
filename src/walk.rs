@@ -16,8 +16,9 @@ pub struct WalkOptions {
     pub excludes: Vec<String>,
     /// The same, but matched against paths relative to the project root, e.g. from `duped.toml`.
     pub root_excludes: Vec<String>,
-    /// The scanned directory relative to the project root, e.g. `packages`; empty when equal.
-    pub root_prefix: String,
+    /// The scanned directory relative to the project root, e.g. `packages` (empty when equal);
+    /// `None` when it is outside the root, so `root_excludes` don't apply.
+    pub root_prefix: Option<String>,
     /// Which paths are tests, per language.
     pub rules: Rules,
 }
@@ -30,7 +31,8 @@ pub struct SourceFile {
 }
 
 /// Directories never worth parsing, even in repos without a `.gitignore`.
-const SKIPPED_DIRS: &[&str] = &["node_modules", "dist", "build", "out", "coverage", "target"];
+pub(crate) const SKIPPED_DIRS: &[&str] =
+    &["node_modules", "dist", "build", "out", "coverage", "target"];
 
 /// Walk `root`, honouring `.gitignore` even outside a git checkout. Unreadable
 /// entries are reported on stderr and skipped rather than ending the walk.
@@ -59,12 +61,13 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
         };
         let rel = relative(root, &path);
         let is_test = options.rules.get(language).is_test_path(&rel);
-        let root_rel = match options.root_prefix.as_str() {
-            "" => rel.clone(),
-            prefix => format!("{prefix}/{rel}"),
+        let root_rel = match options.root_prefix.as_deref() {
+            None => None,
+            Some("") => Some(rel.clone()),
+            Some(prefix) => Some(format!("{prefix}/{rel}")),
         };
         if is_excluded(&excludes, &rel)
-            || is_excluded(&root_excludes, &root_rel)
+            || root_rel.is_some_and(|r| is_excluded(&root_excludes, &r))
             || (!options.include_tests && is_test)
         {
             continue;
@@ -168,7 +171,7 @@ mod tests {
                 include_tests: false,
                 excludes,
                 root_excludes: Vec::new(),
-                root_prefix: String::new(),
+                root_prefix: None,
                 rules: Rules::default(),
             }),
             vec!["src/a.ts", "src/gen/deep/c.ts"]
@@ -178,7 +181,7 @@ mod tests {
                 include_tests: true,
                 excludes: Vec::new(),
                 root_excludes: Vec::new(),
-                root_prefix: String::new(),
+                root_prefix: None,
                 rules: Rules::default(),
             })
             .len(),
@@ -191,7 +194,7 @@ mod tests {
                 include_tests: false,
                 excludes: Vec::new(),
                 root_excludes: Vec::new(),
-                root_prefix: String::new(),
+                root_prefix: None,
                 rules: Rules::default(),
             },
         )

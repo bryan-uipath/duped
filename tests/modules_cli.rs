@@ -183,7 +183,7 @@ fn include_flags_show_hidden_pairs() {
 fn config_acknowledges_overrides_and_sets_thresholds() {
     let config = r#"
 [types]
-min_fields = 4
+min_fields = 5
 
 [modules."@m/web"]
 deps = ["@m/app"]
@@ -194,7 +194,16 @@ b = "HostAuth"
 reason = "app is a demo"
 "#;
     let root = workspace("config", Some(config));
-    let json = types_json(&root, &[]);
+    // `min_fields = 5` drops every 4-field type, so nothing qualifies.
+    assert!(
+        types_json(&root, &[])["pairs"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // A flag beats the config.
+    let json = types_json(&root, &["--min-fields", "4"]);
     // web → app now, so the edge pair is importable; the auth pair is acknowledged.
     assert_eq!(
         tags(&json),
@@ -207,6 +216,8 @@ reason = "app is a demo"
         root.join("packages").to_str().unwrap(),
         "--root",
         root.to_str().unwrap(),
+        "--min-fields",
+        "4",
     ]);
     assert!(text.contains("Modules: 6 modules."), "{text}");
     assert!(
@@ -215,10 +226,6 @@ reason = "app is a demo"
     );
     assert!(text.contains("[@m/app] app/src/edge.ts:1"), "{text}");
     assert!(text.contains("Hidden pairs: 1 same-module (--include-same-module), 2 acknowledged (--include-acknowledged)."), "{text}");
-
-    // A flag beats the config.
-    let strict = types_json(&root, &["--min-fields", "5"]);
-    assert!(strict["pairs"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -238,4 +245,75 @@ fn bad_config_fails_before_writing_output() {
     assert!(!status.status.success());
     assert!(String::from_utf8_lossy(&status.stderr).contains("[modules.nope]"));
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "keep");
+}
+
+#[test]
+fn scanning_one_package_of_a_workspace_hides_nothing() {
+    let root = workspace("one-package", None);
+    let scan = root.join("packages/base");
+    let text = duped(&[
+        "types",
+        scan.to_str().unwrap(),
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    // Both types are in `@m/base`: pairs aren't tagged, so the same-module pair is shown.
+    assert!(text.contains("One = Two"), "{text}");
+    assert!(
+        text.contains("the scanned types are in fewer than 2"),
+        "{text}"
+    );
+    assert!(!text.contains("Hidden pairs"), "{text}");
+}
+
+#[test]
+fn a_stray_example_package_does_not_hide_the_main_package() {
+    let root = std::env::temp_dir().join(format!("duped-modules-e2e-stray-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for (path, source) in [
+        ("package.json", r#"{"name":"lib"}"#),
+        ("examples/demo/package.json", r#"{"name":"demo"}"#),
+        (
+            "src/a.ts",
+            "export interface One { p: 1; q: 2; r: 3; s: 4 }",
+        ),
+        (
+            "src/b.ts",
+            "export interface Two { p: 1; q: 2; r: 3; s: 4 }",
+        ),
+    ] {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
+    }
+    let text = duped(&[
+        "types",
+        root.to_str().unwrap(),
+        "--root",
+        root.to_str().unwrap(),
+    ]);
+    assert!(text.contains("One = Two"), "{text}");
+}
+
+#[test]
+fn root_excludes_do_not_apply_to_a_scan_outside_the_root() {
+    let root = workspace("outside", None);
+    let config_dir = root.join("packages/base");
+    std::fs::write(
+        config_dir.join("duped.toml"),
+        "[scan]\nexclude = [\"src\"]\n",
+    )
+    .unwrap();
+    // The scan is the whole workspace; the root (and its `src` exclude) is one package.
+    let scan = root.join("packages");
+    let records = duped(&[
+        "extract",
+        scan.to_str().unwrap(),
+        "--root",
+        config_dir.to_str().unwrap(),
+    ]);
+    assert!(records.contains("\"name\":\"AuthContext\""), "{records}");
+    // Scanned from inside the root, the exclude applies.
+    let inside = duped(&["extract", config_dir.to_str().unwrap()]);
+    assert!(!inside.contains("\"name\":\"One\""), "{inside}");
 }

@@ -86,23 +86,25 @@ Every pair is evidence, not a verdict. Read both types before consolidating them
 | `importable` | one side's module already depends on the other's: `vsix can import @x/core` |
 | `importable-indirect` | it depends on it only through other modules; add a direct dependency first |
 | `move-down` | neither depends on the other, but both depend on a lower module that could hold one copy |
-| `boundary` | no dependency path either way; often deliberate |
+| `boundary` | no dependency path either way, or both sides are under no module; often deliberate |
 | `same-module` | both in one module; hidden unless `--include-same-module` |
 
 Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else the lowest module they all depend on.
 
 Modules come from manifests under the project root:
 
-- `package.json` files with a `name`, limited to the workspace's packages when `pnpm-workspace.yaml` or a root `workspaces` field declares them;
-- Cargo crates, limited to `[workspace] members` when declared; path, renamed and `workspace = true` dependencies resolve;
+- `package.json` files with a `name`, limited to the workspace's packages when `pnpm-workspace.yaml` or a root `workspaces` field declares them; `workspace:` and `npm:` aliases resolve;
+- Cargo crates, limited to `[workspace] members` and the crates their path dependencies point at, as Cargo does; path, renamed and `workspace = true` dependencies resolve;
 - `pyproject.toml` projects (PEP 621 or Poetry; uv workspace members when declared), with names normalised;
 - `.csproj` files, with `ProjectReference`s as dependencies.
 
-Every dependency kind counts (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, dev and build dependencies), because bundled apps often list workspace packages as dev dependencies. Each file belongs to the module with the deepest root containing it; files under none belong to `(root)`. With fewer than two modules, pairs aren't tagged and nothing is hidden.
+Every dependency kind counts (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, dev and build dependencies), because bundled apps often list workspace packages as dev dependencies. Manifests in one directory (say a `package.json` beside a `Cargo.toml`) are one module, named after the first in that order; the other names still work in `duped.toml`. Each file belongs to the module with the deepest root containing it; files under none belong to `(root)`.
+
+When the scanned types span fewer than two modules, for example when you scan one package of a workspace, pairs aren't tagged and none are hidden as `same-module`. Acknowledgements still apply.
 
 The **project root** is found from `DIR`, without leaving its git checkout: the nearest directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace, or a `.sln`), else the checkout. Outside a checkout it is `DIR`. `--root` sets it explicitly.
 
-A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other type or its module.
+A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
 ### `duped.toml`
 
@@ -122,7 +124,7 @@ exclude_names = ["*Dto"]                   # in addition to *Props
 default_excludes = true                    # false drops the *Props exclusion
 
 [modules."@x/legacy"]
-ignore = true                              # its files fall to the enclosing module
+ignore = true                              # its files fall to the enclosing module; paths through it stay
 
 [modules.shared]
 path = "libs/shared"                       # define a module with no manifest

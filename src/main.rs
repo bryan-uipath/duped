@@ -114,11 +114,12 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     let (Command::Extract(scan) | Command::Index(scan) | Command::Types(TypesArgs { scan, .. })) =
         &cli.command;
+    let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
             .canonicalize()
             .with_context(|| format!("cannot open --root {}", root.display()))?,
-        None => config::project_root(&scan.path)?,
+        None => config::project_root(&base),
     };
     let config = config::load(&root, scan.config.as_deref())?;
     let rules = Rules::with_config(&config.rules)?;
@@ -130,7 +131,6 @@ fn run(cli: Cli) -> Result<()> {
         )),
         _ => None,
     };
-    let base = scan_base(&scan.path)?;
     let records = scan_records(scan, &config, rules, &root, &base)?;
     let mut out = output(scan)?;
     match (&cli.command, types) {
@@ -235,15 +235,10 @@ fn scan_records(
     base: &Path,
 ) -> Result<Vec<record::Record>> {
     // `[scan] exclude` is relative to the project root, `--exclude` to the scanned path.
+    // A scan outside the root (via `--root`) has no root-relative paths to match.
     let prefix = base
-        .strip_prefix(root)
-        .map(|rel| {
-            rel.components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .unwrap_or_default();
+        .starts_with(root)
+        .then(|| modules::relative(root, base));
     let options = walk::WalkOptions {
         include_tests: scan.include_tests || config.scan.include_tests,
         excludes: scan.excludes.clone(),

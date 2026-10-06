@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::modules::{read_json, read_toml};
+
 pub const FILE_NAME: &str = "duped.toml";
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,7 +61,6 @@ pub struct Acknowledged {
     /// A type name, `Scope.Name`, or either prefixed with `module:`.
     pub a: String,
     pub b: String,
-    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -113,65 +114,41 @@ pub fn load(root: &Path, explicit: Option<&Path>) -> Result<Config> {
     Ok(config)
 }
 
-/// The directory that holds `duped.toml` and the module manifests for `scan`.
+/// The directory that holds `duped.toml` and the module manifests for a scan.
 ///
-/// Searches from `scan` up to the enclosing git checkout, never past it: the nearest
-/// directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`,
-/// `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace or a `.sln`),
-/// else the checkout itself. Outside a checkout it is `scan` (its directory, for a file).
-pub fn project_root(scan: &Path) -> Result<PathBuf> {
-    let scan = scan
-        .canonicalize()
-        .with_context(|| format!("cannot open {}", scan.display()))?;
-    let start = if scan.is_file() {
-        scan.parent()
-            .map_or_else(|| scan.clone(), Path::to_path_buf)
-    } else {
-        scan
-    };
+/// Searches from `start` (the canonical scanned directory) up to the enclosing git checkout,
+/// never past it: the nearest directory with a `duped.toml`, else the nearest workspace root
+/// (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv
+/// workspace or a `.sln`), else the checkout itself. Outside a checkout it is `start`.
+pub fn project_root(start: &Path) -> PathBuf {
     let Some(checkout) = start.ancestors().find(|dir| dir.join(".git").exists()) else {
-        return Ok(start);
+        return start.to_path_buf();
     };
     let within = || {
         start
             .ancestors()
             .take_while(|dir| dir.starts_with(checkout))
     };
-    if let Some(dir) = within().find(|dir| dir.join(FILE_NAME).is_file()) {
-        return Ok(dir.to_path_buf());
-    }
-    if let Some(dir) = within().find(|dir| is_workspace_root(dir)) {
-        return Ok(dir.to_path_buf());
-    }
-    Ok(checkout.to_path_buf())
+    within()
+        .find(|dir| dir.join(FILE_NAME).is_file())
+        .or_else(|| within().find(|dir| is_workspace_root(dir)))
+        .unwrap_or(checkout)
+        .to_path_buf()
 }
 
 fn is_workspace_root(dir: &Path) -> bool {
-    let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
-    if dir.join("pnpm-workspace.yaml").is_file() {
-        return true;
-    }
-    if read("package.json")
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .is_some_and(|json| json.get("workspaces").is_some())
-    {
-        return true;
-    }
     let toml_has = |name: &str, path: &[&str]| {
-        read(name)
-            .and_then(|text| text.parse::<toml::Table>().ok())
-            .is_some_and(|table| lookup(&table, path).is_some())
+        read_toml(&dir.join(name)).is_some_and(|table| lookup(&table, path).is_some())
     };
-    if toml_has("Cargo.toml", &["workspace"])
+    dir.join("pnpm-workspace.yaml").is_file()
+        || read_json(&dir.join("package.json")).is_some_and(|json| json.get("workspaces").is_some())
+        || toml_has("Cargo.toml", &["workspace"])
         || toml_has("pyproject.toml", &["tool", "uv", "workspace"])
-    {
-        return true;
-    }
-    std::fs::read_dir(dir).is_ok_and(|entries| {
-        entries
-            .flatten()
-            .any(|e| e.path().extension().is_some_and(|ext| ext == "sln"))
-    })
+        || std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "sln"))
+        })
 }
 
 /// `table[a][b]…`, when every step is a table.
@@ -277,15 +254,15 @@ test_dirs = ["qa"]
         )
         .unwrap();
         let scan = dir.join("ws/packages/a/src");
-        assert_eq!(project_root(&scan).unwrap(), dir.join("ws"));
+        assert_eq!(project_root(&scan), dir.join("ws"));
 
         std::fs::write(dir.join("ws/packages/a/duped.toml"), "").unwrap();
-        assert_eq!(project_root(&scan).unwrap(), dir.join("ws/packages/a"));
+        assert_eq!(project_root(&scan), dir.join("ws/packages/a"));
 
         // Without a workspace marker or config, the checkout is the root.
         let plain = temp("plain");
         std::fs::create_dir_all(plain.join(".git")).unwrap();
         std::fs::create_dir_all(plain.join("src")).unwrap();
-        assert_eq!(project_root(&plain.join("src")).unwrap(), plain);
+        assert_eq!(project_root(&plain.join("src")), plain);
     }
 }
