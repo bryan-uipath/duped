@@ -26,7 +26,7 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 - `.gitignore` rules apply, even outside a git checkout.
 - Hidden files and directories (such as `.storybook/`) are skipped.
 - `node_modules`, `dist`, `build`, `out`, `coverage` and `target` are always skipped.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, C# `*Tests.cs`, directories such as `test/`, `__tests__/`, `mocks/` and `fixtures/`, and C# test projects ending `.Tests`, `.Test`, `.UnitTests` or `.IntegrationTests` (the C# rules apply to `.cs` files only).
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, C# `*Tests.cs`, `*Mock.cs`, `*Fake.cs` and `Fake*.cs`, directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `UnitTests/` (directory names match case-insensitively), and C# test projects ending `.Tests`, `.Test`, `.UnitTests` or `.IntegrationTests` (the C# rules apply to `.cs` files only).
 - C# files under `obj/` or `bin/` (build output, such as generated `*.g.cs`) are skipped.
 - Files are read as UTF-8, or UTF-16 when they start with a byte-order mark. Invalid UTF-8 bytes, as in legacy single-byte files, become `�` rather than skipping the file.
 - `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.

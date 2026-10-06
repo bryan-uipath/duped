@@ -88,22 +88,27 @@ pub fn is_test_path(rel: &str) -> bool {
         "__fixtures__",
         "__snapshots__",
         "e2e",
+        "unittests",
+        "integrationtests",
     ];
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
     // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
     const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
-    const CS_FILE_SUFFIXES: &[&str] = &["Tests.cs"];
+    // C# test classes and doubles, e.g. `RepoTests.cs`, `UserMock.cs`, `FakeClock.cs`.
+    const CS_STEM_SUFFIXES: &[&str] = &["Tests", "Mock", "Fake"];
+    const CS_STEM_PREFIXES: &[&str] = &["Fake"];
     let csharp = rel.ends_with(".cs");
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
+            let stem = segment.strip_suffix(".cs").unwrap_or(segment);
             return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
                 || (csharp
-                    && CS_FILE_SUFFIXES
-                        .iter()
-                        .any(|suffix| segment.ends_with(suffix)));
+                    && (CS_STEM_SUFFIXES.iter().any(|s| stem.ends_with(s))
+                        || CS_STEM_PREFIXES.iter().any(|p| stem.starts_with(p))));
         }
-        if DIRS.contains(&segment)
+        // Case-insensitive: .NET repos use `Tests/` and `UnitTests/`.
+        if DIRS.iter().any(|dir| segment.eq_ignore_ascii_case(dir))
             || (csharp && DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)))
         {
             return true;
@@ -171,6 +176,13 @@ mod tests {
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
         assert!(is_test_path("src/RepoTests.cs"));
+        assert!(is_test_path("src/Tests/helpers.ts"));
+        assert!(is_test_path("Acme/UnitTests/Repo.cs"));
+        assert!(is_test_path("src/UserMock.cs"));
+        assert!(is_test_path("src/ClockFake.cs"));
+        assert!(is_test_path("src/FakeClock.cs"));
+        assert!(!is_test_path("src/Mockingbird.cs"));
+        assert!(!is_test_path("src/UserMock.ts"));
         assert!(
             !is_test_path("src/LoadTest.cs"),
             "`*Test.cs` is often production code"
