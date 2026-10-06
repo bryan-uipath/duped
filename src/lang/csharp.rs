@@ -2,10 +2,9 @@
 
 use tree_sitter::{Node, Parser};
 
-use super::{collapse_whitespace, push_field};
+use super::{collapse_whitespace, has_token, join_scope, push_field, signature};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
-    format_params,
 };
 
 /// Parse one file and return its types (including nested ones) and their methods.
@@ -21,7 +20,7 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str) -> Vec<Record> {
         rel,
         records: Vec::new(),
     };
-    extractor.declarations(tree.root_node(), &[], None);
+    extractor.declarations(tree.root_node());
     extractor.records
 }
 
@@ -40,19 +39,19 @@ struct Owner {
 }
 
 impl Extractor<'_> {
-    /// Types in a compilation unit, namespace body or type body.
-    fn declarations(&mut self, container: Node, scope: &[String], owner: Option<Owner>) {
+    /// Top-level types in a compilation unit or namespace body; nested types go through `members`.
+    fn declarations(&mut self, container: Node) {
         let mut cursor = container.walk();
         for child in container.named_children(&mut cursor) {
             match child.kind() {
                 "namespace_declaration" => {
                     if let Some(body) = child.child_by_field_name("body") {
-                        self.declarations(body, scope, owner);
+                        self.declarations(body);
                     }
                 }
                 // `#if DEBUG … #endif` around declarations.
-                kind if kind.starts_with("preproc_") => self.declarations(child, scope, owner),
-                _ => self.type_declaration(child, scope, owner),
+                kind if kind.starts_with("preproc_") => self.declarations(child),
+                _ => self.type_declaration(child, &[], None),
             }
         }
     }
@@ -79,41 +78,24 @@ impl Extractor<'_> {
         };
 
         let mut fields = Vec::new();
+        // `record Person(string Name, int Age)`: positional parameters are properties.
+        // A class or struct primary constructor only captures them, so it adds none.
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            match child.kind() {
-                // `record Person(string Name, int Age)`: positional parameters are properties.
-                // A class or struct primary constructor only captures them, so it adds none.
-                "parameter_list" if kind == TypeKind::Record => {
-                    for param in self.params(child) {
-                        push_field(
-                            &mut fields,
-                            Some(Field {
-                                name: param.name,
-                                ty: param.ty,
-                                optional: false,
-                                kind: FieldKind::Property,
-                            }),
-                        );
-                    }
-                }
-                "enum_member_declaration_list" => {
-                    let mut members = child.walk();
-                    for member in child
-                        .named_children(&mut members)
-                        .filter(|m| m.kind() == "enum_member_declaration")
-                    {
-                        if let Some(n) = member.child_by_field_name("name") {
-                            fields.push(Field {
-                                name: self.text(n),
-                                ty: None,
-                                optional: false,
-                                kind: FieldKind::Member,
-                            });
-                        }
-                    }
-                }
-                _ => {}
+        if kind == TypeKind::Record
+            && let Some(list) = node
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "parameter_list")
+        {
+            for param in self.params(list) {
+                push_field(
+                    &mut fields,
+                    Some(Field {
+                        name: param.name,
+                        ty: param.ty,
+                        optional: false,
+                        kind: FieldKind::Property,
+                    }),
+                );
             }
         }
         if let Some(body) = node.child_by_field_name("body") {
@@ -126,7 +108,12 @@ impl Extractor<'_> {
             kind,
             scope: join_scope(scope),
             fields,
-            extends: self.bases(node),
+            // `enum Flags : byte` names a storage type, not a base.
+            extends: if kind == TypeKind::Enum {
+                Vec::new()
+            } else {
+                self.bases(node)
+            },
             exported,
             location: self.location(node),
             doc: self.doc(node),
@@ -180,6 +167,16 @@ impl Extractor<'_> {
                         }
                     }
                 }
+                "enum_member_declaration" => {
+                    if let Some(name) = member.child_by_field_name("name") {
+                        fields.push(Field {
+                            name: self.text(name),
+                            ty: None,
+                            optional: false,
+                            kind: FieldKind::Member,
+                        });
+                    }
+                }
                 "method_declaration" => self.method(member, scope, owner, fields),
                 kind if kind.starts_with("preproc_") => self.members(member, scope, owner, fields),
                 _ => self.type_declaration(member, scope, Some(owner)),
@@ -200,11 +197,7 @@ impl Extractor<'_> {
             fields,
             Some(Field {
                 name: name.clone(),
-                ty: Some(format!(
-                    "({}) => {}",
-                    format_params(&params),
-                    returns.as_deref().unwrap_or("void")
-                )),
+                ty: Some(signature(&params, returns.as_deref())),
                 optional: false,
                 kind: FieldKind::Method,
             }),
@@ -219,7 +212,7 @@ impl Extractor<'_> {
             scope: join_scope(scope),
             params,
             returns,
-            exported: owner.exported && is_public(member, Some(owner)),
+            exported: is_public(member, Some(owner)),
             location: self.location(member),
             doc: self.doc(member),
         }));
@@ -243,7 +236,7 @@ impl Extractor<'_> {
                 .map(|m| self.text(m))
                 .collect();
             let ty = param.child_by_field_name("type").map(|t| {
-                let mut parts = modifiers.clone();
+                let mut parts = modifiers;
                 parts.push(self.text(t));
                 parts.join(" ")
             });
@@ -278,20 +271,17 @@ impl Extractor<'_> {
         };
         let mut entries = list.walk();
         list.named_children(&mut entries)
-            .filter(|n| n.kind() != "argument_list" && n.kind() != "comment")
-            .map(|n| {
-                let text = self.text(n);
-                match text.find('(') {
-                    Some(i) if n.kind() == "primary_constructor_base_type" => {
-                        text[..i].trim().to_string()
-                    }
-                    _ => text,
-                }
+            .filter_map(|n| match n.kind() {
+                "primary_constructor_base_type" => n.child_by_field_name("type"),
+                "argument_list" | "comment" => None,
+                _ => Some(n),
             })
+            .map(|n| self.text(n))
             .collect()
     }
 
-    /// Consecutive `///` comments directly above `node`, with XML tags stripped.
+    /// Consecutive `///` comments directly above `node`, with XML tags stripped. Plain `//`
+    /// lines in between are skipped; `////` is commented-out code, not a doc comment.
     fn doc(&self, node: Node) -> Option<String> {
         let mut lines = Vec::new();
         let mut below = node;
@@ -299,14 +289,20 @@ impl Extractor<'_> {
             if comment.end_position().row + 1 < below.start_position().row {
                 break;
             }
-            let Some(line) = self.source[comment.byte_range()].strip_prefix("///") else {
-                break;
-            };
-            lines.push(line);
+            let raw = &self.source[comment.byte_range()];
+            match raw.strip_prefix("///").filter(|l| !l.starts_with('/')) {
+                Some(line) => lines.push(line),
+                None if raw.starts_with("//") => {}
+                None => break,
+            }
             below = comment;
         }
         lines.reverse();
-        let text = collapse_whitespace(&strip_xml(&lines.join(" ")));
+        // Prose, not code: an apostrophe must not start a "string".
+        let text = strip_xml(&lines.join(" "))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         (!text.is_empty()).then_some(text)
     }
 
@@ -329,27 +325,20 @@ fn is_public(node: Node, owner: Option<Owner>) -> bool {
     if owner.is_some_and(|o| !o.exported) {
         return false;
     }
+    let (mut public, mut any_access) = (false, false);
     let mut cursor = node.walk();
-    let mut access = Vec::new();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "explicit_interface_specifier" => return true,
-            "modifier" => access.extend(
-                child
-                    .child(0)
-                    .map(|k| k.kind())
-                    .filter(|k| matches!(*k, "public" | "private" | "protected" | "internal")),
-            ),
+            "modifier" => match child.child(0).map(|k| k.kind()) {
+                Some("public") => (public, any_access) = (true, true),
+                Some("private" | "protected" | "internal") => any_access = true,
+                _ => {}
+            },
             _ => {}
         }
     }
-    access.contains(&"public") || (access.is_empty() && owner.is_some_and(|o| o.interface))
-}
-
-fn has_token(node: Node, token: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|c| !c.is_named() && c.kind() == token)
+    public || (!any_access && owner.is_some_and(|o| o.interface))
 }
 
 /// `<summary>Loads <see cref="Item"/>.</summary>` → `Loads Item.`
@@ -365,12 +354,15 @@ fn strip_xml(text: &str) -> String {
         };
         let tag = &rest[open + 1..open + close];
         // Self-closing references keep their target: `<see cref="T:Item"/>` → `Item`.
-        if tag.ends_with('/')
-            && let Some(value) = ["cref", "name", "langword", "href"]
+        if tag.ends_with('/') {
+            if let Some(cref) = attribute(tag, "cref") {
+                out.push_str(strip_cref_prefix(cref));
+            } else if let Some(value) = ["name", "langword", "href"]
                 .iter()
                 .find_map(|attr| attribute(tag, attr))
-        {
-            out.push_str(value.rsplit(':').next().unwrap_or(value));
+            {
+                out.push_str(value);
+            }
         }
         out.push(' ');
         rest = &rest[open + close + 1..];
@@ -382,14 +374,33 @@ fn strip_xml(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-fn attribute<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
-    let start = tag.find(&format!("{name}=\""))? + name.len() + 2;
-    let end = tag[start..].find('"')? + start;
-    Some(&tag[start..end])
+/// `T:Acme.Item` → `Acme.Item`: compiler-resolved cref ids carry a one-letter kind prefix.
+fn strip_cref_prefix(cref: &str) -> &str {
+    match cref.as_bytes() {
+        [kind, b':', ..] if kind.is_ascii_uppercase() => &cref[2..],
+        _ => cref,
+    }
 }
 
-fn join_scope(scope: &[String]) -> Option<String> {
-    (!scope.is_empty()).then(|| scope.join("."))
+/// An XML attribute value, in single or double quotes, with optional spaces around `=`.
+fn attribute<'t>(tag: &'t str, name: &str) -> Option<&'t str> {
+    let mut rest = tag;
+    while let Some(at) = rest.find(name) {
+        let preceded = rest[..at].ends_with(char::is_whitespace);
+        let after = rest[at + name.len()..].trim_start();
+        rest = &rest[at + name.len()..];
+        let Some(value) = after
+            .strip_prefix('=')
+            .map(str::trim_start)
+            .filter(|_| preceded)
+        else {
+            continue;
+        };
+        let quote = value.chars().next().filter(|q| matches!(q, '"' | '\''))?;
+        let end = value[1..].find(quote)? + 1;
+        return Some(&value[1..end]);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -597,6 +608,33 @@ mod tests {
         );
         assert_eq!(types(&records).len(), 2);
         assert_eq!(functions(&records).len(), 1);
+    }
+
+    #[test]
+    fn conditional_enum_members_and_enum_storage_types() {
+        let records = run(
+            "public enum S {\n#if DEBUG\n  Debug\n#else\n  Release\n#endif\n}\npublic enum F : byte { A }\npublic class P(int x) : Q(x), I {}\npublic record R(int Id) : Base(Id), IR;",
+        );
+        assert_eq!(field_names(find(&records, "S")), vec!["Debug", "Release"]);
+        assert!(find(&records, "F").extends.is_empty());
+        assert_eq!(find(&records, "P").extends, vec!["Q", "I"]);
+        assert_eq!(find(&records, "R").extends, vec!["Base", "IR"]);
+    }
+
+    #[test]
+    fn doc_edge_cases() {
+        let records = run(
+            "/// <summary>Gets the user's   name\n/// and more.</summary>\n// TODO: cache\npublic class Apos {}\n//// public void Old() {}\npublic class Stale {}\n/// See <see href=\"https://x.dev/a\"/> and <see cref='Widget' />.\npublic class Links {}",
+        );
+        assert_eq!(
+            find(&records, "Apos").doc.as_deref(),
+            Some("Gets the user's name and more.")
+        );
+        assert_eq!(find(&records, "Stale").doc, None);
+        assert_eq!(
+            find(&records, "Links").doc.as_deref(),
+            Some("See https://x.dev/a and Widget .")
+        );
     }
 
     #[test]

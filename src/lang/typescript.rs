@@ -4,10 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser};
 
-use super::{collapse_whitespace, push_field};
+use super::{collapse_whitespace, has_token, join_scope, push_field, signature};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
-    format_params,
 };
 
 /// Parse one file and return its top-level functions, class members and types.
@@ -709,21 +708,6 @@ fn unparen(mut node: Node) -> Node {
     node
 }
 
-fn has_token(node: Node, token: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|c| !c.is_named() && c.kind() == token)
-}
-
-/// Method field type, e.g. `(id: string, force?: boolean) => void`.
-fn signature(params: &[Param], returns: Option<&str>) -> String {
-    format!(
-        "({}) => {}",
-        format_params(params),
-        returns.unwrap_or("unknown")
-    )
-}
-
 fn member(name: &str) -> Field {
     Field {
         name: name.to_string(),
@@ -735,10 +719,6 @@ fn member(name: &str) -> Field {
 
 fn unquote(text: &str) -> &str {
     text.trim_matches(|c| c == '\'' || c == '"' || c == '`')
-}
-
-fn join_scope(scope: &[String]) -> Option<String> {
-    (!scope.is_empty()).then(|| scope.join("."))
 }
 
 fn qualified(scope: &[String], name: &str) -> String {

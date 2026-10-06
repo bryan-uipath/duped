@@ -6,9 +6,9 @@ pub mod typescript;
 use std::cmp::Reverse;
 
 use rayon::prelude::*;
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
-use crate::record::{Field, Language, Record};
+use crate::record::{Field, Language, Param, Record, format_params};
 use crate::walk::SourceFile;
 
 pub struct Extraction {
@@ -49,26 +49,36 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
 }
 
 /// UTF-8 (lossy, so legacy single-byte files still parse), or UTF-16 with a byte-order mark,
-/// as some Windows tooling writes.
+/// as some Windows tooling writes. A UTF-8 byte-order mark is left for the parser to skip.
 fn decode(bytes: &[u8]) -> String {
-    let utf16 = |pairs: std::slice::ChunksExact<u8>, le: bool| {
-        let units: Vec<u16> = pairs
-            .map(|p| {
-                if le {
-                    u16::from_le_bytes([p[0], p[1]])
-                } else {
-                    u16::from_be_bytes([p[0], p[1]])
-                }
-            })
-            .collect();
+    let utf16 = |rest: &[u8], from: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|p| from(*p)).collect();
         String::from_utf16_lossy(&units)
     };
     match bytes {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest.chunks_exact(2), true),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest.chunks_exact(2), false),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     }
+}
+
+pub fn has_token(node: Node, token: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|c| !c.is_named() && c.kind() == token)
+}
+
+pub fn join_scope(scope: &[String]) -> Option<String> {
+    (!scope.is_empty()).then(|| scope.join("."))
+}
+
+/// Method field type, e.g. `(id: string, force?: boolean) => void`.
+pub fn signature(params: &[Param], returns: Option<&str>) -> String {
+    format!(
+        "({}) => {}",
+        format_params(params),
+        returns.unwrap_or("unknown")
+    )
 }
 
 /// Add `field` unless its name is already present; an untyped entry takes the new type.
@@ -129,7 +139,6 @@ mod tests {
             decode(b"class A {} // caf\xe9"),
             "class A {} // caf\u{FFFD}"
         );
-        assert_eq!(decode(&[0xEF, 0xBB, 0xBF, b'x']), "x");
         assert_eq!(decode(&[0xFF, 0xFE, b'h', 0, b'i', 0]), "hi");
         assert_eq!(decode(&[0xFE, 0xFF, 0, b'h', 0, b'i']), "hi");
     }

@@ -50,7 +50,10 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             continue;
         };
         let rel = relative(root, &path);
-        if is_excluded(&excludes, &rel) || (!options.include_tests && is_test_path(&rel)) {
+        if is_excluded(&excludes, &rel)
+            || is_csharp_build_output(&rel)
+            || (!options.include_tests && is_test_path(&rel))
+        {
             continue;
         }
         files.push(SourceFile {
@@ -90,19 +93,28 @@ pub fn is_test_path(rel: &str) -> bool {
     // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
     const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
     const CS_FILE_SUFFIXES: &[&str] = &["Tests.cs", "Test.cs"];
+    let csharp = rel.ends_with(".cs");
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
             return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
-                || CS_FILE_SUFFIXES
-                    .iter()
-                    .any(|suffix| segment.ends_with(suffix));
+                || (csharp
+                    && CS_FILE_SUFFIXES
+                        .iter()
+                        .any(|suffix| segment.ends_with(suffix)));
         }
-        if DIRS.contains(&segment) || DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)) {
+        if DIRS.contains(&segment)
+            || (csharp && DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)))
+        {
             return true;
         }
     }
     false
+}
+
+/// C# build output (`obj/`, `bin/`), e.g. generated `MainWindow.g.cs` copies per configuration.
+fn is_csharp_build_output(rel: &str) -> bool {
+    rel.ends_with(".cs") && rel.split('/').any(|s| s == "obj" || s == "bin")
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -166,6 +178,11 @@ mod tests {
         assert!(!is_test_path("src/Contest.cs"));
         assert!(!is_test_path("src/RepoTests.ts"));
         assert!(!is_test_path("Acme.Testing/Repo.cs"));
+        assert!(!is_test_path("Acme.Tests/client.ts"));
+        assert!(is_csharp_build_output(
+            "App/obj/Debug/net8.0/MainWindow.g.cs"
+        ));
+        assert!(!is_csharp_build_output("tools/bin/cli.js"));
     }
 
     #[test]
