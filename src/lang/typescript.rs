@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser};
 
+use super::{collapse_whitespace, has_token, join_scope, push_field, signature};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
-    format_params,
 };
 
 /// Parse one file and return its top-level functions, class members and types.
@@ -677,20 +677,6 @@ fn is_private(member: Node) -> bool {
     })
 }
 
-/// Add `field` unless its name is already present; an untyped entry takes the new type.
-/// Overloads and getter/setter pairs share a name.
-fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
-    let Some(field) = field else { return };
-    match fields.iter_mut().find(|f| f.name == field.name) {
-        Some(existing) => {
-            if existing.ty.is_none() {
-                existing.ty = field.ty;
-            }
-        }
-        None => fields.push(field),
-    }
-}
-
 /// Collect the leaves of a left-nested `A | B | C` (or `&`) chain, unwrapping parentheses.
 fn flatten<'t>(node: Node<'t>, kind: &str, out: &mut Vec<Node<'t>>) {
     let mut cursor = node.walk();
@@ -722,22 +708,7 @@ fn unparen(mut node: Node) -> Node {
     node
 }
 
-fn has_token(node: Node, token: &str) -> bool {
-    let mut cursor = node.walk();
-    node.children(&mut cursor)
-        .any(|c| !c.is_named() && c.kind() == token)
-}
-
-/// Method field type, e.g. `(id: string, force?: boolean) => void`.
-fn signature(params: &[Param], returns: Option<&str>) -> String {
-    format!(
-        "({}) => {}",
-        format_params(params),
-        returns.unwrap_or("unknown")
-    )
-}
-
-fn member(name: &str) -> Field {
+pub(crate) fn member(name: &str) -> Field {
     Field {
         name: name.to_string(),
         ty: None,
@@ -750,49 +721,11 @@ fn unquote(text: &str) -> &str {
     text.trim_matches(|c| c == '\'' || c == '"' || c == '`')
 }
 
-fn join_scope(scope: &[String]) -> Option<String> {
-    (!scope.is_empty()).then(|| scope.join("."))
-}
-
 fn qualified(scope: &[String], name: &str) -> String {
     match join_scope(scope) {
         Some(scope) => format!("{scope}.{name}"),
         None => name.to_string(),
     }
-}
-
-/// `{ a:\n  'x  y' }` → `{ a: 'x  y' }`: collapse whitespace runs outside quotes.
-fn collapse_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut quote = None;
-    let mut escaped = false;
-    let mut pending_space = false;
-    for c in text.chars() {
-        if let Some(q) = quote {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        if c.is_whitespace() {
-            pending_space = !out.is_empty();
-            continue;
-        }
-        if pending_space {
-            out.push(' ');
-            pending_space = false;
-        }
-        if matches!(c, '\'' | '"' | '`') {
-            quote = Some(c);
-        }
-        out.push(c);
-    }
-    out
 }
 
 #[cfg(test)]
