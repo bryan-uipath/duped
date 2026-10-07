@@ -17,6 +17,7 @@ cargo build --release
 ```sh
 duped extract [DIR] [--out records.jsonl]   # every top-level function and type, as JSON Lines
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
+duped types [DIR]                           # types that share most of their properties
 ```
 
 `DIR` can also be a single file.
@@ -81,3 +82,27 @@ Overload signatures (TypeScript overloads, Python `@overload`) fold into their i
 - `doc` is the `///` XML comment with tags stripped (`<see cref="T:X"/>` keeps `X`); plain `//` lines in between are skipped and `////` is not a doc comment. `start_line` includes attributes.
 - Enum members inside `#if` / `#else` are all kept. An enum's storage type (`enum E : byte`) is not listed in `extends`.
 - Each `partial` declaration is its own record.
+
+### Finding duplicate types
+
+`duped types` compares every object-shaped type (interfaces, object type aliases, classes) with every other, and every enum or literal union with every other. It reports pairs whose field names overlap, whatever the types are called.
+
+- **similarity:** Jaccard similarity of field names: shared names ÷ all names.
+- **typed:** the same, but a shared field only counts when its types match, so it drops when shared fields have different types. Spacing doesn't matter, union order doesn't matter, and `T | undefined`, `T | null` and `T` count as the same type. A field with no type annotation matches any type.
+- **relationship:**
+  - `exact` (`A = B`): same names and types.
+  - `superset` (`A ⊃ B`) or `subset` (`A ⊂ B`): one has every field of the other, and more. This is how a redeclared union that has fallen behind the original shows up.
+  - `overlap` (`A ~ B`): anything else, including same names with different types.
+
+By default it prints clusters, which are groups of types linked by qualifying pairs, largest first. Each cluster lists its members with `file:line`, the fields they all share, and its best pairs. `--pairs` prints a flat ranked list instead, and `--json` prints every pair and cluster (ignoring `--top` and `--pairs`).
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--threshold` | `0.7` | minimum similarity |
+| `--min-fields` | `4` | skip types with fewer fields |
+| `--min-shared` | `4` | a pair needs at least this many shared field names |
+| `--exclude-name <glob>` | | skip types by name or `Scope.Name` (repeatable); `*Props` is always skipped unless `--no-default-excludes` |
+| `--common-field-fraction` | `0.1` | field names on more than this fraction of types (and more than 50 of them), such as `id`, don't seed candidate pairs; they still count in scores, and a type made only of common fields is paired through its rarest one |
+| `--top` | `40` | clusters (or pairs) to show |
+
+Every pair is evidence, not a verdict. Read both types before consolidating them.

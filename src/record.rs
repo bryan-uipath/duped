@@ -136,3 +136,11 @@ pub fn format_params(params: &[Param]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+
+/// `Api.Client` for a scoped name, or just the name.
+pub fn qualified(scope: Option<&str>, name: &str) -> String {
+    match scope {
+        Some(scope) => format!("{scope}.{name}"),
+        None => name.to_string(),
+    }
+}
