@@ -59,7 +59,10 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             continue;
         };
         let rel = relative(root, &path);
-        if is_excluded(&excludes, &rel) || (!options.include_tests && is_test_path(&rel)) {
+        if is_excluded(&excludes, &rel)
+            || is_csharp_build_output(&rel)
+            || (!options.include_tests && is_test_path(&rel))
+        {
             continue;
         }
         files.push(SourceFile {
@@ -87,6 +90,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "cs" => Some(Language::CSharp),
         "py" | "pyi" => Some(Language::Python),
         "rs" => Some(Language::Rust),
         _ => None,
@@ -106,22 +110,42 @@ pub fn is_test_path(rel: &str) -> bool {
         "__fixtures__",
         "__snapshots__",
         "e2e",
+        "unittests",
+        "integrationtests",
         "benches",
     ];
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
+    // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
+    const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
+    // C# test classes and doubles, e.g. `RepoTests.cs`, `UserMock.cs`, `FakeClock.cs`.
+    const CS_STEM_SUFFIXES: &[&str] = &["Tests", "Mock", "Fake"];
+    const CS_STEM_PREFIXES: &[&str] = &["Fake"];
+    let csharp = rel.ends_with(".cs");
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
+            let stem = segment.strip_suffix(".cs").unwrap_or(segment);
             // Rust's out-of-line `#[cfg(test)] mod tests;` lives in `tests.rs` / `test.rs`.
             return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
                 || is_python_test_file(segment)
-                || matches!(segment, "tests.rs" | "test.rs");
+                || matches!(segment, "tests.rs" | "test.rs")
+                || (csharp
+                    && (CS_STEM_SUFFIXES.iter().any(|s| stem.ends_with(s))
+                        || CS_STEM_PREFIXES.iter().any(|p| stem.starts_with(p))));
         }
-        if DIRS.contains(&segment) {
+        // Case-insensitive: .NET repos use `Tests/` and `UnitTests/`.
+        if DIRS.iter().any(|dir| segment.eq_ignore_ascii_case(dir))
+            || (csharp && DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)))
+        {
             return true;
         }
     }
     false
+}
+
+/// C# build output (`obj/`, `bin/`), e.g. generated `MainWindow.g.cs` copies per configuration.
+fn is_csharp_build_output(rel: &str) -> bool {
+    rel.ends_with(".cs") && rel.split('/').any(|s| s == "obj" || s == "bin")
 }
 
 /// pytest's conventions: `test_*.py`, `*_test.py` and `conftest.py`, and their `.pyi` stubs.
@@ -190,6 +214,29 @@ mod tests {
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
+        assert!(is_test_path("src/RepoTests.cs"));
+        assert!(is_test_path("src/Tests/helpers.ts"));
+        assert!(is_test_path("Acme/UnitTests/Repo.cs"));
+        assert!(is_test_path("src/UserMock.cs"));
+        assert!(is_test_path("src/ClockFake.cs"));
+        assert!(is_test_path("src/FakeClock.cs"));
+        assert!(!is_test_path("src/Mockingbird.cs"));
+        assert!(!is_test_path("src/UserMock.ts"));
+        assert!(
+            !is_test_path("src/LoadTest.cs"),
+            "`*Test.cs` is often production code"
+        );
+        assert!(is_test_path("Acme.Core.UnitTests/Helpers.cs"));
+        assert!(is_test_path("Acme.Api.Tests/Fakes.cs"));
+        assert!(!is_test_path("src/TestHelpers.cs"));
+        assert!(!is_test_path("src/Contest.cs"));
+        assert!(!is_test_path("src/RepoTests.ts"));
+        assert!(!is_test_path("Acme.Testing/Repo.cs"));
+        assert!(!is_test_path("Acme.Tests/client.ts"));
+        assert!(is_csharp_build_output(
+            "App/obj/Debug/net8.0/MainWindow.g.cs"
+        ));
+        assert!(!is_csharp_build_output("tools/bin/cli.js"));
         assert!(is_test_path("pkg/test_api.py"));
         assert!(is_test_path("pkg/api_test.py"));
         assert!(is_test_path("pkg/conftest.py"));
@@ -202,6 +249,7 @@ mod tests {
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
+        assert_eq!(language_for(Path::new("Repo.cs")), Some(Language::CSharp));
         assert_eq!(language_for(Path::new("a.pyi")), Some(Language::Python));
         assert_eq!(language_for(Path::new("a.rs")), Some(Language::Rust));
         assert_eq!(language_for(Path::new("a.go")), None);

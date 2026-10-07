@@ -4,7 +4,7 @@ Find duplicated functions and types across a codebase: same name, similar shape,
 
 `duped` parses syntax with tree-sitter. It needs no compiler, no language server and no embeddings. Results are evidence for review: read both sides before refactoring.
 
-> Early development. TypeScript, JavaScript, Rust and Python are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
+> Early development. TypeScript, JavaScript, Rust, Python and C# are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
 
 ## Build
 
@@ -27,7 +27,9 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 - Hidden files and directories (such as `.storybook/`) are skipped.
 - `node_modules`, `dist`, `build`, `out`, `coverage`, `target`, `venv` and `site-packages` are always skipped.
 - A `.pyi` stub next to a `.py` module of the same name is skipped, since both describe one API.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, pytest's `test_*.py`, `*_test.py` and `conftest.py` (and `.pyi` equivalents), Rust `tests.rs` / `test.rs` module files, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, pytest's `test_*.py`, `*_test.py` and `conftest.py` (and `.pyi` equivalents), Rust `tests.rs` / `test.rs` module files, C# `*Tests.cs`, `*Mock.cs`, `*Fake.cs` and `Fake*.cs`, directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/`, `benches/` and `UnitTests/` (directory names match case-insensitively), and C# test projects ending `.Tests`, `.Test`, `.UnitTests` or `.IntegrationTests` (the C# rules apply to `.cs` files only).
+- C# files under `obj/` or `bin/` (build output, such as generated `*.g.cs`) are skipped.
+- Files are read as UTF-8, or UTF-16 when they start with a byte-order mark. Invalid UTF-8 bytes, as in legacy single-byte files, become `�` rather than skipping the file.
 - `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
 
 ### Records
@@ -37,7 +39,7 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | Key | In | Meaning |
 | --- | --- | --- |
 | `record` | all | `function` or `type` |
-| `language` | all | `typescript`, `javascript`, `rust` or `python` |
+| `language` | all | `typescript`, `javascript`, `rust`, `python` or `csharp` |
 | `name` | all | declared name; `default` for an anonymous default export |
 | `scope` | all, optional | enclosing class or namespace, e.g. `Api.Client` |
 | `exported` | all | part of the module's public API, including `export { x }` lists; private and protected class members are `false` |
@@ -45,7 +47,7 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | `doc` | all, optional | the adjacent `/** … */` comment (TypeScript) or the docstring (Python), with whitespace collapsed and escapes left as written |
 | `params` | function | `[{ name, type?, optional? }]`; TypeScript's `this:` and Python's method receiver (`self`, `cls`) are omitted |
 | `returns` | function, optional | return type as written |
-| `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields), `alias` (no fields), `struct` or `trait` |
+| `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields), `alias` (no fields), `struct`, `trait` or `record` |
 | `fields` | type | `[{ name, type?, optional?, kind }]`, where `kind` is `property`, `method` or `member`; quotes are stripped, so `'id'` and `id` match; overloads and getter/setter pairs share one field |
 | `extends` | type, optional | base types and implemented interfaces, as written |
 
@@ -68,3 +70,14 @@ Overload signatures (TypeScript overloads, Python `@overload`) fold into their i
 - **Aliases:** `type X = …` and `X: TypeAlias = …`.
 - **Annotations:** quoted forward references are unquoted, so `"Base"` and `Base` match.
 - **Scope:** module level and `if TYPE_CHECKING:` blocks; functions nested in functions are skipped.
+
+### C#
+
+- Every class, struct, interface, record, enum and delegate is extracted, including nested types. `scope` is the enclosing type chain (`Outer.Inner`); namespaces are not part of it.
+- Fields are properties, fields (one per declarator), events and methods; all but methods have `kind: "property"`. A record's positional parameters are properties. Constructors, finalizers, operators and indexers are left out.
+- Function records are methods with a body, including default interface methods; abstract and interface signatures are fields only. Overloads with bodies stay separate.
+- `exported` means `public` (or an interface member without an access modifier, or an explicit interface implementation) on an exported type. `internal` is `false`.
+- Parameter modifiers stay in the type: `this string`, `out int`, `params int[]`.
+- `doc` is the `///` XML comment with tags stripped (`<see cref="T:X"/>` keeps `X`); plain `//` lines in between are skipped and `////` is not a doc comment. `start_line` includes attributes.
+- Enum members inside `#if` / `#else` are all kept. An enum's storage type (`enum E : byte`) is not listed in `extends`.
+- Each `partial` declaration is its own record.

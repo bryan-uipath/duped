@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use tree_sitter::{Node, Parser};
 
-use crate::lang::typescript::{collapse_whitespace, join_scope, member, push_field, signature};
+use super::typescript::member;
+use super::{collapse_whitespace, join_scope, push_field, signature};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
 };

@@ -69,10 +69,9 @@ pub enum TypeKind {
     Alias,
     /// Rust struct or union, C# struct.
     Struct,
-    /// Rust trait.
+    /// Rust trait; methods become fields.
     Trait,
-    /// C# record.
-    #[allow(dead_code)]
+    /// C# record; positional parameters become fields.
     Record,
 }
 
@@ -109,6 +108,7 @@ pub struct Location {
 pub enum Language {
     TypeScript,
     JavaScript,
+    CSharp,
     Python,
     Rust,
 }
