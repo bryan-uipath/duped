@@ -41,6 +41,8 @@ enum Command {
     Bodies(BodiesArgs),
     /// Find TypeScript/JavaScript files that import the same rare things, often ported copies.
     Imports(ImportsArgs),
+    /// Find file pairs that declare the same names, e.g. a ported copy of a module.
+    Names(NamesArgs),
 }
 
 #[derive(Args)]
@@ -83,6 +85,30 @@ struct ImportsArgs {
     /// Imports in more than this fraction of files (and more than 10) are not rare.
     #[arg(long, value_parser = fraction, default_value_t = 0.005)]
     rare_fraction: f64,
+    /// Also report pairs whose two files are in the same module.
+    #[arg(long)]
+    include_same_module: bool,
+    /// How many pairs to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit every pair as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct NamesArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// A pair needs at least this many shared names [default: 2].
+    #[arg(long)]
+    min_shared: Option<usize>,
+    /// Minimum pair score; each shared name adds up to 1 by rarity, ×1.5 if exported, ×1.5 if same signature [default: 2.5].
+    #[arg(long)]
+    min_score: Option<f64>,
+    /// Names declared in more files than this don't count [default: 10].
+    #[arg(long)]
+    max_files: Option<usize>,
     /// Also report pairs whose two files are in the same module.
     #[arg(long)]
     include_same_module: bool,
@@ -172,7 +198,8 @@ fn run(cli: Cli) -> Result<()> {
     | Command::Index(scan)
     | Command::Types(TypesArgs { scan, .. })
     | Command::Bodies(BodiesArgs { scan, .. })
-    | Command::Imports(ImportsArgs { scan, .. })) = &cli.command;
+    | Command::Imports(ImportsArgs { scan, .. })
+    | Command::Names(NamesArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -191,7 +218,7 @@ fn run(cli: Cli) -> Result<()> {
         _ => None,
     };
     let graph = match &cli.command {
-        Command::Types(_) | Command::Bodies(_) => {
+        Command::Types(_) | Command::Bodies(_) | Command::Names(_) => {
             Some(modules::ModuleGraph::discover(&root, &config.modules)?)
         }
         _ => None,
@@ -254,7 +281,28 @@ fn run(cli: Cli) -> Result<()> {
                 out.write_all(text.as_bytes())?;
             }
         }
-        _ => unreachable!("options and modules are built for `types` and `bodies`"),
+        (Command::Names(args), _, Some(graph)) => {
+            let options = name_options(args, &config);
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "declarations",
+                |_| true,
+            );
+            let report = analysis::names::find_shared_names(&records, &options, &judge);
+            if args.json {
+                let json = analysis::names::to_json(&records, &report, &judge);
+                serde_json::to_writer(&mut out, &json)?;
+                out.write_all(b"\n")?;
+            } else {
+                let text =
+                    analysis::names::render_text(&records, &report, args.top, &options, &judge);
+                out.write_all(text.as_bytes())?;
+            }
+        }
+        _ => unreachable!("options and modules are built for their command"),
     }
     out.flush()?;
     Ok(())
@@ -328,6 +376,17 @@ fn type_options(
         include_acknowledged: args.include_acknowledged,
         rules,
     })
+}
+
+/// Flags win over `[names]` in `duped.toml`, which wins over the defaults.
+fn name_options(args: &NamesArgs, config: &Config) -> analysis::names::NameOptions {
+    let names = &config.names;
+    analysis::names::NameOptions {
+        min_shared: args.min_shared.or(names.min_shared).unwrap_or(2),
+        min_score: args.min_score.or(names.min_score).unwrap_or(2.5),
+        max_files: args.max_files.or(names.max_files).unwrap_or(10),
+        include_same_module: args.include_same_module,
+    }
 }
 
 /// Type-name globs, plus `*Props` unless disabled; `*` matches any characters.

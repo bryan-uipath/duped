@@ -58,7 +58,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 
 - **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs are clustered with union-find.
 - **fns:** similarity of parameter names and types plus return type.
-- **names:** same-name declarations, flagging the ones whose shape or signature differs.
+- **names:** file pairs that declare several of the same top-level names, scored by name rarity, export and matching signature, with each name's shape or signature marked as matching or diverging.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
 - **imports:** files whose imports overlap on rare items (IDF-weighted Jaccard over `specifier#name`), for ported copies whose declarations were all renamed. It reads import statements itself rather than adding a record kind: imports aren't declarations, and no other analysis needs them. TypeScript/JavaScript only.
 
@@ -113,7 +113,7 @@ Each step ships on its own.
 4. Python extractor.
 5. C# extractor.
 6. Rust extractor.
-7. `fns` and `names`, including divergent-shape reporting.
+7. `fns` and `names`, including divergent-shape reporting. `names` (file pairs) is prototyped.
 8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.

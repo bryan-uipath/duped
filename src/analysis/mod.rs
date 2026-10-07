@@ -3,6 +3,7 @@
 
 pub mod bodies;
 pub mod imports;
+pub mod names;
 pub mod types;
 
 use std::collections::HashMap;
@@ -22,6 +23,8 @@ pub struct Verdict {
 /// Project context for analyses: module tags, acknowledgements, cluster homes.
 pub trait Judge {
     fn verdict(&self, a: usize, b: usize) -> Verdict;
+    /// The module tag alone, for any two records; `None` when modules aren't tracked.
+    fn tag(&self, a: usize, b: usize) -> Option<Tag>;
     /// The record's module name, when modules are tracked.
     fn module(&self, record: usize) -> Option<&str>;
     fn home(&self, members: &[usize]) -> Option<Home>;
@@ -37,6 +40,9 @@ pub struct NoJudge;
 impl Judge for NoJudge {
     fn verdict(&self, _: usize, _: usize) -> Verdict {
         Verdict::default()
+    }
+    fn tag(&self, _: usize, _: usize) -> Option<Tag> {
+        None
     }
     fn module(&self, _: usize) -> Option<&str> {
         None

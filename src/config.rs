@@ -15,6 +15,7 @@ pub const FILE_NAME: &str = "duped.toml";
 pub struct Config {
     pub scan: ScanConfig,
     pub types: TypesConfig,
+    pub names: NamesConfig,
     /// Module overrides, keyed by module name.
     pub modules: BTreeMap<String, ModuleOverride>,
     /// Pairs that are duplicated on purpose.
@@ -42,6 +43,14 @@ pub struct TypesConfig {
     pub exclude_names: Vec<String>,
     /// `false` drops the built-in `*Props` exclusion.
     pub default_excludes: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NamesConfig {
+    pub min_shared: Option<usize>,
+    pub min_score: Option<f64>,
+    pub max_files: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -189,6 +198,9 @@ threshold = 0.8
 exclude_names = ["*Dto"]
 default_excludes = false
 
+[names]
+min_score = 3.0
+
 [modules.core]
 path = "libs/core"
 deps = ["base"]
@@ -216,6 +228,7 @@ test_dirs = ["qa"]
         );
         assert_eq!(config.types.min_shared, None);
         assert_eq!(config.types.default_excludes, Some(false));
+        assert_eq!(config.names.min_score, Some(3.0));
         assert_eq!(config.modules["core"].path.as_deref(), Some("libs/core"));
         assert!(config.modules["legacy"].ignore);
         assert_eq!(config.acknowledged[0].a, "canvas:Row");
