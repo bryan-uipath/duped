@@ -2,7 +2,7 @@
 //! declaration was renamed.
 
 use std::collections::HashMap;
-use std::fmt::Write;
+use std::fmt::{self, Write};
 
 use serde_json::{Value, json};
 
@@ -25,11 +25,27 @@ pub struct ImportOptions {
 /// An item is only "common" once it is in more files than this, whatever the fraction.
 const RARE_FLOOR: usize = 10;
 
-/// One scanned file and its import items, e.g. `react#useState` or `./a.css`.
+/// One scanned file and its import items.
 pub struct FileImports {
     pub file: String,
     /// Sorted and deduplicated.
-    pub items: Vec<String>,
+    pub items: Vec<Item>,
+}
+
+/// An imported name, shown `react#useState`, or a side-effect import's specifier, `./a.css`.
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Item {
+    pub specifier: String,
+    pub name: Option<String>,
+}
+
+impl fmt::Display for Item {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.name {
+            Some(name) => write!(f, "{}#{name}", self.specifier),
+            None => f.write_str(&self.specifier),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -52,16 +68,14 @@ pub struct ImportPair {
 
 #[derive(Debug)]
 pub struct ImportReport {
-    /// Files with at least one import item.
-    pub files: usize,
     /// Qualifying pairs, best first.
     pub pairs: Vec<ImportPair>,
     /// Qualifying pairs left out because both files share a module.
     pub hidden_same_module: usize,
 }
 
-/// Each file's import items: `specifier#name` per imported name, or the bare specifier for a
-/// side-effect import. Files with no items are dropped.
+/// Each file's import items: one per imported name, or the specifier alone for a side-effect
+/// import. Files with no items are dropped.
 pub fn file_items(files: Vec<(String, Vec<Import>)>) -> Vec<FileImports> {
     files
         .into_iter()
@@ -70,9 +84,15 @@ pub fn file_items(files: Vec<(String, Vec<Import>)>) -> Vec<FileImports> {
             for import in imports {
                 let specifier = normalize_specifier(&file, &import.specifier);
                 if import.names.is_empty() {
-                    items.push(specifier);
+                    items.push(Item {
+                        specifier,
+                        name: None,
+                    });
                 } else {
-                    items.extend(import.names.iter().map(|n| format!("{specifier}#{n}")));
+                    items.extend(import.names.into_iter().map(|name| Item {
+                        specifier: specifier.clone(),
+                        name: Some(name),
+                    }));
                 }
             }
             items.sort_unstable();
@@ -88,7 +108,7 @@ pub fn find_shared_imports(
     judge: &dyn Judge,
 ) -> ImportReport {
     let mut interner = Interner::default();
-    let mut names: Vec<&str> = Vec::new();
+    let mut names: Vec<&Item> = Vec::new();
     let sets: Vec<Vec<u32>> = files
         .iter()
         .map(|f| {
@@ -96,7 +116,7 @@ pub fn find_shared_imports(
                 .items
                 .iter()
                 .map(|item| {
-                    let id = interner.id(item.as_str());
+                    let id = interner.id(item);
                     if id as usize == names.len() {
                         names.push(item);
                     }
@@ -119,7 +139,10 @@ pub fn find_shared_imports(
         .iter()
         .map(|p| ((n + 1.0) / p.len() as f64).ln())
         .collect();
-    let is_rare = |df: usize| df <= RARE_FLOOR || df as f64 <= options.rare_fraction * n;
+    // An item in most files is never rare, however few files there are.
+    let is_rare = |df: usize| {
+        df * 2 <= files.len() && (df <= RARE_FLOOR || df as f64 <= options.rare_fraction * n)
+    };
 
     // Count shared rare items per pair through the inverted index; common items never pair.
     let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
@@ -145,7 +168,7 @@ pub fn find_shared_imports(
         let mut sources: Vec<&str> = shared
             .iter()
             .filter(|&&id| is_rare(postings[id as usize].len()))
-            .map(|&id| specifier_of(names[id as usize]))
+            .map(|&id| names[id as usize].specifier.as_str())
             .collect();
         sources.sort_unstable();
         sources.dedup();
@@ -154,7 +177,8 @@ pub fn find_shared_imports(
         }
         let total = |set: &[u32]| set.iter().map(|&id| weight[id as usize]).sum::<f64>();
         let common = total(&shared);
-        let score = weighted_jaccard(total(&sets[a]), total(&sets[b]), common);
+        // Weighted Jaccard; the union is positive, since every weight is.
+        let score = common / (total(&sets[a]) + total(&sets[b]) - common);
         if score < options.threshold {
             continue;
         }
@@ -184,23 +208,9 @@ pub fn find_shared_imports(
             .then((x.a, x.b).cmp(&(y.a, y.b)))
     });
     ImportReport {
-        files: files.len(),
         pairs,
         hidden_same_module,
     }
-}
-
-/// `react` for `react#useState`; a side-effect `#lib/a.css` (a subpath import) is all specifier.
-fn specifier_of(item: &str) -> &str {
-    item.rsplit_once('#')
-        .filter(|(specifier, _)| !specifier.is_empty())
-        .map_or(item, |(specifier, _)| specifier)
-}
-
-/// `Σw(A ∩ B) / Σw(A ∪ B)` from the two weight totals and the shared total.
-fn weighted_jaccard(a: f64, b: f64, shared: f64) -> f64 {
-    let union = a + b - shared;
-    if union <= 0.0 { 0.0 } else { shared / union }
 }
 
 /// A package specifier as written. A relative one becomes the target's last segment,
@@ -225,7 +235,11 @@ fn normalize_specifier(file: &str, specifier: &str) -> String {
     }
     let joined = parts.join("/");
     let path = strip_script(&joined);
-    let path = path.strip_suffix("/index").unwrap_or(path);
+    // `./index` from a file at the scan root is the root itself, like `.`.
+    let path = match path {
+        "index" => "",
+        _ => path.strip_suffix("/index").unwrap_or(path),
+    };
     format!("./{}", path.rsplit('/').next().unwrap_or(path))
 }
 
@@ -254,7 +268,7 @@ pub fn render_text(
         out,
         "{} pairs from {} files with imports (threshold {:.2}, rare imports from at least {} specifiers).",
         report.pairs.len(),
-        report.files,
+        files.len(),
         options.threshold,
         options.min_shared
     )
@@ -350,7 +364,7 @@ pub fn to_json(files: &[FileImports], report: &ImportReport, judge: &dyn Judge) 
         .collect();
     json!({
         "summary": {
-            "files": report.files,
+            "files": files.len(),
             "pairs": report.pairs.len(),
             "modules": judge.summary(),
             "hidden": { "same_module": report.hidden_same_module },
@@ -457,12 +471,48 @@ mod tests {
         );
     }
 
+    /// Files that each import one unique thing, so shared items in a test stay rare.
+    fn filler(count: usize) -> Vec<(String, Vec<Import>)> {
+        (0..count)
+            .map(|i| file(&format!("f{i}.ts"), &[&format!("own{i}#x")]))
+            .collect()
+    }
+
     #[test]
-    fn specifiers_of_items() {
-        assert_eq!(specifier_of("react#useState"), "react");
-        assert_eq!(specifier_of("./a.css"), "./a.css");
-        assert_eq!(specifier_of("#lib/a.css"), "#lib/a.css");
-        assert_eq!(specifier_of("#lib/a#X"), "#lib/a");
+    fn a_hash_in_a_name_is_not_a_specifier() {
+        let names = |n: &[&str]| Import {
+            specifier: "lib".into(),
+            names: n.iter().map(|n| n.to_string()).collect(),
+        };
+        let mut input = filler(10);
+        for f in ["a.ts", "b.ts"] {
+            input.push((f.into(), vec![names(&["a#x", "b#y", "c#z"])]));
+        }
+        let files = file_items(input);
+        assert!(
+            find_shared_imports(&files, &options(), &NoJudge)
+                .pairs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn items_in_most_files_are_never_rare() {
+        // Three files, all importing the same things: nothing distinguishes them.
+        let input = (0..3)
+            .map(|i| {
+                file(
+                    &format!("f{i}.ts"),
+                    &["react#default", "clsx#default", "util#cn"],
+                )
+            })
+            .collect();
+        let files = file_items(input);
+        assert!(
+            find_shared_imports(&files, &options(), &NoJudge)
+                .pairs
+                .is_empty()
+        );
     }
 
     #[test]
@@ -475,18 +525,22 @@ mod tests {
         // `.` and `..` name the directory they import.
         assert_eq!(norm(".."), "./src");
         assert_eq!(norm("../../../../x"), "./x");
+        // At the scan root, `.` and `./index` are the same target.
+        assert_eq!(normalize_specifier("a.ts", "."), "./");
+        assert_eq!(normalize_specifier("a.ts", "./index"), "./");
     }
 
     #[test]
     fn renders_text_and_json() {
-        let input = vec![
+        let mut input = vec![
             file("a.ts", &["x#1", "y#2", "./z"]),
             file("b.ts", &["x#1", "y#2", "./z"]),
         ];
+        input.extend(filler(2));
         let files = file_items(input);
         let report = find_shared_imports(&files, &options(), &NoJudge);
         let text = render_text(&files, &report, 40, &options(), &NoJudge);
-        assert!(text.contains("1 pairs from 2 files"), "{text}");
+        assert!(text.contains("1 pairs from 4 files"), "{text}");
         assert!(
             text.contains("3 shared, 3 rare from 3 specifiers"),
             "{text}"

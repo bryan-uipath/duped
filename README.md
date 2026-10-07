@@ -140,7 +140,7 @@ A file copied into another package keeps importing the same unusual things, even
 - **Items:** each imported name is one item, `specifier#name` (`default` for a default import, `*` for a namespace); a side-effect import such as a stylesheet is its specifier. Type-only imports count. Re-exports, `require` and dynamic `import()` don't.
 - **Relative imports** keep only the target's last segment: `./a.js`, `../x/a` and `./a/index` are all `./a`. A copied folder imports its own copied siblings, so their names still match across packages; a resolved path never would.
 - **score:** Jaccard similarity weighted by IDF (`ln((files + 1) / files with the item)`), so an item in nearly every file, like `react#useState`, weighs almost nothing.
-- **rare:** an item in at most 10 files, or at most `--rare-fraction` of them. Only rare items seed candidate pairs, through an inverted index, so files aren't compared all against all.
+- **rare:** an item in at most 10 files, or at most `--rare-fraction` of them, and never in more than half. Only rare items seed candidate pairs, through an inverted index, so files aren't compared all against all.
 - A pair needs rare items from at least `--min-shared` specifiers. Specifiers rather than items, so the parts of one compound component (`Dialog`, `DialogTitle`, …) count once.
 
 Pairs are tagged by module like `types` pairs, ranked by score, and same-module pairs (mostly sibling files of one feature) are hidden by default.

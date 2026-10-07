@@ -182,10 +182,10 @@ fn run(cli: Cli) -> Result<()> {
     };
     let config = config::load(&root, scan.config.as_deref())?;
     let rules = Rules::with_config(&config.rules)?;
-    // Validate options and modules before scanning or truncating `--out`.
     if let Command::Imports(args) = &cli.command {
         return imports(args, &config, rules, &root, &base);
     }
+    // Validate options and modules before scanning or truncating `--out`.
     let types = match &cli.command {
         Command::Types(args) => Some(type_options(args, &config, rules.clone())?),
         _ => None,

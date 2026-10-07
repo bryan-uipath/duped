@@ -245,9 +245,9 @@ impl Judge for FileJudge<'_> {
         self.tagging.then(|| self.graph.name(self.modules[file]))
     }
 
-    fn home(&self, members: &[usize]) -> Option<Home> {
-        let modules: Vec<Option<usize>> = members.iter().map(|&m| self.modules[m]).collect();
-        self.tagging.then(|| self.graph.home(&modules)).flatten()
+    /// File pairs aren't clustered.
+    fn home(&self, _: &[usize]) -> Option<Home> {
+        None
     }
 
     fn summary(&self) -> Option<String> {
