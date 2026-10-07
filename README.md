@@ -20,6 +20,7 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 duped types [DIR]                           # types that share most of their properties
 duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript)
 duped imports [DIR]                         # TS/JS files that import the same rare things
+duped names [DIR]                           # file pairs that declare the same names
 ```
 
 `DIR` can also be a single file.
@@ -155,6 +156,24 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 `--json` prints every pair with its shared items, rarest first. Acknowledgements and `duped.toml` thresholds don't apply yet.
 
+### Finding files that share names
+
+`duped names` reports file pairs, not single names: "these two files declare N of the same top-level names" is how a ported or forked module shows up, even after the copy renamed its main export. Each pair lists its shared names, marked `=` when the signature (functions) or shape (types) matches, `~` when it differs and `?` when a side is an alias, whose target isn't recorded.
+
+- Only top-level declarations count. Methods belong to their type's shape, and `default` (an anonymous default export) is not a name. TypeScript and JavaScript names match each other; other languages match only themselves. A type and a function with the same name are different names.
+- **score:** the sum of the shared names' weights. A name weighs `ln(files / n) / ln(files / 2)` when `n` of the `files` with top-level declarations declare it, so a name in two files weighs 1, then ×1.5 when both sides export it and ×1.5 when its signature or shape matches. Function signatures compare parameter and return types as written (spacing aside), so `T | null` and `T` differ. Field optionality doesn't count, as in `types`.
+- A single shared name is a collision, not a copied file, so a pair needs at least two. Two private names that differ score 2, below the default minimum of 2.5; an identical exported name plus another rare name clears it.
+- Pairs are ranked by score and tagged like `types` pairs. Same-module pairs are hidden unless `--include-same-module`. Acknowledgements don't apply yet.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--min-shared` | `2` | a pair needs at least this many shared names |
+| `--min-score` | `2.5` | minimum pair score |
+| `--max-files` | `10` | names declared in more files than this, such as `render`, don't count |
+| `--top` | `40` | pairs to show |
+| `--include-same-module` | off | also report pairs whose two files are in one module |
+| `--json` | off | every pair, with each shared name's weight and both signatures |
+
 ### Modules and what to do about a pair
 
 `duped` finds the project's modules and tags every pair with what the dependency graph allows:
@@ -178,7 +197,7 @@ Modules come from manifests under the project root:
 
 Every dependency kind counts (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`, dev and build dependencies), because bundled apps often list workspace packages as dev dependencies. Manifests in one directory (say a `package.json` beside a `Cargo.toml`) are one module, named after the first in that order; the other names still work in `duped.toml`. Each file belongs to the module with the deepest root containing it; files under none belong to `(root)`.
 
-When the scanned types span fewer than two modules, for example when you scan one package of a workspace, pairs aren't tagged and none are hidden as `same-module`. Acknowledgements still apply.
+When the scanned types (for `names`, the scanned declarations) span fewer than two modules, for example when you scan one package of a workspace, pairs aren't tagged and none are hidden as `same-module`. Acknowledgements still apply to `types`.
 
 The **project root** is found from `DIR`, without leaving its git checkout: the nearest directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace, or a `.sln`), else the checkout. Outside a checkout it is `DIR`. `--root` sets it explicitly.
 
@@ -200,6 +219,11 @@ threshold = 0.7
 common_field_fraction = 0.1
 exclude_names = ["*Dto"]                   # in addition to *Props
 default_excludes = true                    # false drops the *Props exclusion
+
+[names]
+min_shared = 2
+min_score = 2.5
+max_files = 10
 
 [modules."@x/legacy"]
 ignore = true                              # its files fall to the enclosing module; paths through it stay

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::{Judge, Verdict};
 use crate::config::Acknowledged;
-use crate::modules::{Home, ModuleGraph, ROOT_MODULE};
+use crate::modules::{Home, ModuleGraph, ROOT_MODULE, Tag};
 use crate::record::{Record, qualified};
 
 /// Doc phrases that mark a copy as deliberate, matched case-insensitively.
@@ -169,11 +169,14 @@ impl<'a> ProjectJudge<'a> {
 impl Judge for ProjectJudge<'_> {
     fn verdict(&self, a: usize, b: usize) -> Verdict {
         Verdict {
-            tag: self
-                .tagging
-                .then(|| self.graph.tag(self.modules[a], self.modules[b])),
+            tag: self.tag(a, b),
             acknowledged: self.acknowledgement(a, b),
         }
+    }
+
+    fn tag(&self, a: usize, b: usize) -> Option<Tag> {
+        self.tagging
+            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
     }
 
     fn module(&self, record: usize) -> Option<&str> {
@@ -234,11 +237,14 @@ impl<'a> FileJudge<'a> {
 impl Judge for FileJudge<'_> {
     fn verdict(&self, a: usize, b: usize) -> Verdict {
         Verdict {
-            tag: self
-                .tagging
-                .then(|| self.graph.tag(self.modules[a], self.modules[b])),
+            tag: self.tag(a, b),
             acknowledged: None,
         }
+    }
+
+    fn tag(&self, a: usize, b: usize) -> Option<Tag> {
+        self.tagging
+            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
     }
 
     fn module(&self, file: usize) -> Option<&str> {
