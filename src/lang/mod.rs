@@ -71,7 +71,7 @@ pub fn extract_imports(files: &[SourceFile]) -> (Vec<(String, Vec<typescript::Im
 
 /// UTF-8 (lossy, so legacy single-byte files still parse), or UTF-16 with a byte-order mark,
 /// as some Windows tooling writes. A UTF-8 byte-order mark is left for the parser to skip.
-fn decode(bytes: &[u8]) -> String {
+pub fn decode(bytes: &[u8]) -> String {
     let utf16 = |rest: &[u8], from: fn([u8; 2]) -> u16| {
         let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|p| from(*p)).collect();
         String::from_utf16_lossy(&units)

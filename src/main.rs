@@ -376,7 +376,11 @@ fn run(cli: Cli) -> Result<()> {
                 include_implementations: args.include_implementations,
                 include_wrappers: args.include_wrappers,
             };
-            let source = |file: &str| std::fs::read_to_string(base.join(file)).ok();
+            let source = |file: &str| {
+                std::fs::read(base.join(file))
+                    .ok()
+                    .map(|b| lang::decode(&b))
+            };
             let report = analysis::fns::find_duplicate_fns(&records, &options, &judge, &source);
             if args.json {
                 let json = analysis::fns::to_json(&records, &report, &judge);

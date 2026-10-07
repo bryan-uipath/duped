@@ -99,12 +99,22 @@ fn parse(parser: &mut Parser, source: &str, rel: &str) -> Option<tree_sitter::Tr
     parser.parse(source, None)
 }
 
-/// Types destructured fields from a `Props`-style annotation declared in the same file.
+/// Types destructured fields from a `Props`-style annotation declared once in the same file;
+/// a name declared twice (say in two namespaces) is ambiguous and left alone.
 fn resolve_destructured(records: &mut [Record]) {
+    let mut declared: HashMap<&str, usize> = HashMap::new();
+    for record in records.iter() {
+        if let Record::Type(t) = record {
+            *declared.entry(&t.name).or_default() += 1;
+        }
+    }
     let shapes: HashMap<String, Vec<(String, Option<String>, bool)>> = records
         .iter()
         .filter_map(|r| match r {
-            Record::Type(t) if matches!(t.kind, TypeKind::Interface | TypeKind::Type) => {
+            Record::Type(t)
+                if matches!(t.kind, TypeKind::Interface | TypeKind::Type)
+                    && declared[t.name.as_str()] == 1 =>
+            {
                 let fields = t
                     .fields
                     .iter()
@@ -628,7 +638,10 @@ impl<'a> Extractor<'a> {
                 "shorthand_property_identifier_pattern" => (Some(member), false),
                 "object_assignment_pattern" => (member.child_by_field_name("left"), true),
                 "pair_pattern" => (
-                    member.child_by_field_name("key"),
+                    // `{ [k]: v }` has no fixed caller-facing name.
+                    member
+                        .child_by_field_name("key")
+                        .filter(|k| k.kind() != "computed_property_name"),
                     member
                         .child_by_field_name("value")
                         .is_some_and(|v| v.kind() == "assignment_pattern"),
@@ -1192,7 +1205,7 @@ mod tests {
     #[test]
     fn destructured_params_list_their_fields() {
         let records = run(
-            "interface PanelProps { user: User; compact?: boolean }\nexport function Panel({ user, compact = false }: PanelProps) {}\nfunction g({ a, b: renamed, 'c': d = 1, ...rest }: { a: string; b?: number }, [x]: T, plain: string) {}\nfunction h({ z }: Other<T>) {}\nfunction r({ user }: Readonly<PanelProps>, { n }: Readonly<{ n: number }>) {}",
+            "interface PanelProps { user: User; compact?: boolean }\nexport function Panel({ user, compact = false }: PanelProps) {}\nfunction g({ a, b: renamed, 'c': d = 1, ...rest }: { a: string; b?: number }, [x]: T, plain: string) {}\nfunction h({ z }: Other<T>) {}\nfunction r({ user }: Readonly<PanelProps>, { n }: Readonly<{ n: number }>) {}\nfunction k({ [key]: v, w }: Props) {}\ninterface Props { w: string }\nnamespace Other { interface Props { w: number } }",
         );
         let f = functions(&records);
         let fields = |p: &Param| -> Vec<(String, Option<String>, bool)> {
@@ -1226,6 +1239,8 @@ mod tests {
         // `Readonly<…>` is looked through.
         assert_eq!(f[3].params[0].fields[0].ty.as_deref(), Some("User"));
         assert_eq!(f[3].params[1].fields[0].ty.as_deref(), Some("number"));
+        // Computed keys are left out; a name declared twice in the file is ambiguous.
+        assert_eq!(fields(&f[4].params[0]), vec![("w".into(), None, false)]);
     }
 
     #[test]

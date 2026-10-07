@@ -6,7 +6,7 @@ use std::fmt::Write;
 use serde_json::{Value, json};
 
 use super::types::normalize_type;
-use super::{Interner, Judge, seed_pairs, tag_rank};
+use super::{Interner, Judge, pair_notes, seed_pairs, tag_rank};
 use crate::modules::Tag;
 use crate::record::{FunctionRecord, Param, Record, TypeKind, qualified};
 
@@ -137,7 +137,7 @@ pub fn find_duplicate_fns<'r>(
     let mut pairs = Vec::new();
     let (mut hidden_same_module, mut hidden_acknowledged) = (0, 0);
     let (mut hidden_implementations, mut hidden_wrappers) = (0, 0);
-    let mut sources: HashMap<&'r str, Option<String>> = HashMap::new();
+    let mut sources: HashMap<&'r str, String> = HashMap::new();
     let sets: Vec<&[u32]> = candidates.iter().map(|c| c.names.as_slice()).collect();
     seed_pairs(&sets, COMMON_NAME_FLOOR, COMMON_NAME_FRACTION, |i, j| {
         let (a, b) = (candidates[i], candidates[j]);
@@ -156,13 +156,11 @@ pub fn find_duplicate_fns<'r>(
             let (fa, fb) = (fn_at(records, a.record), fn_at(records, b.record));
             for f in [fa, fb] {
                 let file = f.location.file.as_str();
-                sources.entry(file).or_insert_with(|| source(file));
+                sources
+                    .entry(file)
+                    .or_insert_with(|| source(file).unwrap_or_default());
             }
-            let text = |f: &FunctionRecord| {
-                sources[f.location.file.as_str()]
-                    .as_deref()
-                    .unwrap_or_default()
-            };
+            let text = |f: &FunctionRecord| sources[f.location.file.as_str()].as_str();
             if forwards(fa, text(fa), fb) || forwards(fb, text(fb), fa) {
                 hidden_wrappers += 1;
                 return;
@@ -199,7 +197,8 @@ pub fn find_duplicate_fns<'r>(
 }
 
 /// `caller` forwards to `callee`: it calls it, directly or through an import alias such as
-/// `import { load as loadShared }`, or it is a bodiless `declare` of it.
+/// `import { load as loadShared }`, passing every one of its own parameters; or it is a
+/// bodiless `declare` (or `.d.ts`) signature of the same name.
 fn forwards(caller: &FunctionRecord, source: &str, callee: &FunctionRecord) -> bool {
     let (start, end) = (caller.location.start_line, caller.location.end_line);
     let lines: Vec<&str> = source
@@ -212,30 +211,67 @@ fn forwards(caller: &FunctionRecord, source: &str, callee: &FunctionRecord) -> b
         return false;
     };
     let (head, body) = (&text[..at], &text[at + caller.name.len()..]);
-    if caller.location.file.ends_with(".d.ts") || head.split_whitespace().any(|w| w == "declare") {
-        return true;
+    let declared =
+        caller.location.file.ends_with(".d.ts") || head.split_whitespace().any(|w| w == "declare");
+    if declared {
+        return caller.name == callee.name;
     }
-    let aliases = mentions(source, &callee.name).filter_map(|rest| {
-        let alias = rest.strip_prefix(" as ")?;
-        alias.split(|c: char| !is_ident(c)).next()
-    });
-    // A bare call to one's own name is recursion; a same-name call through `x.` delegates.
+    let params: Vec<&str> = flat_params(caller)
+        .map(|p| p.name.trim_start_matches(['.', '*']))
+        .collect();
+    let forwarded = |args: &str| params.iter().all(|p| mentions(args, p).next().is_some());
     std::iter::once(callee.name.as_str())
-        .chain(aliases)
+        .chain(import_aliases(source, &callee.name))
         .any(|name| {
+            // A bare call to one's own name is recursion; a same-name call through `x.` delegates.
             let own = name == caller.name;
             body.match_indices(name).any(|(i, _)| {
                 let before = body[..i].chars().next_back();
-                let after = body[i + name.len()..].trim_start().chars().next();
                 let qualified = before == Some('.');
-                matches!(after, Some('(' | '<'))
-                    && if own {
-                        qualified
-                    } else {
-                        !before.is_some_and(is_ident)
-                    }
+                let bounded = if own {
+                    qualified
+                } else {
+                    !before.is_some_and(is_ident)
+                };
+                bounded && call_args(&body[i + name.len()..]).is_some_and(forwarded)
             })
         })
+}
+
+/// `( a, f(b) ) …` → ` a, f(b) `: a call's argument text, when the parentheses close.
+fn call_args(rest: &str) -> Option<&str> {
+    let rest = rest.trim_start().strip_prefix('(')?;
+    let mut depth = 1;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Local names for `name` from `import { name as alias }` specifiers in `source`.
+fn import_aliases<'t>(source: &'t str, name: &'t str) -> impl Iterator<Item = &'t str> {
+    mentions(source, name).filter_map(move |rest| {
+        let at = source.len() - rest.len();
+        // Inside an import statement: no `from` or `;` since its `import` keyword.
+        let statement = &source[source[..at].rfind("import")?..at];
+        if statement.contains("from") || statement.contains(';') {
+            return None;
+        }
+        let alias = rest
+            .strip_prefix(" as ")?
+            .split(|c: char| !is_ident(c))
+            .next()?;
+        (!alias.is_empty()).then_some(alias)
+    })
 }
 
 /// The text after each whole-word occurrence of `name` in `text`.
@@ -308,19 +344,22 @@ fn base_name(written: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+/// Parameters with a destructured object replaced by its keys.
+fn flat_params(f: &FunctionRecord) -> impl Iterator<Item = &Param> {
+    f.params.iter().flat_map(|p| {
+        if p.fields.is_empty() {
+            std::slice::from_ref(p)
+        } else {
+            &p.fields[..]
+        }
+    })
+}
+
 /// Parameter names a caller sees: a destructured object's keys stand in for the object.
 /// `...args`, `*args` and `_id` lose their prefix; unnamed patterns are left out.
 fn terms(f: &FunctionRecord) -> impl Iterator<Item = (&str, Option<&str>)> {
-    f.params
-        .iter()
-        .flat_map(|p| {
-            if p.fields.is_empty() {
-                std::slice::from_ref(p)
-            } else {
-                &p.fields[..]
-            }
-        })
-        .map(|p: &Param| (p.name.trim_start_matches(['.', '*', '_']), p.ty.as_deref()))
+    flat_params(f)
+        .map(|p| (p.name.trim_start_matches(['.', '*', '_']), p.ty.as_deref()))
         .filter(|(name, _)| !name.is_empty() && !name.starts_with(['{', '[', '(']))
 }
 
@@ -400,11 +439,8 @@ fn score_pair(
             }
         }
     }
-    let similarity = if union > 0.0 {
-        shared_weight / union
-    } else {
-        0.0
-    };
+    // Candidates have at least one name and every weight is positive, so `union > 0`.
+    let similarity = shared_weight / union;
     if shared.len() < options.min_shared || similarity < options.threshold {
         return None;
     }
@@ -486,20 +522,14 @@ pub fn render_text(
         writeln!(out, "Hidden pairs: {}.", hidden.join(", ")).ok();
     }
     for (rank, pair) in report.pairs.iter().take(top).enumerate() {
-        let mut notes = String::new();
-        if let Some(tag) = &pair.tag {
-            write!(notes, " — {}", tag.describe()).ok();
-        }
-        if let Some(reason) = &pair.acknowledged {
-            write!(notes, " (acknowledged: {reason})").ok();
-        }
         writeln!(
             out,
-            "\n{}. {:.2} similar, {:.2} typed, shared {}{notes}",
+            "\n{}. {:.2} similar, {:.2} typed, shared {}{}",
             rank + 1,
             pair.similarity,
             pair.typed,
-            pair.shared.join(", ")
+            pair.shared.join(", "),
+            pair_notes(&pair.tag, &pair.acknowledged)
         )
         .ok();
         for index in [pair.a, pair.b] {
@@ -845,13 +875,23 @@ mod tests {
                     "client.ts" => "class C {\n  set(path, value) { return this.api.set(path, value); }\n}",
                     "walk.ts" => "export function walk(path, value) {\n  return walk(path.slice(1), value);\n}",
                     "shim.ts" => "export declare function load(path: string, value: unknown): void;",
+                    // None of these forward to `load`.
+                    "cast.ts" => "const f = load as (p: string) => void;\nexport function copy(path, value) {\n  return (path);\n}",
+                    "method.ts" => "export function save(path, value) {\n  return cache.load(path);\n}",
+                    "compare.ts" => "export function count(path, value) {\n  let load = 0;\n  return load < path.length;\n}",
+                    "decl.ts" => "export declare function other(path: string, value: unknown): void;",
+                    "text.ts" => "export function text(path, value) {\n  return 'load(' + path + value;\n}",
                     _ => "",
                 }
                 .to_string(),
             )
         };
-        let report =
-            |records: &[Record]| find_duplicate_fns(records, &options(), &NoJudge, &sources);
+        // Six functions below share `path, value`; allow that many.
+        let wide = FnOptions {
+            max_sharing: 6,
+            ..options()
+        };
+        let report = |records: &[Record]| find_duplicate_fns(records, &wide, &NoJudge, &sources);
         // Through an import alias, and a bodiless `declare` of the same function.
         let records = vec![
             at("load", "load.ts", (1, 1)),
@@ -870,6 +910,22 @@ mod tests {
                 .len(),
             3
         );
+        // A declaration of another name, a cast, a partial method call, a comparison and a string.
+        let mut records = vec![at("load", "load.ts", (1, 1))];
+        records.extend(
+            [("copy", "cast.ts", (2, 4)), ("save", "method.ts", (1, 3))]
+                .into_iter()
+                .chain([("count", "compare.ts", (1, 4)), ("text", "text.ts", (1, 3))])
+                .map(|(name, file, lines)| at(name, file, lines)),
+        );
+        records.push(at("other", "decl.ts", (1, 1)));
+        let r = report(&records);
+        let with_load = r
+            .pairs
+            .iter()
+            .filter(|p| names(&records, p).0 == "load")
+            .count();
+        assert_eq!((with_load, r.hidden_wrappers), (5, 0), "{:?}", r.pairs);
         // `this.api.set` delegates; a bare `walk(` is recursion, so the copies stay.
         let records = vec![
             at("set", "client.ts", (2, 2)),
