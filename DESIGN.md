@@ -60,6 +60,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 - **fns:** similarity of parameter names and types plus return type.
 - **names:** same-name declarations, flagging the ones whose shape or signature differs.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
+- **imports:** files whose imports overlap on rare items (IDF-weighted Jaccard over `specifier#name`), for ported copies whose declarations were all renamed. It reads import statements itself rather than adding a record kind: imports aren't declarations, and no other analysis needs them. TypeScript/JavaScript only.
 
 ### Module graph and actionability
 
@@ -83,6 +84,7 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped fns [PATH]` | function pairs by signature similarity |
 | `duped names [PATH]` | same-name collisions, including ones with divergent shapes |
 | `duped bodies [PATH]` | functions with near-copy bodies, and files that share several |
+| `duped imports [PATH]` | file pairs that import the same rare things |
 | `duped report [PATH]` | all of the above, tagged by actionability |
 
 Every command supports `--json`, and every command supports `--base <ref>` to limit results to what a diff adds.
@@ -115,3 +117,4 @@ Each step ships on its own.
 8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.
+11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.

@@ -52,6 +52,23 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
     Extraction { records, skipped }
 }
 
+/// Each TypeScript or JavaScript file's imports, in file order; other languages are skipped.
+pub fn extract_imports(files: &[SourceFile]) -> (Vec<(String, Vec<typescript::Import>)>, usize) {
+    let results: Vec<Option<(String, Vec<typescript::Import>)>> = files
+        .par_iter()
+        .filter(|f| matches!(f.language, Language::TypeScript | Language::JavaScript))
+        .map_init(Parser::new, |parser, file| {
+            let source = decode(&std::fs::read(&file.path).ok()?);
+            Some((
+                file.rel.clone(),
+                typescript::imports(parser, &source, &file.rel),
+            ))
+        })
+        .collect();
+    let skipped = results.iter().filter(|r| r.is_none()).count();
+    (results.into_iter().flatten().collect(), skipped)
+}
+
 /// UTF-8 (lossy, so legacy single-byte files still parse), or UTF-16 with a byte-order mark,
 /// as some Windows tooling writes. A UTF-8 byte-order mark is left for the parser to skip.
 fn decode(bytes: &[u8]) -> String {
