@@ -26,6 +26,29 @@ pub struct FunctionRecord {
     pub location: Location,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
+    /// Body tokens in source order, comments dropped; empty for languages without a tokenizer.
+    #[serde(skip)]
+    pub body: Vec<Token>,
+}
+
+/// One body token, classed so an analysis can choose what to abstract away.
+/// Payloads are [`token_hash`]es of the source text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Token {
+    /// Keyword, operator or punctuation.
+    Syntax(u32),
+    Identifier(u32),
+    /// Member name after `.`, object key or JSX attribute.
+    Property(u32),
+    /// String, number or regex literal, quotes included.
+    Literal(u32),
+}
+
+/// FNV-1a, so token hashes are stable across runs.
+pub fn token_hash(text: &str) -> u32 {
+    text.bytes().fold(0x811c_9dc5, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +141,27 @@ impl Record {
         match self {
             Record::Function(f) => &f.location,
             Record::Type(t) => &t.location,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Record::Function(f) => &f.name,
+            Record::Type(t) => &t.name,
+        }
+    }
+
+    pub fn scope(&self) -> Option<&str> {
+        match self {
+            Record::Function(f) => f.scope.as_deref(),
+            Record::Type(t) => t.scope.as_deref(),
+        }
+    }
+
+    pub fn doc(&self) -> Option<&str> {
+        match self {
+            Record::Function(f) => f.doc.as_deref(),
+            Record::Type(t) => t.doc.as_deref(),
         }
     }
 }

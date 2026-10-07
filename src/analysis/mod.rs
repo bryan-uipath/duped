@@ -1,6 +1,7 @@
 //! Duplicate analyses over extracted records, plus the candidate-pair, scoring and cluster
 //! helpers they share.
 
+pub mod bodies;
 pub mod types;
 
 use std::collections::HashMap;

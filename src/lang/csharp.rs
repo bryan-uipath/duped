@@ -215,6 +215,7 @@ impl Extractor<'_> {
             exported: is_public(member, Some(owner)),
             location: self.location(member),
             doc: self.doc(member),
+            body: Vec::new(),
         }));
     }
 

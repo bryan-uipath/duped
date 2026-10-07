@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser};
 
-use super::{collapse_whitespace, has_token, join_scope, push_field, signature};
+use super::{
+    TokenClass, body_tokens, collapse_whitespace, has_token, join_scope, push_field, signature,
+};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
 };
@@ -193,6 +195,10 @@ impl<'a> Extractor<'a> {
             exported: decl.exported,
             location: self.location(decl.anchor, node),
             doc,
+            body: node
+                .child_by_field_name("body")
+                .map(|b| body_tokens(b, self.source, token_class))
+                .unwrap_or_default(),
         };
         self.records.push(Record::Function(record));
     }
@@ -612,6 +618,21 @@ impl<'a> Extractor<'a> {
     }
 }
 
+/// Body token classes; keywords, operators, `this` and the like are syntax.
+fn token_class(kind: &str) -> Option<TokenClass> {
+    Some(match kind {
+        "comment" => TokenClass::Skip,
+        "string" | "template_string" | "regex" | "jsx_text" | "number" => TokenClass::Literal,
+        "identifier"
+        | "type_identifier"
+        | "shorthand_property_identifier"
+        | "shorthand_property_identifier_pattern"
+        | "statement_identifier" => TokenClass::Identifier,
+        "property_identifier" | "private_property_identifier" => TokenClass::Property,
+        _ => return None,
+    })
+}
+
 /// Names of functions implemented in a block, so their overload signatures can be skipped.
 fn implemented_functions(block: Node, source: &str) -> HashSet<String> {
     let mut names = HashSet::new();
@@ -1028,6 +1049,32 @@ mod tests {
             (t[0].doc.as_deref(), t[1].doc.as_deref()),
             (None, Some("Kept."))
         );
+    }
+
+    #[test]
+    fn body_tokens_class_leaves_and_drop_comments() {
+        use crate::record::{Token, token_hash};
+        let records = run("function f() { // note\n  return user.name + 'x' + 2; }");
+        let syntax = |s| Token::Syntax(token_hash(s));
+        assert_eq!(
+            functions(&records)[0].body,
+            vec![
+                syntax("{"),
+                syntax("return"),
+                Token::Identifier(token_hash("user")),
+                syntax("."),
+                Token::Property(token_hash("name")),
+                syntax("+"),
+                Token::Literal(token_hash("'x'")),
+                syntax("+"),
+                Token::Literal(token_hash("2")),
+                syntax(";"),
+                syntax("}"),
+            ]
+        );
+        let arrow = run("const g = (a) => a.b;\ndeclare function h(): void;");
+        assert_eq!(functions(&arrow)[0].body.len(), 3);
+        assert!(functions(&arrow)[1].body.is_empty());
     }
 
     #[test]

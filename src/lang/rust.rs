@@ -260,6 +260,7 @@ impl<'a> Extractor<'a> {
             exported,
             location: self.location(pre.anchor, item),
             doc: pre.doc.clone(),
+            body: Vec::new(),
         }));
     }
 

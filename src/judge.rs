@@ -5,11 +5,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::analysis::types::type_at;
 use crate::analysis::{Judge, Verdict};
 use crate::config::Acknowledged;
 use crate::modules::{Home, ModuleGraph, ROOT_MODULE};
-use crate::record::{Record, TypeRecord, qualified};
+use crate::record::{Record, qualified};
 
 /// Doc phrases that mark a copy as deliberate, matched case-insensitively.
 const DELIBERATE: &[&str] = &[
@@ -25,7 +24,7 @@ pub struct ProjectJudge<'a> {
     records: &'a [Record],
     /// Module of each record, by index.
     modules: Vec<Option<usize>>,
-    /// Module tags need the scanned types to span at least two modules; otherwise every
+    /// Module tags need the compared records to span at least two modules; otherwise every
     /// pair would be "same module".
     tagging: bool,
     acknowledged: &'a [Acknowledged],
@@ -41,6 +40,7 @@ impl<'a> ProjectJudge<'a> {
         records: &'a [Record],
         base: PathBuf,
         acknowledged: &'a [Acknowledged],
+        compared: impl Fn(&Record) -> bool,
     ) -> Self {
         let mut by_file: HashMap<&str, Option<usize>> = HashMap::new();
         let modules: Vec<Option<usize>> = records
@@ -55,7 +55,7 @@ impl<'a> ProjectJudge<'a> {
         let spanned: HashSet<Option<usize>> = records
             .iter()
             .zip(&modules)
-            .filter(|(r, _)| matches!(r, Record::Type(_)))
+            .filter(|(r, _)| compared(r))
             .map(|(_, &m)| m)
             .collect();
         ProjectJudge {
@@ -70,7 +70,7 @@ impl<'a> ProjectJudge<'a> {
     }
 
     fn acknowledgement(&self, a: usize, b: usize) -> Option<String> {
-        let (ta, tb) = (type_at(self.records, a), type_at(self.records, b));
+        let (ta, tb) = (&self.records[a], &self.records[b]);
         let (ma, mb) = (
             self.graph.name(self.modules[a]),
             self.graph.name(self.modules[b]),
@@ -94,13 +94,13 @@ impl<'a> ProjectJudge<'a> {
         for (this, other, other_module, other_index) in sides {
             let text = format!(
                 "{} {}",
-                this.doc.as_deref().unwrap_or_default().to_lowercase(),
-                self.header(&this.location.file)
+                this.doc().unwrap_or_default().to_lowercase(),
+                self.header(&this.location().file)
             );
             let module_words = self.module_words(other_index);
             let names_other = |clause: &str| {
-                let names_type = other.name != this.name
-                    && identifiers(clause).any(|word| word == other.name.to_lowercase());
+                let names_type = other.name() != this.name()
+                    && identifiers(clause).any(|word| word == other.name().to_lowercase());
                 let names_module = self.tagging
                     && other_module != ROOT_MODULE
                     && (contains_module(clause, &other_module.to_lowercase())
@@ -199,12 +199,12 @@ impl Judge for ProjectJudge<'_> {
 }
 
 /// `Name`, `Scope.Name`, or either prefixed with `module:` (full or last `/` segment).
-fn side_matches(pattern: &str, t: &TypeRecord, module: &str) -> bool {
+fn side_matches(pattern: &str, t: &Record, module: &str) -> bool {
     let (wanted_module, name) = match pattern.split_once(':') {
         Some((m, n)) => (Some(m), n),
         None => (None, pattern),
     };
-    let name_matches = name == t.name || name == qualified(t.scope.as_deref(), &t.name);
+    let name_matches = name == t.name() || name == qualified(t.scope(), t.name());
     let module_matches =
         wanted_module.is_none_or(|m| m == module || module.rsplit('/').next() == Some(m));
     name_matches && module_matches
@@ -275,7 +275,7 @@ fn leading_comment(source: &str) -> String {
 mod tests {
     use super::*;
     use crate::modules::Module;
-    use crate::record::{Language, Location, TypeKind};
+    use crate::record::{Language, Location, TypeKind, TypeRecord};
 
     fn ty(name: &str, file: &str, doc: Option<&str>) -> Record {
         Record::Type(TypeRecord {
@@ -293,6 +293,10 @@ mod tests {
             },
             doc: doc.map(str::to_string),
         })
+    }
+
+    fn is_type(r: &Record) -> bool {
+        matches!(r, Record::Type(_))
     }
 
     fn graph() -> ModuleGraph {
@@ -324,7 +328,7 @@ mod tests {
             b: "@x/canvas:Row".into(),
             reason: Some("boundary".into()),
         }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("boundary")
@@ -336,7 +340,7 @@ mod tests {
             b: "Row".into(),
             reason: None,
         }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &wrong);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &wrong, is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
     }
 
@@ -353,7 +357,7 @@ mod tests {
             ty("Other", "canvas/c.ts", Some("Returns a copy of the list.")),
             ty("Thing", "evals/d.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[]);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
@@ -389,12 +393,52 @@ mod tests {
                 aliases: Vec::new(),
             },
         ]);
-        let judge = ProjectJudge::new(&g, &records, base, &[]);
+        let judge = ProjectJudge::new(&g, &records, base, &[], is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn judges_function_pairs_by_function_modules() {
+        use crate::record::FunctionRecord;
+        let function = |name: &str, file: &str| {
+            Record::Function(FunctionRecord {
+                language: Language::TypeScript,
+                name: name.into(),
+                scope: None,
+                params: Vec::new(),
+                returns: None,
+                exported: true,
+                location: Location {
+                    file: file.into(),
+                    start_line: 1,
+                    end_line: 1,
+                },
+                doc: None,
+                body: Vec::new(),
+            })
+        };
+        let g = graph();
+        // The only type is in canvas; functions span both modules.
+        let records = vec![
+            ty("T", "canvas/t.ts", None),
+            function("load", "canvas/a.ts"),
+            function("fetch", "evals/b.ts"),
+        ];
+        let acks = vec![Acknowledged {
+            a: "unified-evals:fetch".into(),
+            b: "load".into(),
+            reason: None,
+        }];
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, |r| {
+            matches!(r, Record::Function(_))
+        });
+        let verdict = judge.verdict(1, 2);
+        assert_eq!(verdict.tag, Some(crate::modules::Tag::Boundary));
+        assert_eq!(verdict.acknowledged.as_deref(), Some("duped.toml"));
     }
 
     #[test]
@@ -406,7 +450,7 @@ mod tests {
             aliases: Vec::new(),
         }]);
         let records = vec![ty("A", "a.ts", None), ty("B", "b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[]);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert_eq!(judge.module(0), None);
     }
@@ -416,7 +460,7 @@ mod tests {
         // Two modules exist, but every scanned type is in one of them.
         let g = graph();
         let records = vec![ty("A", "canvas/a.ts", None), ty("B", "canvas/b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[]);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert!(judge.summary().unwrap().contains("fewer than 2"));
     }
@@ -426,7 +470,7 @@ mod tests {
         let g = graph();
         let ack = |doc: &str, a: &str, b: &str| {
             let records = vec![ty(a, "canvas/a.ts", Some(doc)), ty(b, "evals/b.ts", None)];
-            ProjectJudge::new(&g, &records, "/repo".into(), &[])
+            ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type)
                 .verdict(0, 1)
                 .acknowledged
         };
@@ -503,7 +547,7 @@ mod tests {
             ty("Foo", "canvas/a.ts", None),
             ty("License", "evals/b.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, base, &[]);
+        let judge = ProjectJudge::new(&g, &records, base, &[], is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }

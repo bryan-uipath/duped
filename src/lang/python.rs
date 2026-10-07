@@ -137,6 +137,7 @@ impl<'a> Extractor<'a> {
             exported,
             location: self.location(def.anchor, def.node),
             doc: self.docstring(def.node),
+            body: Vec::new(),
         };
         self.records.push(Record::Function(record));
     }
