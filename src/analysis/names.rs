@@ -437,6 +437,7 @@ mod tests {
                     name: name.trim().to_string(),
                     ty: Some(ty.trim().to_string()),
                     optional: false,
+                    fields: Vec::new(),
                 }
             })
             .collect();
@@ -638,6 +639,7 @@ mod tests {
                     name: name.to_string(),
                     ty: None,
                     optional: false,
+                    fields: Vec::new(),
                 });
             }
             record

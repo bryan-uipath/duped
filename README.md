@@ -22,6 +22,7 @@ duped bodies [DIR]                          # functions whose bodies are near-co
 duped imports [DIR]                         # TS/JS files that import the same rare things
 duped names [DIR]                           # file pairs that declare the same names
 duped report [DIR] [--base REF]             # every analysis, grouped by file pair
+duped fns [DIR]                             # functions that share most of their parameter names
 ```
 
 `DIR` can also be a single file.
@@ -50,7 +51,7 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | `exported` | all | part of the module's public API, including `export { x }` lists; private and protected class members are `false` |
 | `file`, `start_line`, `end_line` | all | root-relative path and 1-based inclusive lines (from the `export` keyword or first decorator) |
 | `doc` | all, optional | the adjacent `/** … */` comment (TypeScript) or the docstring (Python), with whitespace collapsed and escapes left as written |
-| `params` | function | `[{ name, type?, optional? }]`; TypeScript's `this:` and Python's method receiver (`self`, `cls`) are omitted |
+| `params` | function | `[{ name, type?, optional?, fields? }]`; TypeScript's `this:` and Python's method receiver (`self`, `cls`) are omitted. A destructured object (TypeScript/JavaScript) keeps its written `name` and `type`, and `fields` lists its keys as `[{ name, type?, optional? }]`: `{ id, force = false }` gives `id` and `force?`. Key types come from an inline object type, or from an interface or object type alias of that name in the same file; `...rest` is left out |
 | `returns` | function, optional | return type as written |
 | `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields), `alias` (no fields), `struct`, `trait` or `record` |
 | `fields` | type | `[{ name, type?, optional?, kind }]`, where `kind` is `property`, `method` or `member`; quotes are stripped, so `'id'` and `id` match; overloads and getter/setter pairs share one field |
@@ -184,6 +185,30 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
 `--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
+
+### Finding duplicate functions
+
+`duped fns` compares parameter lists, whatever the functions are called. A destructured object's keys count as parameters, so `Panel({ user, compact })` matches `open(user, compact)`. It is a prototype: expect a weak signal, and read both sides.
+
+- **similarity:** Jaccard similarity of parameter names (case-insensitive), with each name weighted by how rare it is, so `props` or `value` count for little and `retryPolicy` for a lot.
+- **typed:** the same, but a shared name only counts when its types match (as in `types`), plus the return type when both sides declare one.
+- **sharing:** how many functions have every shared name. When more than `--max-sharing` do, the pair is a convention, such as `(a, b)` comparators, and is skipped.
+
+Pairs in one file are skipped. These are hidden, each with a flag to show them:
+
+- **same module** (`--include-same-module`) and **acknowledged** (`--include-acknowledged`), as for types; `[[acknowledged]]` entries can name functions.
+- **implementations** (`--include-implementations`): same-name methods whose classes share a base class or interface, or where one class extends the other.
+- **wrappers** (`--include-wrappers`): one function calls the other, directly or through an import alias (`import { load as loadShared }`), or is a bodiless `declare` (or `.d.ts`) signature of it. A bare call to a function's own name is recursion, not a wrapper.
+
+Pairs are ranked like type pairs: most actionable tag first, then most similar. `--json` prints every pair.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--threshold` | `0.7` | minimum weighted similarity |
+| `--min-params` | `2` | skip functions with fewer parameter names |
+| `--min-shared` | `2` | a pair needs at least this many shared names |
+| `--max-sharing` | `5` | skip pairs whose shared names all appear together on more functions than this |
+| `--top` | `40` | pairs to show |
 
 ### Modules and what to do about a pair
 

@@ -53,6 +53,9 @@ pub struct Param {
     pub ty: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub optional: bool,
+    /// Names bound by a destructured object parameter, e.g. `{ id, force = false }`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<Param>,
 }
 
 #[derive(Debug, Serialize)]

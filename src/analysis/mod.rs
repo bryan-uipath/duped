@@ -2,6 +2,7 @@
 //! helpers they share.
 
 pub mod bodies;
+pub mod fns;
 pub mod imports;
 pub mod names;
 pub mod types;

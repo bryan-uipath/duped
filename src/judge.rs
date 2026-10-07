@@ -1,5 +1,5 @@
-//! What the project says about a duplicate pair: its module tag, and whether it's
-//! acknowledged as deliberate, in `duped.toml` or by a doc comment on either side.
+//! What the project says about a duplicate pair of types or functions: its module tag, and
+//! whether it's acknowledged as deliberate, in `duped.toml` or by a doc comment on either side.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

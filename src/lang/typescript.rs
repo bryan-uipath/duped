@@ -25,6 +25,7 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str, language: Language)
         overload_docs: HashMap::new(),
     };
     extractor.statements(tree.root_node(), &[]);
+    resolve_destructured(&mut extractor.records);
     extractor.records
 }
 
@@ -96,6 +97,51 @@ fn parse(parser: &mut Parser, source: &str, rel: &str) -> Option<tree_sitter::Tr
         .set_language(&grammar.into())
         .expect("bundled grammar is compatible");
     parser.parse(source, None)
+}
+
+/// Types destructured fields from a `Props`-style annotation declared in the same file.
+fn resolve_destructured(records: &mut [Record]) {
+    let shapes: HashMap<String, Vec<(String, Option<String>, bool)>> = records
+        .iter()
+        .filter_map(|r| match r {
+            Record::Type(t) if matches!(t.kind, TypeKind::Interface | TypeKind::Type) => {
+                let fields = t
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone(), f.optional));
+                Some((t.name.clone(), fields.collect()))
+            }
+            _ => None,
+        })
+        .collect();
+    for record in records {
+        let Record::Function(f) = record else {
+            continue;
+        };
+        for param in f.params.iter_mut().filter(|p| !p.fields.is_empty()) {
+            // `Props`, `Props<T>` or `Readonly<Props>`.
+            let Some(shape) = param
+                .ty
+                .as_deref()
+                .map(|ty| {
+                    let ty = ty
+                        .strip_prefix("Readonly<")
+                        .and_then(|t| t.strip_suffix('>'))
+                        .unwrap_or(ty);
+                    ty.split('<').next().unwrap_or(ty).trim()
+                })
+                .and_then(|name| shapes.get(name))
+            else {
+                continue;
+            };
+            for field in param.fields.iter_mut().filter(|f| f.ty.is_none()) {
+                if let Some((_, ty, optional)) = shape.iter().find(|(n, ..)| *n == field.name) {
+                    field.ty.clone_from(ty);
+                    field.optional |= optional;
+                }
+            }
+        }
+    }
 }
 
 struct Extractor<'a> {
@@ -527,6 +573,7 @@ impl<'a> Extractor<'a> {
                 name: self.text(single),
                 ty: None,
                 optional: false,
+                fields: Vec::new(),
             }];
         }
         let Some(list) = function.child_by_field_name("parameters") else {
@@ -542,20 +589,64 @@ impl<'a> Extractor<'a> {
                     if pattern.is_some_and(|n| n.kind() == "this") {
                         return None;
                     }
+                    let annotation = p.child_by_field_name("type");
+                    let fields = pattern
+                        .filter(|n| n.kind() == "object_pattern")
+                        .map(|n| self.pattern_fields(n, annotation))
+                        .unwrap_or_default();
                     Some(Param {
                         name: pattern.map_or_else(|| self.text(p), |n| self.text(n)),
-                        ty: p.child_by_field_name("type").map(|t| self.annotation(t)),
+                        ty: annotation.map(|t| self.annotation(t)),
                         optional: p.kind() == "optional_parameter"
                             || p.child_by_field_name("value").is_some(),
+                        fields,
                     })
                 }
                 _ => Some(Param {
                     name: self.text(p),
                     ty: None,
                     optional: false,
+                    fields: Vec::new(),
                 }),
             })
             .collect()
+    }
+
+    /// `{ id, force = false }: { id: string; force?: boolean }` → `id: string`, `force?: boolean`.
+    /// Keys are the caller-facing names (`{ a: b }` binds `a`); `...rest` is left out.
+    fn pattern_fields(&self, pattern: Node, annotation: Option<Node>) -> Vec<Param> {
+        let declared = annotation
+            .and_then(|a| a.named_child(0))
+            .map(|t| self.unreadonly(t))
+            .filter(|t| t.kind() == "object_type")
+            .map(|t| self.object_members(t))
+            .unwrap_or_default();
+        let mut fields = Vec::new();
+        let mut cursor = pattern.walk();
+        for member in pattern.named_children(&mut cursor) {
+            let (key, defaulted) = match member.kind() {
+                "shorthand_property_identifier_pattern" => (Some(member), false),
+                "object_assignment_pattern" => (member.child_by_field_name("left"), true),
+                "pair_pattern" => (
+                    member.child_by_field_name("key"),
+                    member
+                        .child_by_field_name("value")
+                        .is_some_and(|v| v.kind() == "assignment_pattern"),
+                ),
+                _ => (None, false),
+            };
+            let Some(name) = key.map(|k| unquote(&self.text(k)).to_string()) else {
+                continue;
+            };
+            let field = declared.iter().find(|f| f.name == name);
+            fields.push(Param {
+                ty: field.and_then(|f| f.ty.clone()),
+                optional: defaulted || field.is_some_and(|f| f.optional),
+                name,
+                fields: Vec::new(),
+            });
+        }
+        fields
     }
 
     fn parameter_properties(&self, constructor: Node) -> Vec<Field> {
@@ -583,6 +674,19 @@ impl<'a> Extractor<'a> {
     fn returns(&self, node: Node) -> Option<String> {
         node.child_by_field_name("return_type")
             .map(|n| self.annotation(n))
+    }
+
+    /// `Readonly<T>` → `T`, unparenthesised.
+    fn unreadonly<'t>(&self, ty: Node<'t>) -> Node<'t> {
+        let ty = unparen(ty);
+        let readonly = ty.kind() == "generic_type"
+            && ty
+                .child_by_field_name("name")
+                .is_some_and(|n| self.text(n) == "Readonly");
+        let inner = readonly
+            .then(|| ty.child_by_field_name("type_arguments")?.named_child(0))
+            .flatten();
+        inner.map_or(ty, unparen)
     }
 
     /// A member's name, with quotes removed so `'id'` and `id` match.
@@ -1075,6 +1179,7 @@ mod tests {
             Language::TypeScript,
         );
         assert_eq!(functions(&tsx)[0].params[0].name, "{ id }");
+        assert_eq!(functions(&tsx)[0].params[0].fields[0].name, "id");
         let js = extract(
             &mut Parser::new(),
             "export function f(a, b = 1) { return <A />; }",
@@ -1082,6 +1187,45 @@ mod tests {
             Language::JavaScript,
         );
         assert_eq!(functions(&js)[0].params.len(), 2);
+    }
+
+    #[test]
+    fn destructured_params_list_their_fields() {
+        let records = run(
+            "interface PanelProps { user: User; compact?: boolean }\nexport function Panel({ user, compact = false }: PanelProps) {}\nfunction g({ a, b: renamed, 'c': d = 1, ...rest }: { a: string; b?: number }, [x]: T, plain: string) {}\nfunction h({ z }: Other<T>) {}\nfunction r({ user }: Readonly<PanelProps>, { n }: Readonly<{ n: number }>) {}",
+        );
+        let f = functions(&records);
+        let fields = |p: &Param| -> Vec<(String, Option<String>, bool)> {
+            p.fields
+                .iter()
+                .map(|f| (f.name.clone(), f.ty.clone(), f.optional))
+                .collect()
+        };
+        // Typed from the same-file `PanelProps`; the param keeps its written name and type.
+        assert_eq!(f[0].params[0].name, "{ user, compact = false }");
+        assert_eq!(f[0].params[0].ty.as_deref(), Some("PanelProps"));
+        assert_eq!(
+            fields(&f[0].params[0]),
+            vec![
+                ("user".into(), Some("User".into()), false),
+                ("compact".into(), Some("boolean".into()), true)
+            ]
+        );
+        // Keys, not local names; inline types; defaults are optional; rest is left out.
+        assert_eq!(
+            fields(&f[1].params[0]),
+            vec![
+                ("a".into(), Some("string".into()), false),
+                ("b".into(), Some("number".into()), true),
+                ("c".into(), None, true)
+            ]
+        );
+        assert!(f[1].params[1].fields.is_empty() && f[1].params[2].fields.is_empty());
+        // An unresolved named type leaves fields untyped.
+        assert_eq!(fields(&f[2].params[0]), vec![("z".into(), None, false)]);
+        // `Readonly<…>` is looked through.
+        assert_eq!(f[3].params[0].fields[0].ty.as_deref(), Some("User"));
+        assert_eq!(f[3].params[1].fields[0].ty.as_deref(), Some("number"));
     }
 
     #[test]

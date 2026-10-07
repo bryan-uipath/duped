@@ -337,18 +337,21 @@ impl<'a> Extractor<'a> {
                         name: self.text(pattern),
                         ty: p.child_by_field_name("type").map(|t| self.text(t)),
                         optional: false,
+                        fields: Vec::new(),
                     })
                 }
                 "variadic_parameter" => Some(Param {
                     name: "...".to_string(),
                     ty: None,
                     optional: false,
+                    fields: Vec::new(),
                 }),
                 // An unnamed parameter type, e.g. in `extern` or 2015-edition trait methods.
                 _ => Some(Param {
                     name: "_".to_string(),
                     ty: Some(self.text(p)),
                     optional: false,
+                    fields: Vec::new(),
                 }),
             })
             .collect()

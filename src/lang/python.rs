@@ -434,11 +434,13 @@ impl<'a> Extractor<'a> {
                     name: self.text(p),
                     ty: None,
                     optional: false,
+                    fields: Vec::new(),
                 },
                 "typed_parameter" => Param {
                     name: p.named_child(0).map(|n| self.text(n)).unwrap_or_default(),
                     ty: p.child_by_field_name("type").map(|t| self.annotation(t)),
                     optional: false,
+                    fields: Vec::new(),
                 },
                 "default_parameter" | "typed_default_parameter" => Param {
                     name: p
@@ -447,6 +449,7 @@ impl<'a> Extractor<'a> {
                         .unwrap_or_default(),
                     ty: p.child_by_field_name("type").map(|t| self.annotation(t)),
                     optional: true,
+                    fields: Vec::new(),
                 },
                 // `*` and `/` separators.
                 _ => {
