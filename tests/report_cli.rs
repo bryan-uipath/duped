@@ -97,6 +97,11 @@ fn diff_mode_keeps_pairs_touching_changed_files_under_the_scanned_path() {
     let report = json(&root.join("sub"), &["--base", "HEAD"]);
     assert_eq!(report["changedFiles"], 1);
     assert_eq!(groups(&report).len(), 2);
+
+    // A single-file PATH counts only itself, not its changed siblings.
+    write(&root, "sub/b/notes.md", "draft");
+    let report = json(&root.join("sub/b/café.ts"), &["--base", "main"]);
+    assert_eq!(report["changedFiles"], 1);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -116,7 +121,7 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
     assert_eq!(report["detectors"]["bodies"]["total"], 3);
 
     assert_eq!(duped(&root, &["--top", "abc"]).status.code(), Some(2));
-    let outside = duped(&root, &["--base", "main"]);
+    let outside = duped(&root, &["--base", "no-such-ref"]);
     assert!(!outside.status.success());
     assert!(String::from_utf8_lossy(&outside.stderr).contains("git"));
     std::fs::remove_dir_all(&root).unwrap();

@@ -10,7 +10,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::analysis::bodies::{BodyReport, file_shared};
+use crate::analysis::bodies::{BodyReport, file_shared, function_at};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
 use crate::analysis::pair_notes;
@@ -155,10 +155,7 @@ pub fn attempt(run: impl FnOnce() -> Result<Vec<Finding>>) -> Result<Vec<Finding
 /// Function pairs, then files sharing several functions.
 pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
     let pairs = report.pairs.iter().map(|p| {
-        let tokens = |i: usize| match &records[i] {
-            Record::Function(f) => f.body.len(),
-            Record::Type(_) => 0,
-        };
+        let tokens = |i| function_at(records, i).body.len();
         Finding {
             detector: "bodies",
             kind: "function",
@@ -280,14 +277,10 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
 }
 
 fn side(record: &Record) -> Side {
-    let (scope, name) = match record {
-        Record::Function(f) => (f.scope.as_deref(), &f.name),
-        Record::Type(t) => (t.scope.as_deref(), &t.name),
-    };
     Side {
         file: record.location().file.clone(),
         line: Some(record.location().start_line),
-        name: Some(qualified(scope, name)),
+        name: Some(qualified(record.scope(), record.name())),
     }
 }
 
@@ -359,8 +352,9 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
 // ----- changed files -----
 
 /// Files added, modified or renamed since the merge base with `base`, committed or not, plus
-/// untracked ones, relative to `dir`; files outside `dir` are dropped.
-pub fn changed_files(dir: &Path, base: &str) -> Result<HashSet<String>> {
+/// untracked ones, under the canonical `scanned` path (a directory or one file), relative to
+/// `dir`, the directory findings' paths are relative to.
+pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<HashSet<String>> {
     if base.starts_with('-') {
         bail!("--base `{base}` is not a ref");
     }
@@ -388,7 +382,7 @@ pub fn changed_files(dir: &Path, base: &str) -> Result<HashSet<String>> {
         .chain(untracked.split('\0'))
         .filter(|f| !f.is_empty())
         .map(|f| top.join(f))
-        .filter(|path| path.starts_with(dir))
+        .filter(|path| path.starts_with(scanned))
         .map(|path| modules::relative(dir, &path))
         .collect())
 }

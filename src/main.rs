@@ -370,10 +370,11 @@ fn report(
     base: &Path,
 ) -> Result<()> {
     // Validate `--base` and modules before scanning or truncating `--out`.
+    let scanned = args.scan.path.canonicalize()?;
     let changed = args
         .base
         .as_deref()
-        .map(|reference| report::changed_files(base, reference))
+        .map(|reference| report::changed_files(&scanned, base, reference))
         .transpose()?;
     let graph = modules::ModuleGraph::discover(root, &config.modules)?;
     let walk = walk_options(&args.scan, config, rules.clone(), root, base);
@@ -426,9 +427,8 @@ fn report(
         Ok(report::types(&records, &found))
     });
 
-    let directory = std::path::absolute(&args.scan.path)?;
     let report = report::Report::new(
-        directory.display().to_string(),
+        base.display().to_string(),
         args.base.as_deref(),
         changed,
         vec![

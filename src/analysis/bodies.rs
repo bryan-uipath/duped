@@ -450,7 +450,7 @@ pub fn to_json(records: &[Record], report: &BodyReport, judge: &dyn Judge) -> Va
     })
 }
 
-fn function_at(records: &[Record], index: usize) -> &FunctionRecord {
+pub fn function_at(records: &[Record], index: usize) -> &FunctionRecord {
     match &records[index] {
         Record::Function(f) => f,
         Record::Type(_) => unreachable!("pairs only reference function records"),

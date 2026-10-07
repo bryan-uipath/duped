@@ -10,7 +10,7 @@ description: "How to use the duped CLI to find duplicated functions and types: n
 ## Install
 
 ```bash
-command -v duped || cargo install --locked --git https://github.com/bryan-uipath/duped
+duped report --help >/dev/null 2>&1 || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs a build with `report`
 ```
 
 ## Commands
