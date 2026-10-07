@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
+use crate::analysis::imports::ImportOptions;
 use crate::config::Config;
 use crate::rules::Rules;
 
@@ -38,6 +39,8 @@ enum Command {
     Types(TypesArgs),
     /// Find functions whose bodies are near-copies, whatever they are called.
     Bodies(BodiesArgs),
+    /// Find TypeScript/JavaScript files that import the same rare things, often ported copies.
+    Imports(ImportsArgs),
 }
 
 #[derive(Args)]
@@ -63,6 +66,30 @@ struct BodiesArgs {
     #[arg(long, default_value_t = 40)]
     top: usize,
     /// Emit every pair and file pair as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct ImportsArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// A pair needs shared rare imports from at least this many specifiers.
+    #[arg(long, default_value_t = 3)]
+    min_shared: usize,
+    /// Minimum IDF-weighted Jaccard similarity of import items (0–1).
+    #[arg(long, value_parser = fraction, default_value_t = 0.5)]
+    threshold: f64,
+    /// Imports in more than this fraction of files (and more than 10) are not rare.
+    #[arg(long, value_parser = fraction, default_value_t = 0.005)]
+    rare_fraction: f64,
+    /// Also report pairs whose two files are in the same module.
+    #[arg(long)]
+    include_same_module: bool,
+    /// How many pairs to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit every pair as JSON (ignores `--top`).
     #[arg(long)]
     json: bool,
 }
@@ -144,7 +171,8 @@ fn run(cli: Cli) -> Result<()> {
     let (Command::Extract(scan)
     | Command::Index(scan)
     | Command::Types(TypesArgs { scan, .. })
-    | Command::Bodies(BodiesArgs { scan, .. })) = &cli.command;
+    | Command::Bodies(BodiesArgs { scan, .. })
+    | Command::Imports(ImportsArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -155,6 +183,9 @@ fn run(cli: Cli) -> Result<()> {
     let config = config::load(&root, scan.config.as_deref())?;
     let rules = Rules::with_config(&config.rules)?;
     // Validate options and modules before scanning or truncating `--out`.
+    if let Command::Imports(args) = &cli.command {
+        return imports(args, &config, rules, &root, &base);
+    }
     let types = match &cli.command {
         Command::Types(args) => Some(type_options(args, &config, rules.clone())?),
         _ => None,
@@ -224,6 +255,47 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         _ => unreachable!("options and modules are built for `types` and `bodies`"),
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// `duped imports`: parses only import statements, so it skips record extraction.
+fn imports(
+    args: &ImportsArgs,
+    config: &Config,
+    rules: Rules,
+    root: &Path,
+    base: &Path,
+) -> Result<()> {
+    let graph = modules::ModuleGraph::discover(root, &config.modules)?;
+    let files = walk::discover(
+        &args.scan.path,
+        &walk_options(&args.scan, config, rules, root, base),
+    )?;
+    let (imports, skipped) = lang::extract_imports(&files);
+    if skipped > 0 {
+        eprintln!("duped: skipped {skipped} unreadable files");
+    }
+    let options = ImportOptions {
+        min_shared: args.min_shared,
+        threshold: args.threshold,
+        rare_fraction: args.rare_fraction,
+        include_same_module: args.include_same_module,
+    };
+    let files = analysis::imports::file_items(imports);
+    let judge = judge::FileJudge::new(&graph, base, files.iter().map(|f| f.file.as_str()));
+    let report = analysis::imports::find_shared_imports(&files, &options, &judge);
+    let mut out = output(&args.scan)?;
+    if args.json {
+        serde_json::to_writer(
+            &mut out,
+            &analysis::imports::to_json(&files, &report, &judge),
+        )?;
+        out.write_all(b"\n")?;
+    } else {
+        let text = analysis::imports::render_text(&files, &report, args.top, &options, &judge);
+        out.write_all(text.as_bytes())?;
     }
     out.flush()?;
     Ok(())
@@ -302,24 +374,33 @@ fn scan_records(
     root: &Path,
     base: &Path,
 ) -> Result<Vec<record::Record>> {
-    // `[scan] exclude` is relative to the project root, `--exclude` to the scanned path.
-    // A scan outside the root (via `--root`) has no root-relative paths to match.
-    let prefix = base
-        .starts_with(root)
-        .then(|| modules::relative(root, base));
-    let options = walk::WalkOptions {
-        include_tests: scan.include_tests || config.scan.include_tests,
-        excludes: scan.excludes.clone(),
-        root_excludes: config.scan.exclude.clone(),
-        root_prefix: prefix,
-        rules,
-    };
-    let files = walk::discover(&scan.path, &options)?;
+    let files = walk::discover(&scan.path, &walk_options(scan, config, rules, root, base))?;
     let extraction = lang::extract_files(&files);
     if extraction.skipped > 0 {
         eprintln!("duped: skipped {} unreadable files", extraction.skipped);
     }
     Ok(extraction.records)
+}
+
+fn walk_options(
+    scan: &Scan,
+    config: &Config,
+    rules: Rules,
+    root: &Path,
+    base: &Path,
+) -> walk::WalkOptions {
+    // `[scan] exclude` is relative to the project root, `--exclude` to the scanned path.
+    // A scan outside the root (via `--root`) has no root-relative paths to match.
+    let prefix = base
+        .starts_with(root)
+        .then(|| modules::relative(root, base));
+    walk::WalkOptions {
+        include_tests: scan.include_tests || config.scan.include_tests,
+        excludes: scan.excludes.clone(),
+        root_excludes: config.scan.exclude.clone(),
+        root_prefix: prefix,
+        rules,
+    }
 }
 
 fn output(scan: &Scan) -> Result<Box<dyn Write>> {

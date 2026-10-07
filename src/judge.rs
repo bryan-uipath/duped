@@ -3,7 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::analysis::{Judge, Verdict};
 use crate::config::Acknowledged;
@@ -199,6 +199,63 @@ impl Judge for ProjectJudge<'_> {
             )
         } else {
             "fewer than 2 modules, so pairs are not tagged".to_string()
+        })
+    }
+}
+
+/// Module tags for whole files, by index; no acknowledgements.
+pub struct FileJudge<'a> {
+    graph: &'a ModuleGraph,
+    modules: Vec<Option<usize>>,
+    /// As for [`ProjectJudge`]: the scanned files must span at least two modules.
+    tagging: bool,
+}
+
+impl<'a> FileJudge<'a> {
+    /// `files` are relative to `base`.
+    pub fn new<'f>(
+        graph: &'a ModuleGraph,
+        base: &Path,
+        files: impl IntoIterator<Item = &'f str>,
+    ) -> Self {
+        let modules: Vec<Option<usize>> = files
+            .into_iter()
+            .map(|f| graph.module_of(&base.join(f)))
+            .collect();
+        let spanned: HashSet<Option<usize>> = modules.iter().copied().collect();
+        FileJudge {
+            graph,
+            tagging: spanned.len() >= 2,
+            modules,
+        }
+    }
+}
+
+impl Judge for FileJudge<'_> {
+    fn verdict(&self, a: usize, b: usize) -> Verdict {
+        Verdict {
+            tag: self
+                .tagging
+                .then(|| self.graph.tag(self.modules[a], self.modules[b])),
+            acknowledged: None,
+        }
+    }
+
+    fn module(&self, file: usize) -> Option<&str> {
+        self.tagging.then(|| self.graph.name(self.modules[file]))
+    }
+
+    fn home(&self, members: &[usize]) -> Option<Home> {
+        let modules: Vec<Option<usize>> = members.iter().map(|&m| self.modules[m]).collect();
+        self.tagging.then(|| self.graph.home(&modules)).flatten()
+    }
+
+    fn summary(&self) -> Option<String> {
+        let found = self.graph.modules.len();
+        Some(if self.tagging {
+            format!("{found} modules")
+        } else {
+            "the scanned files are in fewer than 2 modules, so pairs are not tagged".to_string()
         })
     }
 }
