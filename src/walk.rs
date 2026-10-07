@@ -7,12 +7,20 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
 
 use crate::record::Language;
+use crate::rules::Rules;
 
 pub struct WalkOptions {
     pub include_tests: bool,
     /// Globs matched against root-relative `/` paths and their parent directories,
     /// e.g. `examples` or `src/gen/*.ts`.
     pub excludes: Vec<String>,
+    /// The same, but matched against paths relative to the project root, e.g. from `duped.toml`.
+    pub root_excludes: Vec<String>,
+    /// The scanned directory relative to the project root, e.g. `packages` (empty when equal);
+    /// `None` when it is outside the root, so `root_excludes` don't apply.
+    pub root_prefix: Option<String>,
+    /// Which paths are tests, per language.
+    pub rules: Rules,
 }
 
 pub struct SourceFile {
@@ -23,7 +31,7 @@ pub struct SourceFile {
 }
 
 /// Directories never worth parsing, even in repos without a `.gitignore`.
-const SKIPPED_DIRS: &[&str] = &[
+pub(crate) const SKIPPED_DIRS: &[&str] = &[
     "node_modules",
     "dist",
     "build",
@@ -38,6 +46,7 @@ const SKIPPED_DIRS: &[&str] = &[
 /// entries are reported on stderr and skipped rather than ending the walk.
 pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
     let excludes = build_globs(&options.excludes)?;
+    let root_excludes = build_globs(&options.root_excludes)?;
     let mut files = Vec::new();
     let walker = WalkBuilder::new(root)
         .require_git(false)
@@ -59,9 +68,16 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             continue;
         };
         let rel = relative(root, &path);
+        let is_test = options.rules.get(language).is_test_path(&rel);
+        let root_rel = match options.root_prefix.as_deref() {
+            None => None,
+            Some("") => Some(rel.clone()),
+            Some(prefix) => Some(format!("{prefix}/{rel}")),
+        };
         if is_excluded(&excludes, &rel)
             || is_csharp_build_output(&rel)
-            || (!options.include_tests && is_test_path(&rel))
+            || root_rel.is_some_and(|r| is_excluded(&root_excludes, &r))
+            || (!options.include_tests && is_test)
         {
             continue;
         }
@@ -97,64 +113,9 @@ pub fn language_for(path: &Path) -> Option<Language> {
     }
 }
 
-/// Test, mock and fixture paths, e.g. `src/a.test.ts`, `src/a.mock.ts`, `src/mocks/a.ts`.
-pub fn is_test_path(rel: &str) -> bool {
-    const DIRS: &[&str] = &[
-        "test",
-        "tests",
-        "__tests__",
-        "__mocks__",
-        "mocks",
-        "fixtures",
-        "fixture",
-        "__fixtures__",
-        "__snapshots__",
-        "e2e",
-        "unittests",
-        "integrationtests",
-        "benches",
-    ];
-    const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
-    // C# test projects and classes, e.g. `Foo.UnitTests/RepoTests.cs`.
-    const DIR_SUFFIXES: &[&str] = &[".Tests", ".Test", ".UnitTests", ".IntegrationTests"];
-    // C# test classes and doubles, e.g. `RepoTests.cs`, `UserMock.cs`, `FakeClock.cs`.
-    const CS_STEM_SUFFIXES: &[&str] = &["Tests", "Mock", "Fake"];
-    const CS_STEM_PREFIXES: &[&str] = &["Fake"];
-    let csharp = rel.ends_with(".cs");
-    let mut segments = rel.split('/').peekable();
-    while let Some(segment) = segments.next() {
-        if segments.peek().is_none() {
-            let stem = segment.strip_suffix(".cs").unwrap_or(segment);
-            // Rust's out-of-line `#[cfg(test)] mod tests;` lives in `tests.rs` / `test.rs`.
-            return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
-                || is_python_test_file(segment)
-                || matches!(segment, "tests.rs" | "test.rs")
-                || (csharp
-                    && (CS_STEM_SUFFIXES.iter().any(|s| stem.ends_with(s))
-                        || CS_STEM_PREFIXES.iter().any(|p| stem.starts_with(p))));
-        }
-        // Case-insensitive: .NET repos use `Tests/` and `UnitTests/`.
-        if DIRS.iter().any(|dir| segment.eq_ignore_ascii_case(dir))
-            || (csharp && DIR_SUFFIXES.iter().any(|suffix| segment.ends_with(suffix)))
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// C# build output (`obj/`, `bin/`), e.g. generated `MainWindow.g.cs` copies per configuration.
 fn is_csharp_build_output(rel: &str) -> bool {
     rel.ends_with(".cs") && rel.split('/').any(|s| s == "obj" || s == "bin")
-}
-
-/// pytest's conventions: `test_*.py`, `*_test.py` and `conftest.py`, and their `.pyi` stubs.
-fn is_python_test_file(name: &str) -> bool {
-    name.strip_suffix(".py")
-        .or_else(|| name.strip_suffix(".pyi"))
-        .is_some_and(|stem| {
-            stem == "conftest" || stem.starts_with("test_") || stem.ends_with("_test")
-        })
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -198,51 +159,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_test_paths() {
-        assert!(is_test_path("src/a.test.ts"));
-        assert!(is_test_path("src/a.spec.tsx"));
-        assert!(is_test_path("src/app.e2e-spec.ts"));
-        assert!(is_test_path("src/user.mock.ts"));
-        assert!(is_test_path("src/db.fixture.ts"));
-        assert!(is_test_path("src/__tests__/a.ts"));
-        assert!(is_test_path("src/mocks/handlers.ts"));
-        assert!(is_test_path("packages/x/test/helpers.ts"));
-        assert!(is_test_path("benches/parse.rs"));
-        assert!(is_test_path("src/parser/tests.rs"));
-        assert!(is_test_path("src/test.rs"));
-        assert!(!is_test_path("src/contest.rs"));
-        assert!(!is_test_path("src/testing.ts"));
-        assert!(!is_test_path("src/latest/a.ts"));
-        assert!(!is_test_path("src/openapi-spec.ts"));
-        assert!(is_test_path("src/RepoTests.cs"));
-        assert!(is_test_path("src/Tests/helpers.ts"));
-        assert!(is_test_path("Acme/UnitTests/Repo.cs"));
-        assert!(is_test_path("src/UserMock.cs"));
-        assert!(is_test_path("src/ClockFake.cs"));
-        assert!(is_test_path("src/FakeClock.cs"));
-        assert!(!is_test_path("src/Mockingbird.cs"));
-        assert!(!is_test_path("src/UserMock.ts"));
-        assert!(
-            !is_test_path("src/LoadTest.cs"),
-            "`*Test.cs` is often production code"
-        );
-        assert!(is_test_path("Acme.Core.UnitTests/Helpers.cs"));
-        assert!(is_test_path("Acme.Api.Tests/Fakes.cs"));
-        assert!(!is_test_path("src/TestHelpers.cs"));
-        assert!(!is_test_path("src/Contest.cs"));
-        assert!(!is_test_path("src/RepoTests.ts"));
-        assert!(!is_test_path("Acme.Testing/Repo.cs"));
-        assert!(!is_test_path("Acme.Tests/client.ts"));
+    fn detects_csharp_build_output() {
         assert!(is_csharp_build_output(
             "App/obj/Debug/net8.0/MainWindow.g.cs"
         ));
         assert!(!is_csharp_build_output("tools/bin/cli.js"));
-        assert!(is_test_path("pkg/test_api.py"));
-        assert!(is_test_path("pkg/api_test.py"));
-        assert!(is_test_path("pkg/conftest.py"));
-        assert!(is_test_path("pkg/test_api.pyi"));
-        assert!(!is_test_path("pkg/testing.py"));
-        assert!(!is_test_path("pkg/latest.py"));
     }
 
     #[test]
@@ -291,14 +212,20 @@ mod tests {
         assert_eq!(
             rels(&WalkOptions {
                 include_tests: false,
-                excludes
+                excludes,
+                root_excludes: Vec::new(),
+                root_prefix: None,
+                rules: Rules::default(),
             }),
             vec!["py/mod.py", "py/only.pyi", "src/a.ts", "src/gen/deep/c.ts"]
         );
         assert_eq!(
             rels(&WalkOptions {
                 include_tests: true,
-                excludes: Vec::new()
+                excludes: Vec::new(),
+                root_excludes: Vec::new(),
+                root_prefix: None,
+                rules: Rules::default(),
             })
             .len(),
             7
@@ -309,6 +236,9 @@ mod tests {
             &WalkOptions {
                 include_tests: false,
                 excludes: Vec::new(),
+                root_excludes: Vec::new(),
+                root_prefix: None,
+                rules: Rules::default(),
             },
         )
         .unwrap();

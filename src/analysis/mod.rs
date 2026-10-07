@@ -6,6 +6,47 @@ pub mod types;
 use std::collections::HashMap;
 use std::hash::Hash;
 
+use crate::modules::{Home, Tag};
+
+/// What the project says about a pair: its module tag and any acknowledgement.
+#[derive(Debug, Default)]
+pub struct Verdict {
+    /// `None` when modules aren't tracked.
+    pub tag: Option<Tag>,
+    /// Why the pair is deliberate, e.g. `doc: mirrors`.
+    pub acknowledged: Option<String>,
+}
+
+/// Project context for analyses: module tags, acknowledgements, cluster homes.
+pub trait Judge {
+    fn verdict(&self, a: usize, b: usize) -> Verdict;
+    /// The record's module name, when modules are tracked.
+    fn module(&self, record: usize) -> Option<&str>;
+    fn home(&self, members: &[usize]) -> Option<Home>;
+    /// One line about the module graph, e.g. `23 modules`.
+    fn summary(&self) -> Option<String>;
+}
+
+/// No project context: nothing is tagged, acknowledged or hidden.
+#[cfg(test)]
+pub struct NoJudge;
+
+#[cfg(test)]
+impl Judge for NoJudge {
+    fn verdict(&self, _: usize, _: usize) -> Verdict {
+        Verdict::default()
+    }
+    fn module(&self, _: usize) -> Option<&str> {
+        None
+    }
+    fn home(&self, _: &[usize]) -> Option<Home> {
+        None
+    }
+    fn summary(&self) -> Option<String> {
+        None
+    }
+}
+
 /// Interns keys to dense ids so sets become sorted `u32` slices.
 pub struct Interner<K> {
     ids: HashMap<K, u32>,

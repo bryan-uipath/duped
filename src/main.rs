@@ -1,17 +1,24 @@
 mod analysis;
+mod config;
 mod index;
+mod judge;
 mod lang;
+mod modules;
 mod record;
+mod rules;
 mod walk;
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+
+use crate::config::Config;
+use crate::rules::Rules;
 
 /// Find duplicated functions and types across a codebase.
 #[derive(Parser)]
@@ -35,24 +42,30 @@ enum Command {
 struct TypesArgs {
     #[command(flatten)]
     scan: Scan,
-    /// Only compare types with at least this many fields.
-    #[arg(long, default_value_t = 4)]
-    min_fields: usize,
-    /// A pair needs at least this many shared field names.
-    #[arg(long, default_value_t = 4)]
-    min_shared: usize,
-    /// Minimum similarity of field names (Jaccard, 0–1).
-    #[arg(long, default_value_t = 0.7, value_parser = fraction)]
-    threshold: f64,
+    /// Only compare types with at least this many fields [default: 4].
+    #[arg(long)]
+    min_fields: Option<usize>,
+    /// A pair needs at least this many shared field names [default: 4].
+    #[arg(long)]
+    min_shared: Option<usize>,
+    /// Minimum similarity of field names (Jaccard, 0–1) [default: 0.7].
+    #[arg(long, value_parser = fraction)]
+    threshold: Option<f64>,
     /// Skip types whose name (or `Scope.Name`) matches this glob (repeatable), in addition to `*Props`.
     #[arg(long = "exclude-name")]
     exclude_names: Vec<String>,
     /// Don't apply the default `*Props` name exclusion.
     #[arg(long)]
     no_default_excludes: bool,
-    /// Field names on more than this fraction of types don't seed candidate pairs (they still score).
-    #[arg(long, default_value_t = 0.1, value_parser = fraction)]
-    common_field_fraction: f64,
+    /// Field names on more than this fraction of types don't seed candidate pairs (they still score) [default: 0.1].
+    #[arg(long, value_parser = fraction)]
+    common_field_fraction: Option<f64>,
+    /// Also report pairs whose two types are in the same module.
+    #[arg(long)]
+    include_same_module: bool,
+    /// Also report pairs acknowledged as deliberate (in `duped.toml` or by a doc comment).
+    #[arg(long)]
+    include_acknowledged: bool,
     /// List ranked pairs instead of clusters.
     #[arg(long)]
     pairs: bool,
@@ -75,9 +88,15 @@ struct Scan {
     /// Include test, mock and fixture files.
     #[arg(long)]
     include_tests: bool,
-    /// Skip paths under a root-relative glob, e.g. `examples` or `src/gen/*.ts` (repeatable).
+    /// Skip paths under a glob relative to the scanned directory, e.g. `examples` or `src/gen/*.ts` (repeatable).
     #[arg(long = "exclude")]
     excludes: Vec<String>,
+    /// Read settings from this file instead of `<project root>/duped.toml`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Project root holding `duped.toml` and the module manifests [default: found from the scanned path].
+    #[arg(long)]
+    root: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -95,20 +114,26 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     let (Command::Extract(scan) | Command::Index(scan) | Command::Types(TypesArgs { scan, .. })) =
         &cli.command;
-    // Validate options before scanning or truncating `--out`.
-    let type_options = match &cli.command {
-        Command::Types(args) => Some(analysis::types::TypeOptions {
-            min_fields: args.min_fields,
-            min_shared: args.min_shared,
-            threshold: args.threshold,
-            exclude_names: name_globs(&args.exclude_names, !args.no_default_excludes)?,
-            common_field_fraction: args.common_field_fraction,
-        }),
+    let base = scan_base(&scan.path)?;
+    let root = match &scan.root {
+        Some(root) => root
+            .canonicalize()
+            .with_context(|| format!("cannot open --root {}", root.display()))?,
+        None => config::project_root(&base),
+    };
+    let config = config::load(&root, scan.config.as_deref())?;
+    let rules = Rules::with_config(&config.rules)?;
+    // Validate options and modules before scanning or truncating `--out`.
+    let types = match &cli.command {
+        Command::Types(args) => Some((
+            type_options(args, &config, rules.clone())?,
+            modules::ModuleGraph::discover(&root, &config.modules)?,
+        )),
         _ => None,
     };
-    let records = scan_records(scan)?;
+    let records = scan_records(scan, &config, rules, &root, &base)?;
     let mut out = output(scan)?;
-    match (&cli.command, type_options) {
+    match (&cli.command, types) {
         (Command::Extract(_), _) => {
             for record in &records {
                 serde_json::to_writer(&mut out, record)?;
@@ -116,14 +141,17 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         (Command::Index(_), _) => out.write_all(index::render(&records).as_bytes())?,
-        (Command::Types(args), Some(options)) => {
-            let report = analysis::types::find_duplicate_types(&records, &options);
+        (Command::Types(args), Some((options, graph))) => {
+            let judge = judge::ProjectJudge::new(&graph, &records, base, &config.acknowledged);
+            let report = analysis::types::find_duplicate_types(&records, &options, &judge);
             if args.json {
-                serde_json::to_writer(&mut out, &analysis::types::to_json(&records, &report))?;
+                let json = analysis::types::to_json(&records, &report, &judge);
+                serde_json::to_writer(&mut out, &json)?;
                 out.write_all(b"\n")?;
             } else {
-                let text =
-                    analysis::types::render_text(&records, &report, args.top, args.pairs, &options);
+                let text = analysis::types::render_text(
+                    &records, &report, args.top, args.pairs, &options, &judge,
+                );
                 out.write_all(text.as_bytes())?;
             }
         }
@@ -131,6 +159,35 @@ fn run(cli: Cli) -> Result<()> {
     }
     out.flush()?;
     Ok(())
+}
+
+/// Flags win over `[types]` in `duped.toml`, which wins over the defaults; name globs add up.
+fn type_options(
+    args: &TypesArgs,
+    config: &Config,
+    rules: Rules,
+) -> Result<analysis::types::TypeOptions> {
+    let types = &config.types;
+    let default_excludes = !args.no_default_excludes && types.default_excludes.unwrap_or(true);
+    let names: Vec<String> = types
+        .exclude_names
+        .iter()
+        .chain(&args.exclude_names)
+        .cloned()
+        .collect();
+    Ok(analysis::types::TypeOptions {
+        min_fields: args.min_fields.or(types.min_fields).unwrap_or(4),
+        min_shared: args.min_shared.or(types.min_shared).unwrap_or(4),
+        threshold: args.threshold.or(types.threshold).unwrap_or(0.7),
+        exclude_names: name_globs(&names, default_excludes)?,
+        common_field_fraction: args
+            .common_field_fraction
+            .or(types.common_field_fraction)
+            .unwrap_or(0.1),
+        include_same_module: args.include_same_module,
+        include_acknowledged: args.include_acknowledged,
+        rules,
+    })
 }
 
 /// Type-name globs, plus `*Props` unless disabled; `*` matches any characters.
@@ -157,10 +214,37 @@ fn fraction(value: &str) -> Result<f64, String> {
     }
 }
 
-fn scan_records(scan: &Scan) -> Result<Vec<record::Record>> {
+/// The directory records' `file` paths are relative to: the scan path, or its parent for a file.
+fn scan_base(path: &Path) -> Result<PathBuf> {
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    Ok(if path.is_file() {
+        path.parent()
+            .map_or_else(|| path.clone(), Path::to_path_buf)
+    } else {
+        path
+    })
+}
+
+fn scan_records(
+    scan: &Scan,
+    config: &Config,
+    rules: Rules,
+    root: &Path,
+    base: &Path,
+) -> Result<Vec<record::Record>> {
+    // `[scan] exclude` is relative to the project root, `--exclude` to the scanned path.
+    // A scan outside the root (via `--root`) has no root-relative paths to match.
+    let prefix = base
+        .starts_with(root)
+        .then(|| modules::relative(root, base));
     let options = walk::WalkOptions {
-        include_tests: scan.include_tests,
+        include_tests: scan.include_tests || config.scan.include_tests,
         excludes: scan.excludes.clone(),
+        root_excludes: config.scan.exclude.clone(),
+        root_prefix: prefix,
+        rules,
     };
     let files = walk::discover(&scan.path, &options)?;
     let extraction = lang::extract_files(&files);
