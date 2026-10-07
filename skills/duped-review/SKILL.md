@@ -5,7 +5,7 @@ description: "Check a branch, pull request or local diff for code that duplicate
 
 # duped-review
 
-Answers "does this *change* duplicate something that already exists?" Uses the `duped` skill, installed next to this one: its `scripts/scan.mjs`, and its **Reading a finding**, **Verifying a finding** and **Reporting** sections.
+Answers "does this *change* duplicate something that already exists?" Uses the `duped` skill, installed next to this one: its **All analyses at once** (`duped report`), **Reading a finding**, **Verifying a finding** and **Reporting** sections.
 
 **Scope: duplication only.** Correctness, security and style belong to other reviewers. Read-only: don't edit files.
 
@@ -13,7 +13,7 @@ Answers "does this *change* duplicate something that already exists?" Uses the `
 
 ```bash
 BASE=<the PR's base branch; for a stacked PR, its parent branch, not main>
-node <duped skill directory>/scripts/scan.mjs --repo <repo root> --base "$BASE" > /tmp/duped-review.json
+duped report <repo root> --base "$BASE" --json > /tmp/duped-review.json
 ```
 
 Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only file pairs where a side was added or modified since the merge base (committed, uncommitted or untracked). Filtering is per file: confirm the duplicated code is in the changed lines before reporting.

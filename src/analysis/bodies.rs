@@ -287,7 +287,7 @@ fn file_pairs(records: &[Record], pairs: &[BodyPair]) -> Vec<FilePair> {
     files
 }
 
-fn file_shared(file: &FilePair, pairs: &[BodyPair]) -> usize {
+pub fn file_shared(file: &FilePair, pairs: &[BodyPair]) -> usize {
     file.pairs.iter().map(|&i| pairs[i].shared).sum()
 }
 

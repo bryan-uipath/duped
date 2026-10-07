@@ -5,6 +5,7 @@ mod judge;
 mod lang;
 mod modules;
 mod record;
+mod report;
 mod rules;
 mod walk;
 
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, FromArgMatches, Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::analysis::imports::ImportOptions;
@@ -43,6 +44,24 @@ enum Command {
     Imports(ImportsArgs),
     /// Find file pairs that declare the same names, e.g. a ported copy of a module.
     Names(NamesArgs),
+    /// Run every analysis with its defaults and rank file pairs by how many agree.
+    Report(ReportArgs),
+}
+
+#[derive(Args)]
+struct ReportArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// Keep file pairs with a side added, modified or renamed since the merge base with this ref,
+    /// committed or not, or untracked.
+    #[arg(long)]
+    base: Option<String>,
+    /// How many file pairs to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit the report as JSON (honours `--top`).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -199,7 +218,8 @@ fn run(cli: Cli) -> Result<()> {
     | Command::Types(TypesArgs { scan, .. })
     | Command::Bodies(BodiesArgs { scan, .. })
     | Command::Imports(ImportsArgs { scan, .. })
-    | Command::Names(NamesArgs { scan, .. })) = &cli.command;
+    | Command::Names(NamesArgs { scan, .. })
+    | Command::Report(ReportArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -209,8 +229,10 @@ fn run(cli: Cli) -> Result<()> {
     };
     let config = config::load(&root, scan.config.as_deref())?;
     let rules = Rules::with_config(&config.rules)?;
-    if let Command::Imports(args) = &cli.command {
-        return imports(args, &config, rules, &root, &base);
+    match &cli.command {
+        Command::Imports(args) => return imports(args, &config, rules, &root, &base),
+        Command::Report(args) => return report(args, &config, rules, &root, &base),
+        _ => {}
     }
     // Validate options and modules before scanning or truncating `--out`.
     let types = match &cli.command {
@@ -255,13 +277,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         (Command::Bodies(args), _, Some(graph)) => {
-            let options = analysis::bodies::BodyOptions {
-                shingle: usize::from(args.shingle),
-                threshold: args.threshold,
-                min_tokens: args.min_tokens,
-                include_same_file: args.include_same_file,
-                include_acknowledged: args.include_acknowledged,
-            };
+            let options = body_options(args);
             let judge = judge::ProjectJudge::new(
                 &graph,
                 &records,
@@ -325,12 +341,7 @@ fn imports(
     if skipped > 0 {
         eprintln!("duped: skipped {skipped} unreadable files");
     }
-    let options = ImportOptions {
-        min_shared: args.min_shared,
-        threshold: args.threshold,
-        rare_fraction: args.rare_fraction,
-        include_same_module: args.include_same_module,
-    };
+    let options = import_options(args);
     let files = analysis::imports::file_items(imports);
     let judge = judge::FileJudge::new(&graph, base, files.iter().map(|f| f.file.as_str()));
     let report = analysis::imports::find_shared_imports(&files, &options, &judge);
@@ -347,6 +358,121 @@ fn imports(
     }
     out.flush()?;
     Ok(())
+}
+
+/// `duped report`: one walk and one module graph for every analysis. An analysis that fails
+/// is reported as failed; the shared steps (git, modules, walk) fail the command.
+fn report(
+    args: &ReportArgs,
+    config: &Config,
+    rules: Rules,
+    root: &Path,
+    base: &Path,
+) -> Result<()> {
+    // Validate `--base` and modules before scanning or truncating `--out`.
+    let changed = args
+        .base
+        .as_deref()
+        .map(|reference| report::changed_files(base, reference))
+        .transpose()?;
+    let graph = modules::ModuleGraph::discover(root, &config.modules)?;
+    let walk = walk_options(&args.scan, config, rules.clone(), root, base);
+    let files = walk::discover(&args.scan.path, &walk)?;
+    let extraction = lang::extract_files(&files);
+    if extraction.skipped > 0 {
+        eprintln!("duped: skipped {} unreadable files", extraction.skipped);
+    }
+    let records = extraction.records;
+    let judge = |noun, compared: &dyn Fn(&record::Record) -> bool| {
+        judge::ProjectJudge::new(
+            &graph,
+            &records,
+            base.to_path_buf(),
+            &config.acknowledged,
+            noun,
+            compared,
+        )
+    };
+
+    let bodies = report::attempt(|| {
+        let options = body_options(&defaults());
+        let judge = judge("functions", &|r| {
+            analysis::bodies::is_candidate(r, &options)
+        });
+        let found = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
+        Ok(report::bodies(&records, &found))
+    });
+    let imports = report::attempt(|| {
+        // Unreadable files were counted above.
+        let (imports, _) = lang::extract_imports(&files);
+        let files = analysis::imports::file_items(imports);
+        let judge = judge::FileJudge::new(&graph, base, files.iter().map(|f| f.file.as_str()));
+        let found =
+            analysis::imports::find_shared_imports(&files, &import_options(&defaults()), &judge);
+        Ok(report::imports(&files, &found))
+    });
+    let names = report::attempt(|| {
+        let found = analysis::names::find_shared_names(
+            &records,
+            &name_options(&defaults(), config),
+            &judge("declarations", &|_| true),
+        );
+        Ok(report::names(&records, &found))
+    });
+    let types = report::attempt(|| {
+        let options = type_options(&defaults(), config, rules)?;
+        let judge = judge("types", &|r| matches!(r, record::Record::Type(_)));
+        let found = analysis::types::find_duplicate_types(&records, &options, &judge);
+        Ok(report::types(&records, &found))
+    });
+
+    let directory = std::path::absolute(&args.scan.path)?;
+    let report = report::Report::new(
+        directory.display().to_string(),
+        args.base.as_deref(),
+        changed,
+        vec![
+            ("bodies", bodies),
+            ("imports", imports),
+            ("names", names),
+            ("types", types),
+        ],
+        args.top,
+    );
+    let mut out = output(&args.scan)?;
+    if args.json {
+        serde_json::to_writer_pretty(&mut out, &report)?;
+        out.write_all(b"\n")?;
+    } else {
+        out.write_all(report::render_text(&report).as_bytes())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// A command's options with no flags given, so `report` matches the command run alone.
+fn defaults<T: Args + FromArgMatches>() -> T {
+    let matches = T::augment_args(clap::Command::new("duped")).get_matches_from(["duped"]);
+    T::from_arg_matches(&matches).expect("every flag has a default")
+}
+
+fn body_options(args: &BodiesArgs) -> analysis::bodies::BodyOptions {
+    analysis::bodies::BodyOptions {
+        shingle: usize::from(args.shingle),
+        threshold: args.threshold,
+        min_tokens: args.min_tokens,
+        include_same_file: args.include_same_file,
+        include_acknowledged: args.include_acknowledged,
+    }
+}
+
+fn import_options(args: &ImportsArgs) -> ImportOptions {
+    ImportOptions {
+        min_shared: args.min_shared,
+        threshold: args.threshold,
+        rare_fraction: args.rare_fraction,
+        include_same_module: args.include_same_module,
+    }
 }
 
 /// Flags win over `[types]` in `duped.toml`, which wins over the defaults; name globs add up.

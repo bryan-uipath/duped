@@ -74,7 +74,7 @@ Modules are detected from manifests under the project root: pnpm/npm/yarn worksp
 
 Each cluster also gets a suggested home: a member's module that every other member can import, or else the lowest module they all depend on.
 
-## CLI (planned)
+## CLI
 
 | Command | Output |
 | --- | --- |
@@ -85,9 +85,9 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped names [PATH]` | same-name collisions, including ones with divergent shapes |
 | `duped bodies [PATH]` | functions with near-copy bodies, and files that share several |
 | `duped imports [PATH]` | file pairs that import the same rare things |
-| `duped report [PATH]` | all of the above, tagged by actionability |
+| `duped report [PATH]` | `bodies`, `imports`, `names` and `types` pairs grouped by file pair, ranked by how many analyses agree |
 
-Every command supports `--json`, and every command supports `--base <ref>` to limit results to what a diff adds.
+All but `fns` are implemented. Every analysis supports `--json`. `report --base <ref>` keeps only file pairs with a side the diff since the merge base touches; the other commands don't take `--base`.
 
 ## Per-repo config: `duped.toml`
 
@@ -101,11 +101,11 @@ Every command supports `--json`, and every command supports `--base <ref>` to li
 
 Shipped in `skills/`, installable as a Claude Code plugin or copied into any agent's skills directory.
 
-- **duped:** how to use the CLI, check for prior art before writing code, read a finding, and record deliberate copies. Owns `scripts/scan.mjs`, which runs every analysis and groups candidates by file pair (diff-filtered with `--base`).
+- **duped:** how to use the CLI, check for prior art before writing code, read a finding, and record deliberate copies.
 - **duped-audit:** whole-repo scan; reads both sides of each finding and ranks a cleanup list by payoff.
 - **duped-review:** for a branch or pull request, flags changed files that copy existing code, and copies that have drifted.
 
-For now `duped-audit` suggests `duped.toml` entries; a separate setup skill can follow. `scan.mjs` is a stopgap for `duped report`.
+Audit and review run `duped report`. For now `duped-audit` suggests `duped.toml` entries; a separate setup skill can follow.
 
 ## Roadmap
 
@@ -122,3 +122,4 @@ Each step ships on its own.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.
+12. `report`: every analysis grouped by file pair, diff-filtered with `--base`.
