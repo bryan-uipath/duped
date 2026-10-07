@@ -51,7 +51,7 @@ source files ──► language extractor (tree-sitter) ──► shared records
 
 One JSON object per line. Every analysis reads these, so only the extractors are language-specific.
 
-- **function:** name, enclosing scope, parameters (name and type text), return type text, visibility, file, line span, doc comment, normalised body hash.
+- **function:** name, enclosing scope, parameters (name and type text), return type text, visibility, file, line span, doc comment, and body tokens (in memory only, not in the JSON).
 - **type:** name, kind, fields (name, type text, optional), extends/implements, visibility, file, line span, doc comment.
 
 ### Analyses
@@ -59,7 +59,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 - **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs are clustered with union-find.
 - **fns:** similarity of parameter names and types plus return type.
 - **names:** same-name declarations, flagging the ones whose shape or signature differs.
-- **bodies:** functions whose bodies are identical once local names are normalised.
+- **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
 
 ### Module graph and actionability
 
@@ -82,7 +82,7 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped types [PATH]` | type pairs or clusters by property overlap |
 | `duped fns [PATH]` | function pairs by signature similarity |
 | `duped names [PATH]` | same-name collisions, including ones with divergent shapes |
-| `duped bodies [PATH]` | functions with matching normalised bodies |
+| `duped bodies [PATH]` | functions with near-copy bodies, and files that share several |
 | `duped report [PATH]` | all of the above, tagged by actionability |
 
 Every command supports `--json`, and every command supports `--base <ref>` to limit results to what a diff adds.
@@ -112,6 +112,6 @@ Each step ships on its own.
 5. C# extractor.
 6. Rust extractor.
 7. `fns` and `names`, including divergent-shape reporting.
-8. `bodies`.
+8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.

@@ -18,6 +18,7 @@ cargo build --release
 duped extract [DIR] [--out records.jsonl]   # every top-level function and type, as JSON Lines
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
 duped types [DIR]                           # types that share most of their properties
+duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript)
 ```
 
 `DIR` can also be a single file.
@@ -109,6 +110,28 @@ By default it prints clusters, which are groups of types linked by qualifying pa
 
 Every pair is evidence, not a verdict. Read both types before consolidating them.
 
+### Finding copied function bodies
+
+`duped bodies` finds functions whose bodies are near-copies, whatever they are called, such as a module ported to another package with renamed locals and a few added guards. TypeScript and JavaScript only for now.
+
+- **Tokens:** each body's tokens, with comments dropped and every identifier (local or not) replaced by one placeholder, including those inside template `${…}`. Keywords, operators, property names (shorthand `{ id }` too) and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
+- **similarity:** Jaccard similarity of the two bodies' token shingles (runs of `--shingle` tokens). Repeated shingles count separately, so a ten-case `switch` doesn't match a three-case one.
+- **shared:** shingles both bodies have, roughly the number of duplicated tokens. Pairs are ranked by it, so a large near-copy outranks a small exact one.
+- **Files sharing several functions:** two files linked by pairs between at least two functions on each side, ranked by total shared. These are usually copied modules rather than one copied helper.
+
+Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time; each candidate's similarity is then computed exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--threshold` | `0.5` | minimum similarity |
+| `--shingle` | `5` | tokens per shingle |
+| `--min-tokens` | `50` | skip smaller bodies |
+| `--top` | `40` | file pairs and function pairs to show |
+| `--include-same-file` | off | also report pairs within one file |
+| `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
+
+`--json` prints every pair and file pair.
+
 ### Modules and what to do about a pair
 
 `duped` finds the project's modules and tags every pair with what the dependency graph allows:
@@ -165,7 +188,7 @@ path = "libs/shared"                       # define a module with no manifest
 deps = ["@x/core", "shared"]               # replace detected dependencies
 
 [[acknowledged]]
-a = "@x/canvas:DocumentAnnotationRow"      # Name, Scope.Name, or module:Name
+a = "@x/canvas:DocumentAnnotationRow"      # type or function: Name, Scope.Name, or module:Name
 b = "DocumentAnnotationRow"
 reason = "canvas can't depend on evals"
 

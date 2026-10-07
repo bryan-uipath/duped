@@ -10,7 +10,7 @@ use std::cmp::Reverse;
 use rayon::prelude::*;
 use tree_sitter::{Node, Parser};
 
-use crate::record::{Field, Language, Param, Record, format_params};
+use crate::record::{Field, Language, Param, Record, Token, format_params, token_hash};
 use crate::walk::SourceFile;
 
 pub struct Extraction {
@@ -64,6 +64,44 @@ fn decode(bytes: &[u8]) -> String {
         [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     }
+}
+
+/// How a language's tokenizer treats a node kind; unclassed leaves are kept as text.
+pub enum TokenClass {
+    /// Comments; dropped with their subtree.
+    Skip,
+    /// One token for the whole subtree, e.g. a string with its quotes and fragments.
+    Literal,
+    Identifier,
+}
+
+/// Leaves of `node` in source order as body tokens, classed by `class`; whitespace-only
+/// leaves (such as JSX text between tags) are dropped.
+pub fn body_tokens(node: Node, source: &str, class: fn(&str) -> Option<TokenClass>) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut cursor = node.walk();
+    'walk: loop {
+        let node = cursor.node();
+        let text = &source[node.byte_range()];
+        let class = class(node.kind());
+        let leaf = class.is_some() || node.child_count() == 0;
+        if leaf && !text.trim().is_empty() {
+            tokens.extend(match class {
+                Some(TokenClass::Skip) => None,
+                Some(TokenClass::Identifier) => Some(Token::Identifier),
+                Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
+            });
+        }
+        if !leaf && cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                break 'walk;
+            }
+        }
+    }
+    tokens
 }
 
 pub fn has_token(node: Node, token: &str) -> bool {

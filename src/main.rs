@@ -36,6 +36,35 @@ enum Command {
     Index(Scan),
     /// Find types that share most of their properties, whatever they are called.
     Types(TypesArgs),
+    /// Find functions whose bodies are near-copies, whatever they are called.
+    Bodies(BodiesArgs),
+}
+
+#[derive(Args)]
+struct BodiesArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// Minimum similarity of normalised token shingles (Jaccard, 0–1).
+    #[arg(long, value_parser = fraction, default_value_t = 0.5)]
+    threshold: f64,
+    /// Tokens per shingle.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u16).range(1..))]
+    shingle: u16,
+    /// Skip bodies with fewer tokens.
+    #[arg(long, default_value_t = 50)]
+    min_tokens: usize,
+    /// Also report pairs whose two functions are in the same file.
+    #[arg(long)]
+    include_same_file: bool,
+    /// Also report pairs acknowledged as deliberate (in `duped.toml` or by a doc comment).
+    #[arg(long)]
+    include_acknowledged: bool,
+    /// How many file pairs and function pairs to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit every pair and file pair as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -112,8 +141,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let (Command::Extract(scan) | Command::Index(scan) | Command::Types(TypesArgs { scan, .. })) =
-        &cli.command;
+    let (Command::Extract(scan)
+    | Command::Index(scan)
+    | Command::Types(TypesArgs { scan, .. })
+    | Command::Bodies(BodiesArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -125,24 +156,34 @@ fn run(cli: Cli) -> Result<()> {
     let rules = Rules::with_config(&config.rules)?;
     // Validate options and modules before scanning or truncating `--out`.
     let types = match &cli.command {
-        Command::Types(args) => Some((
-            type_options(args, &config, rules.clone())?,
-            modules::ModuleGraph::discover(&root, &config.modules)?,
-        )),
+        Command::Types(args) => Some(type_options(args, &config, rules.clone())?),
+        _ => None,
+    };
+    let graph = match &cli.command {
+        Command::Types(_) | Command::Bodies(_) => {
+            Some(modules::ModuleGraph::discover(&root, &config.modules)?)
+        }
         _ => None,
     };
     let records = scan_records(scan, &config, rules, &root, &base)?;
     let mut out = output(scan)?;
-    match (&cli.command, types) {
-        (Command::Extract(_), _) => {
+    match (&cli.command, types, graph) {
+        (Command::Extract(_), ..) => {
             for record in &records {
                 serde_json::to_writer(&mut out, record)?;
                 out.write_all(b"\n")?;
             }
         }
-        (Command::Index(_), _) => out.write_all(index::render(&records).as_bytes())?,
-        (Command::Types(args), Some((options, graph))) => {
-            let judge = judge::ProjectJudge::new(&graph, &records, base, &config.acknowledged);
+        (Command::Index(_), ..) => out.write_all(index::render(&records).as_bytes())?,
+        (Command::Types(args), Some(options), Some(graph)) => {
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "types",
+                |r| matches!(r, record::Record::Type(_)),
+            );
             let report = analysis::types::find_duplicate_types(&records, &options, &judge);
             if args.json {
                 let json = analysis::types::to_json(&records, &report, &judge);
@@ -155,7 +196,34 @@ fn run(cli: Cli) -> Result<()> {
                 out.write_all(text.as_bytes())?;
             }
         }
-        (Command::Types(_), None) => unreachable!("type options are built for `types`"),
+        (Command::Bodies(args), _, Some(graph)) => {
+            let options = analysis::bodies::BodyOptions {
+                shingle: usize::from(args.shingle),
+                threshold: args.threshold,
+                min_tokens: args.min_tokens,
+                include_same_file: args.include_same_file,
+                include_acknowledged: args.include_acknowledged,
+            };
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "functions",
+                |r| analysis::bodies::is_candidate(r, &options),
+            );
+            let report = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
+            if args.json {
+                let json = analysis::bodies::to_json(&records, &report, &judge);
+                serde_json::to_writer(&mut out, &json)?;
+                out.write_all(b"\n")?;
+            } else {
+                let text =
+                    analysis::bodies::render_text(&records, &report, args.top, &options, &judge);
+                out.write_all(text.as_bytes())?;
+            }
+        }
+        _ => unreachable!("options and modules are built for `types` and `bodies`"),
     }
     out.flush()?;
     Ok(())

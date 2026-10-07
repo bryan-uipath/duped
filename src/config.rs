@@ -58,7 +58,7 @@ pub struct ModuleOverride {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Acknowledged {
-    /// A type name, `Scope.Name`, or either prefixed with `module:`.
+    /// A type or function name, `Scope.Name`, or either prefixed with `module:`.
     pub a: String,
     pub b: String,
     pub reason: Option<String>,
