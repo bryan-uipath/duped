@@ -248,6 +248,29 @@ test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
 
 **Test patterns** match a file name (`test_files`) or any directory name above it (`test_dirs`, ignoring case). `*` matches any run of characters, so `*.test.*` matches `a.test.ts`; a pattern without `*` is an exact name.
 
+## Agent skills
+
+`skills/` holds three skills for coding agents:
+
+- **duped**: using the CLI, checking for existing code before writing new code, reading findings.
+- **duped-audit**: auditing a whole codebase and ranking what to consolidate.
+- **duped-review**: checking a branch or pull request for copies of existing code.
+
+They need the `duped` binary on `PATH` and Node.js (for `skills/duped/scripts/scan.mjs`, which the other two run).
+
+Claude Code, as a plugin:
+
+```text
+/plugin marketplace add bryan-uipath/duped
+/plugin install duped@duped
+```
+
+Any agent that reads skill directories (Claude Code, Codex): link or copy all three, keeping them side by side.
+
+```sh
+for s in duped duped-audit duped-review; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done   # or ~/.codex/skills
+```
+
 ## Testing
 
 `cargo test` runs the unit tests, the end-to-end tests and the regression suite in `tests/regression.rs`.

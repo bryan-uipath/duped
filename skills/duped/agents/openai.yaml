@@ -1,0 +1,4 @@
+interface:
+  display_name: "duped"
+  short_description: "Find duplicated functions and types with the duped CLI"
+  default_prompt: "Use $duped to find existing code similar to what I am about to write."

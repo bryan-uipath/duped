@@ -1,0 +1,4 @@
+interface:
+  display_name: "duped review"
+  short_description: "Check a change for copies of existing code"
+  default_prompt: "Use $duped-review to check my current branch for duplication of existing code."
