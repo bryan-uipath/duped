@@ -198,7 +198,7 @@ Pairs in one file are skipped. These are hidden, each with a flag to show them:
 
 - **same module** (`--include-same-module`) and **acknowledged** (`--include-acknowledged`), as for types; `[[acknowledged]]` entries can name functions.
 - **implementations** (`--include-implementations`): same-name methods whose classes share a base class or interface, or where one class extends the other.
-- **wrappers** (`--include-wrappers`): one function calls the other, directly or through an import alias (`import { load as loadShared }`), or is a bodiless `declare` (or `.d.ts`) signature of it. A bare call to a function's own name is recursion, not a wrapper.
+- **wrappers** (`--include-wrappers`): one function calls the other, directly or through an import alias (`import { load as loadShared }`), passing every one of its own parameters; or it is a bodiless `declare` (or `.d.ts`) signature of the same name. A bare call to a function's own name is recursion, not a wrapper.
 
 Pairs are ranked like type pairs: most actionable tag first, then most similar. `--json` prints every pair.
 
