@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "duped",
+  "description": "Agent skills for duped, a syntax-only duplicate finder.",
+  "owner": {
+    "name": "Bryan Phelps"
+  },
+  "plugins": [
+    {
+      "name": "duped",
+      "description": "Use duped, audit a codebase for duplication, and check a pull request for copies of existing code.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

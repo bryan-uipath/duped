@@ -1,0 +1,4 @@
+interface:
+  display_name: "duped audit"
+  short_description: "Audit a whole codebase for duplication"
+  default_prompt: "Use $duped-audit to audit this repository for duplicated code."

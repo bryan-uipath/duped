@@ -99,9 +99,13 @@ Every command supports `--json`, and every command supports `--base <ref>` to li
 
 ## Skills
 
-- **duped-setup:** inspects a repo and writes its `duped.toml`.
-- **duped-audit:** runs a whole-repo report, reads both sides of each finding, and sorts results into consolidate, boundary-by-design, and noise.
-- **duped-review:** for a pull request, flags new functions or types that overlap existing ones the author could import.
+Shipped in `skills/`, installable as a Claude Code plugin or copied into any agent's skills directory.
+
+- **duped:** how to use the CLI, check for prior art before writing code, read a finding, and record deliberate copies. Owns `scripts/scan.mjs`, which runs every analysis and groups candidates by file pair (diff-filtered with `--base`).
+- **duped-audit:** whole-repo scan; reads both sides of each finding and ranks a cleanup list by payoff.
+- **duped-review:** for a branch or pull request, flags changed files that copy existing code, and copies that have drifted.
+
+Writing `duped.toml` is part of the audit flow for now; a separate setup skill can follow. `scan.mjs` is a stopgap for `duped report`.
 
 ## Roadmap
 
@@ -115,6 +119,6 @@ Each step ships on its own.
 6. Rust extractor.
 7. `fns` and `names`, including divergent-shape reporting. `names` (file pairs) is prototyped.
 8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
-9. Skills.
+9. Skills: `duped`, `duped-audit`, `duped-review`.
 10. Regression suite: reproduce the findings of the original monorepo audit.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.

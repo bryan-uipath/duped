@@ -1,0 +1,9 @@
+{
+  "name": "duped",
+  "version": "0.1.0",
+  "description": "Skills for the duped CLI: use it, audit a codebase for duplicated functions and types, and check a pull request for code that duplicates existing code.",
+  "author": {
+    "name": "Bryan Phelps"
+  },
+  "repository": "https://github.com/bryan-uipath/duped"
+}
