@@ -67,10 +67,11 @@ pub enum TypeKind {
     Union,
     /// Any other alias; recorded for the index, with no fields.
     Alias,
-    #[allow(dead_code)]
+    /// Rust struct or union, C# struct.
     Struct,
-    #[allow(dead_code)]
+    /// Rust trait.
     Trait,
+    /// C# record.
     #[allow(dead_code)]
     Record,
 }
@@ -109,6 +110,7 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Python,
+    Rust,
 }
 
 impl Record {

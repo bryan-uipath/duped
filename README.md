@@ -4,7 +4,7 @@ Find duplicated functions and types across a codebase: same name, similar shape,
 
 `duped` parses syntax with tree-sitter. It needs no compiler, no language server and no embeddings. Results are evidence for review: read both sides before refactoring.
 
-> Early development. TypeScript, JavaScript and Python are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
+> Early development. TypeScript, JavaScript, Rust and Python are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
 
 ## Build
 
@@ -27,7 +27,7 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 - Hidden files and directories (such as `.storybook/`) are skipped.
 - `node_modules`, `dist`, `build`, `out`, `coverage`, `target`, `venv` and `site-packages` are always skipped.
 - A `.pyi` stub next to a `.py` module of the same name is skipped, since both describe one API.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, pytest's `test_*.py`, `*_test.py` and `conftest.py` (and `.pyi` equivalents), and directories such as `test/`, `__tests__/`, `mocks/` and `fixtures/`.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, pytest's `test_*.py`, `*_test.py` and `conftest.py` (and `.pyi` equivalents), Rust `tests.rs` / `test.rs` module files, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`.
 - `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
 
 ### Records
@@ -37,7 +37,7 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | Key | In | Meaning |
 | --- | --- | --- |
 | `record` | all | `function` or `type` |
-| `language` | all | `typescript`, `javascript` or `python` |
+| `language` | all | `typescript`, `javascript`, `rust` or `python` |
 | `name` | all | declared name; `default` for an anonymous default export |
 | `scope` | all, optional | enclosing class or namespace, e.g. `Api.Client` |
 | `exported` | all | part of the module's public API, including `export { x }` lists; private and protected class members are `false` |
@@ -45,11 +45,20 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | `doc` | all, optional | the adjacent `/** … */` comment (TypeScript) or the docstring (Python), with whitespace collapsed and escapes left as written |
 | `params` | function | `[{ name, type?, optional? }]`; TypeScript's `this:` and Python's method receiver (`self`, `cls`) are omitted |
 | `returns` | function, optional | return type as written |
-| `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields) or `alias` (no fields) |
+| `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields), `alias` (no fields), `struct` or `trait` |
 | `fields` | type | `[{ name, type?, optional?, kind }]`, where `kind` is `property`, `method` or `member`; quotes are stripped, so `'id'` and `id` match; overloads and getter/setter pairs share one field |
 | `extends` | type, optional | base types and implemented interfaces, as written |
 
 Overload signatures (TypeScript overloads, Python `@overload`) fold into their implementation, so each function appears once.
+
+### Rust
+
+- **Functions:** free `fn`s, `impl` methods, trait methods with a default body, and `extern` functions. Receivers (`self`, `&mut self`) are left out of `params`.
+- **`scope`:** the inline `mod` chain plus the impl or trait type, e.g. `parser.Tokenizer`. `impl<T> Display for Foo<T>` is scoped to `Foo`. Impls without a named target are scoped to the trait: `impl<T> Shout for T`, `for (A, B)` and `for [u8; 4]` give `Shout`, and `dyn Any` gives `Any`.
+- **Types:** structs and unions (`struct`; tuple fields are named `0`, `1`, …), enums (variants become members), traits (`trait`; methods, associated types and consts become fields; supertraits go in `extends`) and type aliases (`alias`). Impl methods are not added to a struct's fields.
+- **`exported`:** plain `pub` only; `pub(crate)` and `pub(super)` count as internal. Methods in `impl Trait for X` have no `pub` of their own: they're exported unless `X` or the trait is private and defined in the same file (`super::`, `self::` and `crate::` paths are resolved within the file). Inherent methods also need `pub`.
+- **`doc` and `start_line`:** `///` and `/** */` comments above the item, skipping attributes such as `#[derive]`, blank lines and plain `//` comments, as rustc does; `start_line` is the first attribute.
+- **Skipped:** files starting with `#![cfg(test)]`, items under `#[cfg(test)]` or `#[cfg(all(test, …))]`, `#[test]` and `#[…::test(…)]` functions, and macros. These are skipped even with `--include-tests`, which only affects which files are walked.
 
 ### Python
 

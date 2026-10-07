@@ -88,6 +88,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
         "py" | "pyi" => Some(Language::Python),
+        "rs" => Some(Language::Rust),
         _ => None,
     }
 }
@@ -105,13 +106,16 @@ pub fn is_test_path(rel: &str) -> bool {
         "__fixtures__",
         "__snapshots__",
         "e2e",
+        "benches",
     ];
     const FILE_MARKERS: &[&str] = &[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."];
     let mut segments = rel.split('/').peekable();
     while let Some(segment) = segments.next() {
         if segments.peek().is_none() {
+            // Rust's out-of-line `#[cfg(test)] mod tests;` lives in `tests.rs` / `test.rs`.
             return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
-                || is_python_test_file(segment);
+                || is_python_test_file(segment)
+                || matches!(segment, "tests.rs" | "test.rs");
         }
         if DIRS.contains(&segment) {
             return true;
@@ -179,6 +183,10 @@ mod tests {
         assert!(is_test_path("src/__tests__/a.ts"));
         assert!(is_test_path("src/mocks/handlers.ts"));
         assert!(is_test_path("packages/x/test/helpers.ts"));
+        assert!(is_test_path("benches/parse.rs"));
+        assert!(is_test_path("src/parser/tests.rs"));
+        assert!(is_test_path("src/test.rs"));
+        assert!(!is_test_path("src/contest.rs"));
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
@@ -195,7 +203,8 @@ mod tests {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
         assert_eq!(language_for(Path::new("a.pyi")), Some(Language::Python));
-        assert_eq!(language_for(Path::new("a.rs")), None);
+        assert_eq!(language_for(Path::new("a.rs")), Some(Language::Rust));
+        assert_eq!(language_for(Path::new("a.go")), None);
     }
 
     #[test]
