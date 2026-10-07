@@ -708,7 +708,7 @@ fn unparen(mut node: Node) -> Node {
     node
 }
 
-fn member(name: &str) -> Field {
+pub(crate) fn member(name: &str) -> Field {
     Field {
         name: name.to_string(),
         ty: None,
