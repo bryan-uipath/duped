@@ -12,9 +12,10 @@ use crate::record::Language;
 pub struct LanguageRules {
     /// Member names ignored when comparing types, e.g. `toString`.
     pub conventional_members: Vec<String>,
-    /// A file is a test when its name contains one of these, e.g. `.test.`.
+    /// A file is a test when its name matches one of these, e.g. `*.test.*`.
     pub test_files: Vec<String>,
-    /// A file is a test when a directory above it has one of these names, e.g. `__tests__`.
+    /// A file is a test when a directory above it matches one of these, ignoring case,
+    /// e.g. `__tests__`.
     pub test_dirs: Vec<String>,
 }
 
@@ -24,32 +25,77 @@ pub struct Rules {
 }
 
 /// Every language with rules; a new extractor adds itself here and in [`defaults_for`].
-const LANGUAGES: &[Language] = &[Language::TypeScript, Language::JavaScript];
+const LANGUAGES: &[Language] = &[
+    Language::TypeScript,
+    Language::JavaScript,
+    Language::Python,
+    Language::Rust,
+    Language::CSharp,
+];
+
+/// Test patterns every language starts with.
+const TEST_FILES: &[&str] = &[
+    "*.test.*",
+    "*.spec.*",
+    "*.e2e-spec.*",
+    "*.mock.*",
+    "*.fixture.*",
+];
+const TEST_DIRS: &[&str] = &[
+    "test",
+    "tests",
+    "__tests__",
+    "__mocks__",
+    "mocks",
+    "fixtures",
+    "fixture",
+    "__fixtures__",
+    "__snapshots__",
+    "e2e",
+    "unittests",
+    "integrationtests",
+    "benches",
+];
 
 fn defaults_for(language: Language) -> LanguageRules {
-    match language {
-        Language::TypeScript | Language::JavaScript => LanguageRules {
-            conventional_members: strings(&[
+    let (conventional, files, dirs): (&[&str], &[&str], &[&str]) = match language {
+        Language::TypeScript | Language::JavaScript => (
+            &[
                 "toString",
                 "toJSON",
                 "valueOf",
                 "constructor",
                 "[Symbol.iterator]",
-            ]),
-            test_files: strings(&[".test.", ".spec.", ".e2e-spec.", ".mock.", ".fixture."]),
-            test_dirs: strings(&[
-                "test",
-                "tests",
-                "__tests__",
-                "__mocks__",
-                "mocks",
-                "fixtures",
-                "fixture",
-                "__fixtures__",
-                "__snapshots__",
-                "e2e",
-            ]),
-        },
+            ],
+            &[],
+            &[],
+        ),
+        // pytest's conventions, and their `.pyi` stubs.
+        Language::Python => (
+            &[],
+            &[
+                "test_*.py",
+                "*_test.py",
+                "conftest.py",
+                "test_*.pyi",
+                "*_test.pyi",
+                "conftest.pyi",
+            ],
+            &[],
+        ),
+        // Out-of-line `#[cfg(test)] mod tests;`.
+        Language::Rust => (&[], &["tests.rs", "test.rs"], &[]),
+        // Test classes and doubles, and test projects, e.g. `Foo.UnitTests/RepoTests.cs`.
+        Language::CSharp => (
+            &[],
+            &["*Tests.cs", "*Mock.cs", "*Fake.cs", "Fake*.cs"],
+            &["*.Tests", "*.Test", "*.UnitTests", "*.IntegrationTests"],
+        ),
+    };
+    LanguageRules {
+        conventional_members: strings(conventional),
+        test_files: strings(&[TEST_FILES, files].concat()),
+        test_dirs: strings(&[TEST_DIRS, dirs].concat()),
     }
 }
 
@@ -107,17 +153,40 @@ impl LanguageRules {
         let mut segments = rel.split('/').peekable();
         while let Some(segment) = segments.next() {
             if segments.peek().is_none() {
-                return self
-                    .test_files
-                    .iter()
-                    .any(|marker| segment.contains(marker.as_str()));
+                return self.test_files.iter().any(|p| wildcard(p, segment));
             }
-            if self.test_dirs.iter().any(|dir| dir == segment) {
+            // Case-insensitive: .NET repos use `Tests/` and `UnitTests/`.
+            let segment = segment.to_ascii_lowercase();
+            if self
+                .test_dirs
+                .iter()
+                .any(|p| wildcard(&p.to_ascii_lowercase(), &segment))
+            {
                 return true;
             }
         }
         false
     }
+}
+
+/// `*` matches any run of characters, e.g. `test_*.py` matches `test_api.py`; a pattern
+/// without `*` is an exact name.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let mut parts: Vec<&str> = pattern.split('*').collect();
+    let first = parts.remove(0);
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let Some(last) = parts.pop() else {
+        return rest.is_empty();
+    };
+    for part in parts {
+        match rest.find(part) {
+            Some(i) => rest = &rest[i + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 /// The language's name as written in records and config, e.g. `typescript`.
@@ -167,6 +236,51 @@ mod tests {
         assert!(!ts.is_test_path("src/testing.ts"));
         assert!(!ts.is_test_path("src/latest/a.ts"));
         assert!(!ts.is_test_path("src/openapi-spec.ts"));
+        assert!(ts.is_test_path("src/Tests/helpers.ts"));
+        assert!(ts.is_test_path("benches/parse.ts"));
+        assert!(!ts.is_test_path("src/UserMock.ts"));
+        assert!(!ts.is_test_path("Acme.Tests/client.ts"));
+
+        let rs = rules.get(Language::Rust);
+        assert!(rs.is_test_path("src/parser/tests.rs"));
+        assert!(rs.is_test_path("src/test.rs"));
+        assert!(!rs.is_test_path("src/contest.rs"));
+
+        let py = rules.get(Language::Python);
+        assert!(py.is_test_path("pkg/test_api.py"));
+        assert!(py.is_test_path("pkg/api_test.py"));
+        assert!(py.is_test_path("pkg/conftest.py"));
+        assert!(py.is_test_path("pkg/test_api.pyi"));
+        assert!(!py.is_test_path("pkg/testing.py"));
+        assert!(!py.is_test_path("pkg/latest.py"));
+
+        let cs = rules.get(Language::CSharp);
+        assert!(cs.is_test_path("src/RepoTests.cs"));
+        assert!(cs.is_test_path("Acme/UnitTests/Repo.cs"));
+        assert!(cs.is_test_path("src/UserMock.cs"));
+        assert!(cs.is_test_path("src/ClockFake.cs"));
+        assert!(cs.is_test_path("src/FakeClock.cs"));
+        assert!(!cs.is_test_path("src/Mockingbird.cs"));
+        assert!(
+            !cs.is_test_path("src/LoadTest.cs"),
+            "`*Test.cs` is often production code"
+        );
+        assert!(cs.is_test_path("Acme.Core.UnitTests/Helpers.cs"));
+        assert!(cs.is_test_path("Acme.Api.Tests/Fakes.cs"));
+        assert!(!cs.is_test_path("src/TestHelpers.cs"));
+        assert!(!cs.is_test_path("src/Contest.cs"));
+        assert!(!cs.is_test_path("Acme.Testing/Repo.cs"));
+    }
+
+    #[test]
+    fn matches_wildcards() {
+        assert!(wildcard("*.test.*", "a.test.ts"));
+        assert!(wildcard("test_*.py", "test_.py"));
+        assert!(wildcard("a*b*c", "abbc"));
+        assert!(wildcard("tests.rs", "tests.rs"));
+        assert!(!wildcard("tests.rs", "contests.rs"));
+        assert!(!wildcard("*_test.py", "_test.pyi"));
+        assert!(!wildcard("a*a", "a"));
     }
 
     #[test]

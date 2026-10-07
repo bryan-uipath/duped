@@ -67,6 +67,12 @@ pub enum TypeKind {
     Union,
     /// Any other alias; recorded for the index, with no fields.
     Alias,
+    /// Rust struct or union, C# struct.
+    Struct,
+    /// Rust trait; methods become fields.
+    Trait,
+    /// C# record; positional parameters become fields.
+    Record,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +108,9 @@ pub struct Location {
 pub enum Language {
     TypeScript,
     JavaScript,
+    CSharp,
+    Python,
+    Rust,
 }
 
 impl Record {

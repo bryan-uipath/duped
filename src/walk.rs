@@ -31,8 +31,16 @@ pub struct SourceFile {
 }
 
 /// Directories never worth parsing, even in repos without a `.gitignore`.
-pub(crate) const SKIPPED_DIRS: &[&str] =
-    &["node_modules", "dist", "build", "out", "coverage", "target"];
+pub(crate) const SKIPPED_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "target",
+    "venv",
+    "site-packages",
+];
 
 /// Walk `root`, honouring `.gitignore` even outside a git checkout. Unreadable
 /// entries are reported on stderr and skipped rather than ending the walk.
@@ -67,6 +75,7 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             Some(prefix) => Some(format!("{prefix}/{rel}")),
         };
         if is_excluded(&excludes, &rel)
+            || is_csharp_build_output(&rel)
             || root_rel.is_some_and(|r| is_excluded(&root_excludes, &r))
             || (!options.include_tests && is_test)
         {
@@ -79,6 +88,17 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
         });
     }
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    // A `.pyi` stub next to its `.py` module describes the same API twice.
+    let modules: std::collections::HashSet<String> = files
+        .iter()
+        .filter(|f| f.rel.ends_with(".py"))
+        .map(|f| f.rel.clone())
+        .collect();
+    files.retain(|f| {
+        f.rel
+            .strip_suffix(".pyi")
+            .is_none_or(|stem| !modules.contains(&format!("{stem}.py")))
+    });
     Ok(files)
 }
 
@@ -86,8 +106,16 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "cs" => Some(Language::CSharp),
+        "py" | "pyi" => Some(Language::Python),
+        "rs" => Some(Language::Rust),
         _ => None,
     }
+}
+
+/// C# build output (`obj/`, `bin/`), e.g. generated `MainWindow.g.cs` copies per configuration.
+fn is_csharp_build_output(rel: &str) -> bool {
+    rel.ends_with(".cs") && rel.split('/').any(|s| s == "obj" || s == "bin")
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -131,10 +159,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn detects_csharp_build_output() {
+        assert!(is_csharp_build_output(
+            "App/obj/Debug/net8.0/MainWindow.g.cs"
+        ));
+        assert!(!is_csharp_build_output("tools/bin/cli.js"));
+    }
+
+    #[test]
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
-        assert_eq!(language_for(Path::new("a.rs")), None);
+        assert_eq!(language_for(Path::new("Repo.cs")), Some(Language::CSharp));
+        assert_eq!(language_for(Path::new("a.pyi")), Some(Language::Python));
+        assert_eq!(language_for(Path::new("a.rs")), Some(Language::Rust));
+        assert_eq!(language_for(Path::new("a.go")), None);
     }
 
     #[test]
@@ -149,6 +188,10 @@ mod tests {
             "src/legacy/d.ts",
             "generated/e.ts",
             "node_modules/pkg/f.ts",
+            "venv/lib/g.py",
+            "py/mod.py",
+            "py/mod.pyi",
+            "py/only.pyi",
             "README.md",
         ] {
             let path = root.join(file);
@@ -174,7 +217,7 @@ mod tests {
                 root_prefix: None,
                 rules: Rules::default(),
             }),
-            vec!["src/a.ts", "src/gen/deep/c.ts"]
+            vec!["py/mod.py", "py/only.pyi", "src/a.ts", "src/gen/deep/c.ts"]
         );
         assert_eq!(
             rels(&WalkOptions {
@@ -185,7 +228,7 @@ mod tests {
                 rules: Rules::default(),
             })
             .len(),
-            5
+            7
         );
 
         let single = discover(

@@ -1,18 +1,21 @@
 //! Per-language extractors; each turns source text into shared records.
 
+pub mod csharp;
+pub mod python;
+pub mod rust;
 pub mod typescript;
 
 use std::cmp::Reverse;
 
 use rayon::prelude::*;
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
-use crate::record::{Language, Record};
+use crate::record::{Field, Language, Param, Record, format_params};
 use crate::walk::SourceFile;
 
 pub struct Extraction {
     pub records: Vec<Record>,
-    /// Files that could not be read, e.g. non-UTF-8 content.
+    /// Files that could not be read.
     pub skipped: usize,
 }
 
@@ -21,11 +24,14 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
     let results: Vec<Option<Vec<Record>>> = files
         .par_iter()
         .map_init(Parser::new, |parser, file| {
-            let source = std::fs::read_to_string(&file.path).ok()?;
+            let source = decode(&std::fs::read(&file.path).ok()?);
             Some(match file.language {
                 Language::TypeScript | Language::JavaScript => {
                     typescript::extract(parser, &source, &file.rel, file.language)
                 }
+                Language::CSharp => csharp::extract(parser, &source, &file.rel),
+                Language::Python => python::extract(parser, &source, &file.rel),
+                Language::Rust => rust::extract(parser, &source, &file.rel),
             })
         })
         .collect();
@@ -44,4 +50,100 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
         }
     }
     Extraction { records, skipped }
+}
+
+/// UTF-8 (lossy, so legacy single-byte files still parse), or UTF-16 with a byte-order mark,
+/// as some Windows tooling writes. A UTF-8 byte-order mark is left for the parser to skip.
+fn decode(bytes: &[u8]) -> String {
+    let utf16 = |rest: &[u8], from: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|p| from(*p)).collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+pub fn has_token(node: Node, token: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|c| !c.is_named() && c.kind() == token)
+}
+
+pub fn join_scope(scope: &[String]) -> Option<String> {
+    (!scope.is_empty()).then(|| scope.join("."))
+}
+
+/// Method field type, e.g. `(id: string, force?: boolean) => void`.
+pub fn signature(params: &[Param], returns: Option<&str>) -> String {
+    format!(
+        "({}) => {}",
+        format_params(params),
+        returns.unwrap_or("unknown")
+    )
+}
+
+/// Add `field` unless its name is already present; an untyped entry takes the new type.
+/// Overloads and getter/setter pairs share a name.
+pub fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
+    let Some(field) = field else { return };
+    match fields.iter_mut().find(|f| f.name == field.name) {
+        Some(existing) => {
+            if existing.ty.is_none() {
+                existing.ty = field.ty;
+            }
+        }
+        None => fields.push(field),
+    }
+}
+
+/// `{ a:\n  'x  y' }` → `{ a: 'x  y' }`: collapse whitespace runs outside quotes.
+pub fn collapse_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut quote = None;
+    let mut escaped = false;
+    let mut pending_space = false;
+    for c in text.chars() {
+        if let Some(q) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_legacy_and_utf16_sources() {
+        assert_eq!(
+            decode(b"class A {} // caf\xe9"),
+            "class A {} // caf\u{FFFD}"
+        );
+        assert_eq!(decode(&[0xFF, 0xFE, b'h', 0, b'i', 0]), "hi");
+        assert_eq!(decode(&[0xFE, 0xFF, 0, b'h', 0, b'i']), "hi");
+    }
 }
