@@ -109,6 +109,7 @@ pub struct Location {
 pub enum Language {
     TypeScript,
     JavaScript,
+    Python,
     Rust,
 }
 

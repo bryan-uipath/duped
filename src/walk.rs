@@ -23,7 +23,16 @@ pub struct SourceFile {
 }
 
 /// Directories never worth parsing, even in repos without a `.gitignore`.
-const SKIPPED_DIRS: &[&str] = &["node_modules", "dist", "build", "out", "coverage", "target"];
+const SKIPPED_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "target",
+    "venv",
+    "site-packages",
+];
 
 /// Walk `root`, honouring `.gitignore` even outside a git checkout. Unreadable
 /// entries are reported on stderr and skipped rather than ending the walk.
@@ -60,6 +69,17 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
         });
     }
     files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    // A `.pyi` stub next to its `.py` module describes the same API twice.
+    let modules: std::collections::HashSet<String> = files
+        .iter()
+        .filter(|f| f.rel.ends_with(".py"))
+        .map(|f| f.rel.clone())
+        .collect();
+    files.retain(|f| {
+        f.rel
+            .strip_suffix(".pyi")
+            .is_none_or(|stem| !modules.contains(&format!("{stem}.py")))
+    });
     Ok(files)
 }
 
@@ -67,6 +87,7 @@ pub fn language_for(path: &Path) -> Option<Language> {
     match path.extension()?.to_str()? {
         "ts" | "tsx" | "mts" | "cts" => Some(Language::TypeScript),
         "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+        "py" | "pyi" => Some(Language::Python),
         "rs" => Some(Language::Rust),
         _ => None,
     }
@@ -93,6 +114,7 @@ pub fn is_test_path(rel: &str) -> bool {
         if segments.peek().is_none() {
             // Rust's out-of-line `#[cfg(test)] mod tests;` lives in `tests.rs` / `test.rs`.
             return FILE_MARKERS.iter().any(|marker| segment.contains(marker))
+                || is_python_test_file(segment)
                 || matches!(segment, "tests.rs" | "test.rs");
         }
         if DIRS.contains(&segment) {
@@ -100,6 +122,15 @@ pub fn is_test_path(rel: &str) -> bool {
         }
     }
     false
+}
+
+/// pytest's conventions: `test_*.py`, `*_test.py` and `conftest.py`, and their `.pyi` stubs.
+fn is_python_test_file(name: &str) -> bool {
+    name.strip_suffix(".py")
+        .or_else(|| name.strip_suffix(".pyi"))
+        .is_some_and(|stem| {
+            stem == "conftest" || stem.starts_with("test_") || stem.ends_with("_test")
+        })
 }
 
 /// A path is excluded when a glob matches it or any of its parent directories.
@@ -159,12 +190,19 @@ mod tests {
         assert!(!is_test_path("src/testing.ts"));
         assert!(!is_test_path("src/latest/a.ts"));
         assert!(!is_test_path("src/openapi-spec.ts"));
+        assert!(is_test_path("pkg/test_api.py"));
+        assert!(is_test_path("pkg/api_test.py"));
+        assert!(is_test_path("pkg/conftest.py"));
+        assert!(is_test_path("pkg/test_api.pyi"));
+        assert!(!is_test_path("pkg/testing.py"));
+        assert!(!is_test_path("pkg/latest.py"));
     }
 
     #[test]
     fn maps_extensions() {
         assert_eq!(language_for(Path::new("a.tsx")), Some(Language::TypeScript));
         assert_eq!(language_for(Path::new("a.mjs")), Some(Language::JavaScript));
+        assert_eq!(language_for(Path::new("a.pyi")), Some(Language::Python));
         assert_eq!(language_for(Path::new("a.rs")), Some(Language::Rust));
         assert_eq!(language_for(Path::new("a.go")), None);
     }
@@ -181,6 +219,10 @@ mod tests {
             "src/legacy/d.ts",
             "generated/e.ts",
             "node_modules/pkg/f.ts",
+            "venv/lib/g.py",
+            "py/mod.py",
+            "py/mod.pyi",
+            "py/only.pyi",
             "README.md",
         ] {
             let path = root.join(file);
@@ -203,7 +245,7 @@ mod tests {
                 include_tests: false,
                 excludes
             }),
-            vec!["src/a.ts", "src/gen/deep/c.ts"]
+            vec!["py/mod.py", "py/only.pyi", "src/a.ts", "src/gen/deep/c.ts"]
         );
         assert_eq!(
             rels(&WalkOptions {
@@ -211,7 +253,7 @@ mod tests {
                 excludes: Vec::new()
             })
             .len(),
-            5
+            7
         );
 
         let single = discover(

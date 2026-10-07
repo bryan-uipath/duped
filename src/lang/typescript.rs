@@ -679,7 +679,7 @@ fn is_private(member: Node) -> bool {
 
 /// Add `field` unless its name is already present; an untyped entry takes the new type.
 /// Overloads and getter/setter pairs share a name.
-fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
+pub(crate) fn push_field(fields: &mut Vec<Field>, field: Option<Field>) {
     let Some(field) = field else { return };
     match fields.iter_mut().find(|f| f.name == field.name) {
         Some(existing) => {
@@ -729,7 +729,7 @@ fn has_token(node: Node, token: &str) -> bool {
 }
 
 /// Method field type, e.g. `(id: string, force?: boolean) => void`.
-fn signature(params: &[Param], returns: Option<&str>) -> String {
+pub(crate) fn signature(params: &[Param], returns: Option<&str>) -> String {
     format!(
         "({}) => {}",
         format_params(params),
@@ -737,7 +737,7 @@ fn signature(params: &[Param], returns: Option<&str>) -> String {
     )
 }
 
-fn member(name: &str) -> Field {
+pub(crate) fn member(name: &str) -> Field {
     Field {
         name: name.to_string(),
         ty: None,
@@ -750,7 +750,7 @@ fn unquote(text: &str) -> &str {
     text.trim_matches(|c| c == '\'' || c == '"' || c == '`')
 }
 
-fn join_scope(scope: &[String]) -> Option<String> {
+pub(crate) fn join_scope(scope: &[String]) -> Option<String> {
     (!scope.is_empty()).then(|| scope.join("."))
 }
 
@@ -762,7 +762,7 @@ fn qualified(scope: &[String], name: &str) -> String {
 }
 
 /// `{ a:\n  'x  y' }` → `{ a: 'x  y' }`: collapse whitespace runs outside quotes.
-fn collapse_whitespace(text: &str) -> String {
+pub(crate) fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut quote = None;
     let mut escaped = false;

@@ -1,5 +1,6 @@
 //! Per-language extractors; each turns source text into shared records.
 
+pub mod python;
 pub mod rust;
 pub mod typescript;
 
@@ -27,6 +28,7 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
                 Language::TypeScript | Language::JavaScript => {
                     typescript::extract(parser, &source, &file.rel, file.language)
                 }
+                Language::Python => python::extract(parser, &source, &file.rel),
                 Language::Rust => rust::extract(parser, &source, &file.rel),
             })
         })

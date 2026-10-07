@@ -4,7 +4,7 @@ Find duplicated functions and types across a codebase: same name, similar shape,
 
 `duped` parses syntax with tree-sitter. It needs no compiler, no language server and no embeddings. Results are evidence for review: read both sides before refactoring.
 
-> Early development. TypeScript, JavaScript and Rust are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
+> Early development. TypeScript, JavaScript, Rust and Python are supported so far; see the roadmap in [DESIGN.md](DESIGN.md).
 
 ## Build
 
@@ -25,8 +25,9 @@ duped index [DIR] [--out api-index.md]      # greppable markdown summary, one se
 
 - `.gitignore` rules apply, even outside a git checkout.
 - Hidden files and directories (such as `.storybook/`) are skipped.
-- `node_modules`, `dist`, `build`, `out`, `coverage` and `target` are always skipped.
-- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`, and Rust `tests.rs` / `test.rs` module files.
+- `node_modules`, `dist`, `build`, `out`, `coverage`, `target`, `venv` and `site-packages` are always skipped.
+- A `.pyi` stub next to a `.py` module of the same name is skipped, since both describe one API.
+- Test, mock and fixture files are skipped unless you pass `--include-tests`. That covers `*.test.*`, `*.spec.*`, `*.mock.*`, `*.fixture.*`, pytest's `test_*.py`, `*_test.py` and `conftest.py` (and `.pyi` equivalents), Rust `tests.rs` / `test.rs` module files, and directories such as `test/`, `__tests__/`, `mocks/`, `fixtures/` and `benches/`.
 - `--exclude <glob>` (repeatable) is relative to `DIR` and also matches directories. For example, `--exclude examples` skips everything under `examples/`. `*` stays within one path segment; `**` crosses segments.
 
 ### Records
@@ -36,19 +37,19 @@ Each line of `extract` output is one JSON object. Keys whose value would be empt
 | Key | In | Meaning |
 | --- | --- | --- |
 | `record` | all | `function` or `type` |
-| `language` | all | `typescript`, `javascript` or `rust` |
+| `language` | all | `typescript`, `javascript`, `rust` or `python` |
 | `name` | all | declared name; `default` for an anonymous default export |
 | `scope` | all, optional | enclosing class or namespace, e.g. `Api.Client` |
 | `exported` | all | part of the module's public API, including `export { x }` lists; private and protected class members are `false` |
 | `file`, `start_line`, `end_line` | all | root-relative path and 1-based inclusive lines (from the `export` keyword or first decorator) |
-| `doc` | all, optional | the adjacent `/** … */` comment as plain text |
-| `params` | function | `[{ name, type?, optional? }]`; `this:` is omitted |
+| `doc` | all, optional | the adjacent `/** … */` comment (TypeScript) or the docstring (Python), with whitespace collapsed and escapes left as written |
+| `params` | function | `[{ name, type?, optional? }]`; TypeScript's `this:` and Python's method receiver (`self`, `cls`) are omitted |
 | `returns` | function, optional | return type as written |
 | `kind` | type | `interface`, `type` (object alias), `class`, `enum`, `union` (literal members become fields), `alias` (no fields), `struct` or `trait` |
 | `fields` | type | `[{ name, type?, optional?, kind }]`, where `kind` is `property`, `method` or `member`; quotes are stripped, so `'id'` and `id` match; overloads and getter/setter pairs share one field |
 | `extends` | type, optional | base types and implemented interfaces, as written |
 
-Overload signatures fold into their implementation, so each function appears once.
+Overload signatures (TypeScript overloads, Python `@overload`) fold into their implementation, so each function appears once.
 
 ### Rust
 
@@ -58,3 +59,12 @@ Overload signatures fold into their implementation, so each function appears onc
 - **`exported`:** plain `pub` only; `pub(crate)` and `pub(super)` count as internal. Methods in `impl Trait for X` have no `pub` of their own: they're exported unless `X` or the trait is private and defined in the same file (`super::`, `self::` and `crate::` paths are resolved within the file). Inherent methods also need `pub`.
 - **`doc` and `start_line`:** `///` and `/** */` comments above the item, skipping attributes such as `#[derive]`, blank lines and plain `//` comments, as rustc does; `start_line` is the first attribute.
 - **Skipped:** files starting with `#![cfg(test)]`, items under `#[cfg(test)]` or `#[cfg(all(test, …))]`, `#[test]` and `#[…::test(…)]` functions, and macros. These are skipped even with `--include-tests`, which only affects which files are walked.
+
+### Python
+
+- **Exported:** if the module assigns `__all__` a literal list or tuple of strings, and doesn't change it later (`+=`, `.extend()`, …), a top-level name is exported exactly when it's listed. Otherwise a name is exported when it doesn't start with `_`; dunder names like `__eq__` count as public. Methods are exported when their class is and their own name passes the same rule.
+- **Classes:** fields come from annotated or plain class-body assignments, `self.x = …` assignments in `__init__`, `@property` / `@cached_property` methods (as properties, typed by the getter's return or else the setter's parameter) and other methods (as methods). Dunder names (`__slots__`, `__repr__`) are not fields, though dunder methods still get function records. This covers dataclasses, pydantic and attrs models, `TypedDict` and `NamedTuple` the same way. `__init__` itself is not a field or a function record.
+- **Enums:** subclasses of `Enum`, `IntEnum`, `StrEnum`, `Flag` and `IntFlag` have kind `enum`, and their class-body assignments are the members, except sunder (`_order_`) and private (`__x`) names. Subclasses of enums defined earlier in the same file are enums too.
+- **Aliases:** `type X = …` and `X: TypeAlias = …`.
+- **Annotations:** quoted forward references are unquoted, so `"Base"` and `Base` match.
+- **Scope:** module level and `if TYPE_CHECKING:` blocks; functions nested in functions are skipped.
