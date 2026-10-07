@@ -124,6 +124,29 @@ fn flags_reach_the_analysis() {
         "{truncated}"
     );
 
+    // A `duped.toml` acknowledgement hides the pair unless asked for.
+    std::fs::write(
+        root.join("duped.toml"),
+        "[[acknowledged]]\na = \"@demo/ext:getOrCreateClient\"\nb = \"@demo/web:getOrCreateClient\"\nreason = \"host-specific auth\"\n",
+    )
+    .unwrap();
+    let json = bodies_json(&root, &[]);
+    assert_eq!(
+        (
+            &json["summary"]["pairs"],
+            &json["summary"]["hidden"]["acknowledged"]
+        ),
+        (&2.into(), &1.into())
+    );
+    let json = bodies_json(&root, &["--include-acknowledged"]);
+    assert!(
+        json["pairs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["acknowledged"] == "host-specific auth")
+    );
+
     let rejected = Command::new(env!("CARGO_BIN_EXE_duped"))
         .args(["bodies", ".", "--shingle", "0"])
         .output()

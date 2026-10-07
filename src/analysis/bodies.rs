@@ -10,7 +10,7 @@ use std::fmt::Write;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
-use super::{Judge, jaccard};
+use super::{Judge, jaccard, pair_notes, tag_rank};
 use crate::modules::Tag;
 use crate::record::{FunctionRecord, Record, Token, qualified};
 
@@ -87,7 +87,7 @@ pub fn find_duplicate_bodies(
         .iter()
         .enumerate()
         .filter_map(|(record, r)| match r {
-            Record::Function(f) if f.body.len() >= options.min_tokens.max(1) => Some(Candidate {
+            Record::Function(f) if is_candidate(r, options) => Some(Candidate {
                 record,
                 shingles: shingles(&f.body, options.shingle),
             }),
@@ -95,24 +95,22 @@ pub fn find_duplicate_bodies(
         })
         .collect();
 
-    let mut scored: Vec<(usize, usize, usize)> = candidate_pairs(&candidates, options.threshold)
-        .into_par_iter()
-        .filter_map(|(i, j)| {
-            let (a, b) = (&candidates[i], &candidates[j]);
-            let shared = shared(&a.shingles, &b.shingles);
-            let similarity = jaccard(a.shingles.len(), b.shingles.len(), shared);
-            (similarity >= options.threshold).then_some((a.record, b.record, shared))
-        })
-        .collect();
-    scored.sort_unstable();
-    let sizes: HashMap<usize, usize> = candidates
-        .iter()
-        .map(|c| (c.record, c.shingles.len()))
-        .collect();
+    let mut scored: Vec<(usize, usize, usize, f64)> =
+        candidate_pairs(&candidates, options.threshold)
+            .into_par_iter()
+            .filter_map(|(i, j)| {
+                let (a, b) = (&candidates[i], &candidates[j]);
+                let shared = shared(&a.shingles, &b.shingles);
+                let similarity = jaccard(a.shingles.len(), b.shingles.len(), shared);
+                (similarity >= options.threshold)
+                    .then_some((a.record, b.record, shared, similarity))
+            })
+            .collect();
+    scored.sort_unstable_by_key(|&(a, b, ..)| (a, b));
 
     let mut pairs = Vec::new();
     let (mut hidden_same_file, mut hidden_acknowledged) = (0, 0);
-    for (a, b, shared) in scored {
+    for (a, b, shared, similarity) in scored {
         let same_file = records[a].location().file == records[b].location().file;
         if same_file && !options.include_same_file {
             hidden_same_file += 1;
@@ -126,7 +124,7 @@ pub fn find_duplicate_bodies(
         pairs.push(BodyPair {
             a,
             b,
-            similarity: jaccard(sizes[&a], sizes[&b], shared),
+            similarity,
             shared,
             tag: verdict.tag,
             acknowledged: verdict.acknowledged,
@@ -150,14 +148,19 @@ pub fn find_duplicate_bodies(
     }
 }
 
+/// A function with enough body tokens to compare.
+pub fn is_candidate(record: &Record, options: &BodyOptions) -> bool {
+    matches!(record, Record::Function(f) if f.body.len() >= options.min_tokens.max(1))
+}
+
 /// Hashes of each `k` consecutive normalised tokens; a body shorter than `k` is one shingle.
 /// Repeats are numbered, so a ten-case `switch` doesn't collapse into a three-case one.
 fn shingles(body: &[Token], k: usize) -> Vec<u64> {
     let normalised: Vec<u32> = body
         .iter()
         .map(|&t| match t {
-            Token::Identifier(_) => IDENTIFIER,
-            Token::Syntax(h) | Token::Property(h) | Token::Literal(h) => h,
+            Token::Identifier => IDENTIFIER,
+            Token::Text(h) => h,
         })
         .collect();
     let mut out: Vec<u64> = normalised
@@ -266,14 +269,9 @@ fn file_pairs(records: &[Record], pairs: &[BodyPair]) -> Vec<FilePair> {
     let mut files: Vec<FilePair> = groups
         .into_iter()
         .filter(|(_, linked)| {
-            let distinct = |side: fn(&BodyPair) -> usize| {
-                linked
-                    .iter()
-                    .map(|&i| side(&pairs[i]))
-                    .collect::<HashSet<_>>()
-                    .len()
-            };
-            distinct(|p| p.a) >= 2 && distinct(|p| p.b) >= 2
+            let first = &pairs[linked[0]];
+            linked.iter().any(|&i| pairs[i].a != first.a)
+                && linked.iter().any(|&i| pairs[i].b != first.b)
         })
         .map(|((a, b), linked)| FilePair {
             a: a.to_string(),
@@ -298,11 +296,6 @@ fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^ (x >> 31)
-}
-
-/// Untagged pairs (modules not tracked) all rank alike.
-fn tag_rank(tag: &Option<Tag>) -> u8 {
-    tag.as_ref().map_or(0, Tag::rank)
 }
 
 // ----- output -----
@@ -358,7 +351,8 @@ pub fn render_text(
             rank + 1,
             file.pairs.len(),
             file_shared(file, &report.pairs),
-            pair_notes(first)
+            // Acknowledgements are per pair, so the file line shows only the tag.
+            pair_notes(&first.tag, &None)
         )
         .ok();
         for (path, index) in [(&file.a, first.a), (&file.b, first.b)] {
@@ -396,7 +390,7 @@ pub fn render_text(
             pair.similarity,
             pair.shared,
             relation_text(records, pair),
-            pair_notes(pair)
+            pair_notes(&pair.tag, &pair.acknowledged)
         )
         .ok();
         for index in [pair.a, pair.b] {
@@ -485,18 +479,6 @@ fn member_line(records: &[Record], index: usize, judge: &dyn Judge) -> String {
         f.location.file,
         f.location.start_line
     )
-}
-
-/// ` — importable: a can import b (acknowledged: doc: mirrors)`
-fn pair_notes(pair: &BodyPair) -> String {
-    let mut notes = String::new();
-    if let Some(tag) = &pair.tag {
-        write!(notes, " — {}", tag.describe()).ok();
-    }
-    if let Some(reason) = &pair.acknowledged {
-        write!(notes, " (acknowledged: {reason})").ok();
-    }
-    notes
 }
 
 fn relation_text(records: &[Record], pair: &BodyPair) -> String {

@@ -66,14 +66,13 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
-/// How a language's tokenizer treats a node kind; unclassed leaves are syntax.
+/// How a language's tokenizer treats a node kind; unclassed leaves are kept as text.
 pub enum TokenClass {
     /// Comments; dropped with their subtree.
     Skip,
     /// One token for the whole subtree, e.g. a string with its quotes and fragments.
     Literal,
     Identifier,
-    Property,
 }
 
 /// Leaves of `node` in source order as body tokens, classed by `class`; whitespace-only
@@ -89,10 +88,8 @@ pub fn body_tokens(node: Node, source: &str, class: fn(&str) -> Option<TokenClas
         if leaf && !text.trim().is_empty() {
             tokens.extend(match class {
                 Some(TokenClass::Skip) => None,
-                Some(TokenClass::Literal) => Some(Token::Literal(token_hash(text))),
-                Some(TokenClass::Identifier) => Some(Token::Identifier(token_hash(text))),
-                Some(TokenClass::Property) => Some(Token::Property(token_hash(text))),
-                None => Some(Token::Syntax(token_hash(text))),
+                Some(TokenClass::Identifier) => Some(Token::Identifier),
+                Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
             });
         }
         if !leaf && cursor.goto_first_child() {

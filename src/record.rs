@@ -31,17 +31,12 @@ pub struct FunctionRecord {
     pub body: Vec<Token>,
 }
 
-/// One body token, classed so an analysis can choose what to abstract away.
-/// Payloads are [`token_hash`]es of the source text.
+/// One body token: identifiers are abstracted, everything else is kept by text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
-    /// Keyword, operator or punctuation.
-    Syntax(u32),
-    Identifier(u32),
-    /// Member name after `.`, object key or JSX attribute.
-    Property(u32),
-    /// String, number or regex literal, quotes included.
-    Literal(u32),
+    Identifier,
+    /// [`token_hash`] of a keyword, operator, punctuation, property name or literal.
+    Text(u32),
 }
 
 /// FNV-1a, so token hashes are stable across runs.

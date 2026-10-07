@@ -59,7 +59,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 - **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs are clustered with union-find.
 - **fns:** similarity of parameter names and types plus return type.
 - **names:** same-name declarations, flagging the ones whose shape or signature differs.
-- **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with local names abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
+- **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
 
 ### Module graph and actionability
 

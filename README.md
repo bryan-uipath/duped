@@ -114,12 +114,12 @@ Every pair is evidence, not a verdict. Read both types before consolidating them
 
 `duped bodies` finds functions whose bodies are near-copies, whatever they are called, such as a module ported to another package with renamed locals and a few added guards. TypeScript and JavaScript only for now.
 
-- **Tokens:** each body's tokens, with comments dropped and every local identifier replaced by one placeholder. Keywords, operators, property names and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
+- **Tokens:** each body's tokens, with comments dropped and every identifier (local or not) replaced by one placeholder, including those inside template `${…}`. Keywords, operators, property names (shorthand `{ id }` too) and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
 - **similarity:** Jaccard similarity of the two bodies' token shingles (runs of `--shingle` tokens). Repeated shingles count separately, so a ten-case `switch` doesn't match a three-case one.
 - **shared:** shingles both bodies have, roughly the number of duplicated tokens. Pairs are ranked by it, so a large near-copy outranks a small exact one.
 - **Files sharing several functions:** two files linked by pairs between at least two functions on each side, ranked by total shared. These are usually copied modules rather than one copied helper.
 
-Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time; each candidate's similarity is then computed exactly. Pairs are tagged and acknowledged as for `types` (below).
+Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time; each candidate's similarity is then computed exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

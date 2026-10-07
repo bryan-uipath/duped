@@ -7,7 +7,7 @@ use globset::GlobSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{Interner, Judge, components, jaccard, seed_pairs};
+use super::{Interner, Judge, components, jaccard, pair_notes, seed_pairs, tag_rank};
 use crate::modules::{Home, Tag};
 use crate::record::{Record, TypeKind, TypeRecord, qualified};
 use crate::rules::Rules;
@@ -315,11 +315,6 @@ fn cluster(candidates: &[Candidate], pairs: &[TypePair], judge: &dyn Judge) -> V
     clusters
 }
 
-/// Untagged pairs (modules not tracked) all rank alike.
-fn tag_rank(tag: &Option<Tag>) -> u8 {
-    tag.as_ref().map_or(0, Tag::rank)
-}
-
 fn best_similarity(cluster: &TypeCluster, pairs: &[TypePair]) -> f64 {
     cluster
         .pairs
@@ -478,7 +473,7 @@ pub fn render_text(
                 pair.typed,
                 pair.shared.len(),
                 relation_text(records, pair),
-                pair_notes(pair)
+                pair_notes(&pair.tag, &pair.acknowledged)
             )
             .ok();
             for index in [pair.a, pair.b] {
@@ -518,7 +513,7 @@ pub fn render_text(
                     pair.similarity,
                     pair.typed,
                     relation_text(records, pair),
-                    pair_notes(pair)
+                    pair_notes(&pair.tag, &pair.acknowledged)
                 )
                 .ok();
             }
@@ -629,18 +624,6 @@ fn member_line(records: &[Record], index: usize, judge: &dyn Judge) -> String {
         t.location.file,
         t.location.start_line
     )
-}
-
-/// ` — importable: a can import b (acknowledged: doc: mirrors)`
-fn pair_notes(pair: &TypePair) -> String {
-    let mut notes = String::new();
-    if let Some(tag) = &pair.tag {
-        write!(notes, " — {}", tag.describe()).ok();
-    }
-    if let Some(reason) = &pair.acknowledged {
-        write!(notes, " (acknowledged: {reason})").ok();
-    }
-    notes
 }
 
 /// `A = B` exact, `A ⊃ B` superset, `A ⊂ B` subset, `A ~ B` overlap.

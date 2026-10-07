@@ -129,6 +129,23 @@ pub fn jaccard(a_len: usize, b_len: usize, shared: usize) -> f64 {
     }
 }
 
+/// Untagged pairs (modules not tracked) all rank alike.
+pub fn tag_rank(tag: &Option<Tag>) -> u8 {
+    tag.as_ref().map_or(0, Tag::rank)
+}
+
+/// ` — importable: a can import b (acknowledged: doc: mirrors)`
+pub fn pair_notes(tag: &Option<Tag>, acknowledged: &Option<String>) -> String {
+    let mut notes = String::new();
+    if let Some(tag) = tag {
+        notes.push_str(&format!(" — {}", tag.describe()));
+    }
+    if let Some(reason) = acknowledged {
+        notes.push_str(&format!(" (acknowledged: {reason})"));
+    }
+    notes
+}
+
 /// Connected components of `0..n` linked by `edges`; singletons are dropped.
 /// Components keep their members in ascending order and come back ordered by first member.
 pub fn components(n: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Vec<Vec<usize>> {

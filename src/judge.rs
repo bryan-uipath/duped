@@ -27,6 +27,8 @@ pub struct ProjectJudge<'a> {
     /// Module tags need the compared records to span at least two modules; otherwise every
     /// pair would be "same module".
     tagging: bool,
+    /// What is compared, for the summary, e.g. `types`.
+    noun: &'static str,
     acknowledged: &'a [Acknowledged],
     /// Directory the records' `file` paths are relative to.
     base: PathBuf,
@@ -40,6 +42,7 @@ impl<'a> ProjectJudge<'a> {
         records: &'a [Record],
         base: PathBuf,
         acknowledged: &'a [Acknowledged],
+        noun: &'static str,
         compared: impl Fn(&Record) -> bool,
     ) -> Self {
         let mut by_file: HashMap<&str, Option<usize>> = HashMap::new();
@@ -63,6 +66,7 @@ impl<'a> ProjectJudge<'a> {
             records,
             modules,
             tagging: spanned.len() >= 2,
+            noun,
             acknowledged,
             base,
             headers: RefCell::default(),
@@ -190,7 +194,8 @@ impl Judge for ProjectJudge<'_> {
             format!("{found} modules")
         } else if found >= 2 {
             format!(
-                "{found} modules, but the scanned types are in fewer than 2, so pairs are not tagged"
+                "{found} modules, but the scanned {} are in fewer than 2, so pairs are not tagged",
+                self.noun
             )
         } else {
             "fewer than 2 modules, so pairs are not tagged".to_string()
@@ -328,7 +333,7 @@ mod tests {
             b: "@x/canvas:Row".into(),
             reason: Some("boundary".into()),
         }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("boundary")
@@ -340,7 +345,7 @@ mod tests {
             b: "Row".into(),
             reason: None,
         }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &wrong, is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &wrong, "types", is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
     }
 
@@ -357,7 +362,7 @@ mod tests {
             ty("Other", "canvas/c.ts", Some("Returns a copy of the list.")),
             ty("Thing", "evals/d.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
@@ -393,7 +398,7 @@ mod tests {
                 aliases: Vec::new(),
             },
         ]);
-        let judge = ProjectJudge::new(&g, &records, base, &[], is_type);
+        let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
@@ -433,7 +438,7 @@ mod tests {
             b: "load".into(),
             reason: None,
         }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, |r| {
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, "functions", |r| {
             matches!(r, Record::Function(_))
         });
         let verdict = judge.verdict(1, 2);
@@ -450,7 +455,7 @@ mod tests {
             aliases: Vec::new(),
         }]);
         let records = vec![ty("A", "a.ts", None), ty("B", "b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert_eq!(judge.module(0), None);
     }
@@ -460,7 +465,7 @@ mod tests {
         // Two modules exist, but every scanned type is in one of them.
         let g = graph();
         let records = vec![ty("A", "canvas/a.ts", None), ty("B", "canvas/b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert!(judge.summary().unwrap().contains("fewer than 2"));
     }
@@ -470,7 +475,7 @@ mod tests {
         let g = graph();
         let ack = |doc: &str, a: &str, b: &str| {
             let records = vec![ty(a, "canvas/a.ts", Some(doc)), ty(b, "evals/b.ts", None)];
-            ProjectJudge::new(&g, &records, "/repo".into(), &[], is_type)
+            ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type)
                 .verdict(0, 1)
                 .acknowledged
         };
@@ -547,7 +552,7 @@ mod tests {
             ty("Foo", "canvas/a.ts", None),
             ty("License", "evals/b.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, base, &[], is_type);
+        let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }

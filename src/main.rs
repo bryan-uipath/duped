@@ -176,10 +176,14 @@ fn run(cli: Cli) -> Result<()> {
         }
         (Command::Index(_), ..) => out.write_all(index::render(&records).as_bytes())?,
         (Command::Types(args), Some(options), Some(graph)) => {
-            let judge =
-                judge::ProjectJudge::new(&graph, &records, base, &config.acknowledged, |r| {
-                    matches!(r, record::Record::Type(_))
-                });
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "types",
+                |r| matches!(r, record::Record::Type(_)),
+            );
             let report = analysis::types::find_duplicate_types(&records, &options, &judge);
             if args.json {
                 let json = analysis::types::to_json(&records, &report, &judge);
@@ -193,10 +197,6 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         (Command::Bodies(args), _, Some(graph)) => {
-            let judge =
-                judge::ProjectJudge::new(&graph, &records, base, &config.acknowledged, |r| {
-                    matches!(r, record::Record::Function(_))
-                });
             let options = analysis::bodies::BodyOptions {
                 shingle: usize::from(args.shingle),
                 threshold: args.threshold,
@@ -204,6 +204,14 @@ fn run(cli: Cli) -> Result<()> {
                 include_same_file: args.include_same_file,
                 include_acknowledged: args.include_acknowledged,
             };
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "functions",
+                |r| analysis::bodies::is_candidate(r, &options),
+            );
             let report = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
             if args.json {
                 let json = analysis::bodies::to_json(&records, &report, &judge);

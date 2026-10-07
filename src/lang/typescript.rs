@@ -618,17 +618,13 @@ impl<'a> Extractor<'a> {
     }
 }
 
-/// Body token classes; keywords, operators, `this` and the like are syntax.
+/// Body token classes. Property names, including shorthand `{ id }`, stay text, as do
+/// template strings' fragments; their `${…}` substitutions are tokenized like code.
 fn token_class(kind: &str) -> Option<TokenClass> {
     Some(match kind {
         "comment" => TokenClass::Skip,
-        "string" | "template_string" | "regex" | "jsx_text" | "number" => TokenClass::Literal,
-        "identifier"
-        | "type_identifier"
-        | "shorthand_property_identifier"
-        | "shorthand_property_identifier_pattern"
-        | "statement_identifier" => TokenClass::Identifier,
-        "property_identifier" | "private_property_identifier" => TokenClass::Property,
+        "string" | "regex" | "jsx_text" | "number" => TokenClass::Literal,
+        "identifier" | "type_identifier" | "statement_identifier" => TokenClass::Identifier,
         _ => return None,
     })
 }
@@ -1055,23 +1051,28 @@ mod tests {
     fn body_tokens_class_leaves_and_drop_comments() {
         use crate::record::{Token, token_hash};
         let records = run("function f() { // note\n  return user.name + 'x' + 2; }");
-        let syntax = |s| Token::Syntax(token_hash(s));
+        let text = |s| Token::Text(token_hash(s));
         assert_eq!(
             functions(&records)[0].body,
             vec![
-                syntax("{"),
-                syntax("return"),
-                Token::Identifier(token_hash("user")),
-                syntax("."),
-                Token::Property(token_hash("name")),
-                syntax("+"),
-                Token::Literal(token_hash("'x'")),
-                syntax("+"),
-                Token::Literal(token_hash("2")),
-                syntax(";"),
-                syntax("}"),
+                text("{"),
+                text("return"),
+                Token::Identifier,
+                text("."),
+                text("name"),
+                text("+"),
+                text("'x'"),
+                text("+"),
+                text("2"),
+                text(";"),
+                text("}"),
             ]
         );
+        // Shorthand keys stay; template substitutions are abstracted like code.
+        let records = run("function g() { return { id, label: `${user.name}!` }; }");
+        let body = &functions(&records)[0].body;
+        assert!(body.contains(&text("id")) && body.contains(&text("name")));
+        assert!(!body.contains(&text("user")) && body.contains(&Token::Identifier));
         let arrow = run("const g = (a) => a.b;\ndeclare function h(): void;");
         assert_eq!(functions(&arrow)[0].body.len(), 3);
         assert!(functions(&arrow)[1].body.is_empty());
