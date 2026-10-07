@@ -1,12 +1,12 @@
 //! Files that declare the same names: a ported or forked module shows up as one file pair.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 use serde_json::{Value, json};
 
-use super::types::normalize_type;
-use super::{Interner, Judge};
+use super::types::{compact_whitespace, kind_name, normalize_type};
+use super::{Interner, Judge, tag_rank};
 use crate::modules::Tag;
 use crate::record::{Language, Record, TypeKind, format_params};
 
@@ -62,20 +62,14 @@ pub struct NameReport {
     pub hidden_same_module: usize,
 }
 
-/// One file's declarations: `(name id, record index)`, first declaration of each name.
-struct FileNames<'r> {
-    file: &'r str,
-    names: Vec<(u32, usize)>,
-}
-
 pub fn find_shared_names(
     records: &[Record],
     options: &NameOptions,
     judge: &dyn Judge,
 ) -> NameReport {
     let mut ids = Interner::default();
-    let mut by_file: HashMap<&str, usize> = HashMap::new();
-    let mut files: Vec<FileNames> = Vec::new();
+    // Each file's `(name id, record index)`, first declaration of each name.
+    let mut by_file: BTreeMap<&str, Vec<(u32, usize)>> = BTreeMap::new();
     let mut texts: Vec<String> = Vec::new();
     for (index, record) in records.iter().enumerate() {
         let (language, scope, name) = match record {
@@ -86,29 +80,23 @@ pub fn find_shared_names(
         if scope.is_some() || name == "default" {
             continue;
         }
-        let id = ids.id((family(language), name.clone()));
+        // A merged `interface X` and `function X` are two names, so like pairs with like.
+        let is_type = matches!(record, Record::Type(_));
+        let id = ids.id((family(language), is_type, name.clone()));
         if id as usize == texts.len() {
             texts.push(name.clone());
         }
-        let file = record.location().file.as_str();
-        let slot = *by_file.entry(file).or_insert_with(|| {
-            files.push(FileNames {
-                file,
-                names: Vec::new(),
-            });
-            files.len() - 1
-        });
-        let names = &mut files[slot].names;
+        let names = by_file.entry(record.location().file.as_str()).or_default();
         if !names.iter().any(|&(n, _)| n == id) {
             names.push((id, index));
         }
     }
-    files.sort_by(|x, y| x.file.cmp(y.file));
+    let files: Vec<(&str, Vec<(u32, usize)>)> = by_file.into_iter().collect();
 
     // `postings[name]`: `(file, record)` for each file declaring it, in path order.
     let mut postings: Vec<Vec<(usize, usize)>> = vec![Vec::new(); texts.len()];
-    for (f, file) in files.iter().enumerate() {
-        for &(id, record) in &file.names {
+    for (f, (_, names)) in files.iter().enumerate() {
+        for &(id, record) in names {
             postings[id as usize].push((f, record));
         }
     }
@@ -158,17 +146,17 @@ pub fn find_shared_names(
         if score < options.min_score {
             continue;
         }
-        let tag = judge.tag(fa.names[0].1, fb.names[0].1);
+        let tag = judge.tag(fa.1[0].1, fb.1[0].1);
         if matches!(tag, Some(Tag::SameModule { .. })) && !options.include_same_module {
             hidden_same_module += 1;
             continue;
         }
         list.sort_by_key(|s| records[s.a].location().start_line);
         pairs.push(FilePair {
-            a: fa.file.to_string(),
-            b: fb.file.to_string(),
-            a_names: fa.names.len(),
-            b_names: fb.names.len(),
+            a: fa.0.to_string(),
+            b: fb.0.to_string(),
+            a_names: fa.1.len(),
+            b_names: fb.1.len(),
             score,
             shared: list,
             tag,
@@ -219,7 +207,7 @@ fn is_exported(record: &Record) -> bool {
 
 /// A comparison key: parameter and return types for a function (spacing aside, so
 /// `T | null` and `T` differ), kind and normalised field types (in any order) for a type;
-/// `None` for an alias. An unannotated parameter compares by name.
+/// `None` for an alias. An unannotated parameter compares by name; `...xs: T[]` keeps `...`.
 fn signature(record: &Record) -> Option<String> {
     match record {
         Record::Function(f) => {
@@ -227,11 +215,21 @@ fn signature(record: &Record) -> Option<String> {
                 .params
                 .iter()
                 .map(|p| {
-                    let ty = p.ty.as_deref().map_or_else(|| p.name.clone(), unspaced);
-                    if p.optional { format!("{ty}?") } else { ty }
+                    let rest = if p.ty.is_some() && p.name.starts_with("...") {
+                        "..."
+                    } else {
+                        ""
+                    };
+                    let ty = compact_whitespace(p.ty.as_deref().unwrap_or(&p.name));
+                    let optional = if p.optional { "?" } else { "" };
+                    format!("{rest}{ty}{optional}")
                 })
                 .collect();
-            let returns = f.returns.as_deref().map(unspaced).unwrap_or_default();
+            let returns = f
+                .returns
+                .as_deref()
+                .map(compact_whitespace)
+                .unwrap_or_default();
             Some(format!("fn({})->{returns}", params.join(",")))
         }
         Record::Type(t) if t.kind == TypeKind::Alias => None,
@@ -245,29 +243,17 @@ fn signature(record: &Record) -> Option<String> {
                 })
                 .collect();
             fields.sort_unstable();
-            Some(format!("{}{{{}}}", kind_of(record), fields.join(",")))
+            Some(format!("{}{{{}}}", kind_name(t.kind), fields.join(",")))
         }
     }
-}
-
-fn unspaced(text: &str) -> String {
-    text.split_whitespace().collect()
 }
 
 /// `function`, or the type's kind, e.g. `interface`.
 fn kind_of(record: &Record) -> String {
     match record {
-        Record::Type(t) => serde_json::to_value(t.kind)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default(),
+        Record::Type(t) => kind_name(t.kind),
         Record::Function(_) => "function".to_string(),
     }
-}
-
-/// Untagged pairs (modules not tracked) all rank alike.
-fn tag_rank(tag: &Option<Tag>) -> u8 {
-    tag.as_ref().map_or(0, Tag::rank)
 }
 
 // ----- output -----
@@ -360,7 +346,7 @@ pub fn to_json(records: &[Record], report: &NameReport, judge: &dyn Judge) -> Va
         json!({
             "line": records[index].location().start_line,
             "kind": kind_of(&records[index]),
-            "signature": display(&records[index]),
+            "signature": describe(&records[index]),
         })
     };
     let pairs: Vec<Value> = report
@@ -396,8 +382,8 @@ pub fn to_json(records: &[Record], report: &NameReport, judge: &dyn Judge) -> Va
     })
 }
 
-/// `(id: string) => User` for a function, `interface (4 fields)` for a type; at most 60 chars.
-fn display(record: &Record) -> String {
+/// `(id: string) => User` for a function, `interface (4 fields)` for a type.
+fn describe(record: &Record) -> String {
     let text = match record {
         Record::Function(f) => format!(
             "({}) => {}",
@@ -406,7 +392,12 @@ fn display(record: &Record) -> String {
         ),
         Record::Type(t) => format!("{} ({} fields)", kind_of(record), t.fields.len()),
     };
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// [`describe`], at most 60 chars.
+fn display(record: &Record) -> String {
+    let text = describe(record);
     match text.char_indices().nth(60) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text,
@@ -632,6 +623,43 @@ mod tests {
         let c = func("c.ts", "f", &["v: unknown"], "string", true);
         assert_eq!(signature(&a), signature(&b));
         assert_ne!(signature(&a), signature(&c));
+        // Quoted spaces count; a rest parameter differs from an array parameter.
+        let quoted = func("a.ts", "f", &["v: 'a b'"], "void", true);
+        let joined = func("b.ts", "f", &["v: 'ab'"], "void", true);
+        assert_ne!(signature(&quoted), signature(&joined));
+        let rest = func("a.ts", "f", &["...v: string[]"], "void", true);
+        let array = func("b.ts", "f", &["v: string[]"], "void", true);
+        assert_ne!(signature(&rest), signature(&array));
+        // An unannotated destructured parameter compares by its pattern, spacing aside.
+        let untyped = |file: &str, name: &str| {
+            let mut record = func(file, "f", &[], "void", true);
+            if let Record::Function(f) = &mut record {
+                f.params.push(Param {
+                    name: name.to_string(),
+                    ty: None,
+                    optional: false,
+                });
+            }
+            record
+        };
+        assert_eq!(
+            signature(&untyped("a.js", "{ a, b }")),
+            signature(&untyped("b.js", "{a,b}"))
+        );
+    }
+
+    #[test]
+    fn merged_declarations_pair_like_with_like() {
+        // `interface Button` and `function Button` in opposite orders: both still match.
+        let records = vec![
+            ty("a.ts", "Button", TypeKind::Interface, &["x"]),
+            func("a.ts", "Button", &[], "void", true),
+            func("b.ts", "Button", &[], "void", true),
+            ty("b.ts", "Button", TypeKind::Interface, &["x"]),
+        ];
+        let report = find_shared_names(&records, &options(), &NoJudge);
+        let same: Vec<Option<bool>> = report.pairs[0].shared.iter().map(|s| s.same).collect();
+        assert_eq!(same, vec![Some(true), Some(true)]);
     }
 
     #[test]
@@ -692,6 +720,21 @@ mod tests {
         assert_eq!(
             json["pairs"][0]["shared"][1]["b"]["signature"],
             "() => Client"
+        );
+
+        // JSON signatures are never truncated.
+        let long = "p: { first: string; second: string; third: string; fourth: string }";
+        let records = vec![
+            func("a.ts", "f", &[long], "void", true),
+            func("a.ts", "g", &[], "void", true),
+            func("b.ts", "f", &[long], "void", true),
+            func("b.ts", "g", &[], "void", true),
+        ];
+        let report = find_shared_names(&records, &options(), &NoJudge);
+        let json = to_json(&records, &report, &NoJudge);
+        assert_eq!(
+            json["pairs"][0]["shared"][0]["a"]["signature"],
+            format!("({long}) => void")
         );
     }
 }

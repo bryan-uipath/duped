@@ -354,7 +354,7 @@ pub(crate) fn normalize_type(ty: &str) -> String {
 
 /// Drop whitespace unless it separates two identifier characters (`keyof T`),
 /// leaving quoted literals untouched.
-fn compact_whitespace(text: &str) -> String {
+pub(crate) fn compact_whitespace(text: &str) -> String {
     let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
     let mut out = String::with_capacity(text.len());
     let mut quote = None;
@@ -594,7 +594,7 @@ fn display_name(t: &TypeRecord) -> String {
 }
 
 /// The kind's serialized name, e.g. `interface`.
-fn kind_name(kind: TypeKind) -> String {
+pub(crate) fn kind_name(kind: TypeKind) -> String {
     serde_json::to_value(kind)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
