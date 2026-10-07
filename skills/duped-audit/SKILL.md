@@ -5,7 +5,7 @@ description: "Audit a whole codebase or package for duplicated code with duped: 
 
 # duped-audit
 
-Answers "what does this codebase duplicate?" with a ranked, verified cleanup list. Uses the `duped` skill, installed next to this one: its `scripts/scan.mjs`, and its **Reading a finding**, **Verifying a finding** and **Reporting** sections.
+Answers "what does this codebase duplicate?" with a ranked, verified cleanup list. Uses the `duped` skill, installed next to this one: its **All analyses at once** (`duped report`), **Reading a finding**, **Verifying a finding** and **Reporting** sections.
 
 **Scope: duplication only.** Mention any bug you notice in one closing line. **Report only; don't apply fixes** unless separately asked.
 
@@ -16,7 +16,7 @@ The main noise is directories whose contents are *meant* to repeat each other: e
 ## 2. Run
 
 ```bash
-node <duped skill directory>/scripts/scan.mjs --repo <dir> --all --top 60 --exclude '**/examples' > /tmp/duped-audit.json
+duped report <dir> --top 60 --exclude '**/examples' --json > /tmp/duped-audit.json
 ```
 
 `<dir>` can be the repo root or one package. If `truncated` is true, raise `--top` before concluding anything about coverage. For a wider net on one analysis, run it directly, e.g. `duped bodies <dir> --threshold 0.4 --json`.

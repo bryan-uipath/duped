@@ -10,7 +10,7 @@ description: "How to use the duped CLI to find duplicated functions and types: n
 ## Install
 
 ```bash
-command -v duped || cargo install --locked --git https://github.com/bryan-uipath/duped
+duped report --help >/dev/null 2>&1 || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs a build with `report`
 ```
 
 ## Commands
@@ -23,6 +23,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
+| `duped report` | all four analyses at once, grouped by file pair (below) | all |
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
 
@@ -30,14 +31,14 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 
 ### All analyses at once
 
-`scripts/scan.mjs` (in this skill's directory; duped-audit and duped-review run it) runs the four analyses on a directory and groups the results by file pair:
+`duped report` (duped-audit and duped-review run it) runs the four analyses with their default settings and `duped.toml`, and groups the results by file pair:
 
 ```bash
-node <this skill's directory>/scripts/scan.mjs --repo <dir> --all            # everything
-node <this skill's directory>/scripts/scan.mjs --repo <dir> --base <ref>     # pairs touching files changed since <ref>
+duped report <dir> --json                 # everything
+duped report <dir> --base <ref> --json    # pairs touching files changed since <ref> (needs git)
 ```
 
-It also takes `--exclude <glob>` (forwarded) and `--top N` (default 40). Paths in the output are relative to `<dir>`. In the output:
+`--top N` (default 40) limits the groups, in `--json` too; without `--json` it prints the same ranking as text. Paths in the output are relative to `<dir>`. In the JSON:
 
 - `detectors.<name>.status` is `ok` or `failed` (with `error`). Report a failed analysis; never treat it as "nothing found". `total` counts the analysis's pairs across the whole directory; `kept` counts those touching the change.
 - `filePairs` is the number of groups before `--top`; `truncated` says whether some weren't printed.

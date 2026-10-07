@@ -21,6 +21,7 @@ duped types [DIR]                           # types that share most of their pro
 duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript)
 duped imports [DIR]                         # TS/JS files that import the same rare things
 duped names [DIR]                           # file pairs that declare the same names
+duped report [DIR] [--base REF]             # every analysis, grouped by file pair
 ```
 
 `DIR` can also be a single file.
@@ -174,6 +175,16 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 | `--include-same-module` | off | also report pairs whose two files are in one module |
 | `--json` | off | every pair, with each shared name's weight and both signatures |
 
+### Running every analysis at once
+
+`duped report` runs `bodies`, `imports`, `names` and `types` with their defaults (and `duped.toml`), over one walk and one module graph, and groups their pairs by file pair. A file pair found by several analyses is most likely a ported module, so groups are ranked by how many analyses found them, then by how many findings they have. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
+
+- `--base <ref>` keeps only file pairs with a side added, modified or renamed since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`. It needs git; without it, git isn't used.
+- `--top` (default `40`) limits the file pairs shown, in `--json` too; `filePairs` and `truncated` say how many there were.
+- An analysis that fails is reported as `failed`, with its error, and the others still run.
+
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
+
 ### Modules and what to do about a pair
 
 `duped` finds the project's modules and tags every pair with what the dependency graph allows:
@@ -256,7 +267,7 @@ test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
 - **duped-audit**: auditing a whole codebase and ranking what to consolidate.
 - **duped-review**: checking a branch or pull request for copies of existing code.
 
-They need the `duped` binary on `PATH` and Node.js (for `skills/duped/scripts/scan.mjs`, which the other two run).
+They need the `duped` binary on `PATH`.
 
 Claude Code, as a plugin:
 

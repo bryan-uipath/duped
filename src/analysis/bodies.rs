@@ -287,7 +287,7 @@ fn file_pairs(records: &[Record], pairs: &[BodyPair]) -> Vec<FilePair> {
     files
 }
 
-fn file_shared(file: &FilePair, pairs: &[BodyPair]) -> usize {
+pub fn file_shared(file: &FilePair, pairs: &[BodyPair]) -> usize {
     file.pairs.iter().map(|&i| pairs[i].shared).sum()
 }
 
@@ -450,7 +450,7 @@ pub fn to_json(records: &[Record], report: &BodyReport, judge: &dyn Judge) -> Va
     })
 }
 
-fn function_at(records: &[Record], index: usize) -> &FunctionRecord {
+pub fn function_at(records: &[Record], index: usize) -> &FunctionRecord {
     match &records[index] {
         Record::Function(f) => f,
         Record::Type(_) => unreachable!("pairs only reference function records"),
