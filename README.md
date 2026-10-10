@@ -132,6 +132,7 @@ Candidate pairs come from MinHash signatures with LSH banding, tuned to find a p
 | `--min-tokens` | `50` | skip smaller bodies |
 | `--top` | `40` | file pairs and function pairs to show |
 | `--include-same-file` | off | also report pairs within one file |
+| `--cross-language` | off | also pair functions in different languages (TypeScript and JavaScript count as one) |
 | `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
 
 `--json` prints every pair and file pair.

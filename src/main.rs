@@ -118,6 +118,9 @@ struct BodiesArgs {
     /// Also report pairs whose two functions are in the same file.
     #[arg(long)]
     include_same_file: bool,
+    /// Also pair functions written in different languages, e.g. a TypeScript helper and its Rust port.
+    #[arg(long)]
+    cross_language: bool,
     /// Also report pairs acknowledged as deliberate (in `duped.toml` or by a doc comment).
     #[arg(long)]
     include_acknowledged: bool,
@@ -536,6 +539,7 @@ fn body_options(args: &BodiesArgs) -> analysis::bodies::BodyOptions {
         threshold: args.threshold,
         min_tokens: args.min_tokens,
         include_same_file: args.include_same_file,
+        cross_language: args.cross_language,
         include_acknowledged: args.include_acknowledged,
     }
 }

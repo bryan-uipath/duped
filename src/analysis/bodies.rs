@@ -24,6 +24,8 @@ pub struct BodyOptions {
     pub min_tokens: usize,
     /// Report pairs whose two functions are in one file.
     pub include_same_file: bool,
+    /// Pair functions across language families.
+    pub cross_language: bool,
     /// Report pairs acknowledged as deliberate.
     pub include_acknowledged: bool,
 }
@@ -101,9 +103,9 @@ pub fn find_duplicate_bodies(
             .into_par_iter()
             .filter_map(|(i, j)| {
                 let (a, b) = (&candidates[i], &candidates[j]);
-                // A Rust body can't be a copy of a TypeScript one, however similar.
+                // Off by default: a Rust body is rarely a copy of a TypeScript one, however similar.
                 let language = |c: &Candidate| family(function_at(records, c.record).language);
-                if language(a) != language(b) {
+                if !options.cross_language && language(a) != language(b) {
                     return None;
                 }
                 let shared = shared(&a.shingles, &b.shingles);
@@ -522,6 +524,7 @@ mod tests {
             threshold: 0.5,
             min_tokens: 20,
             include_same_file: false,
+            cross_language: false,
             include_acknowledged: false,
         }
     }
@@ -614,6 +617,17 @@ mod tests {
         };
         let report = find_duplicate_bodies(&records, &shown, &NoJudge);
         assert!(report.pairs.is_empty(), "{:?}", names(&records, &report));
+
+        let cross = BodyOptions {
+            cross_language: true,
+            ..shown
+        };
+        assert_eq!(
+            find_duplicate_bodies(&records, &cross, &NoJudge)
+                .pairs
+                .len(),
+            1
+        );
     }
 
     #[test]
