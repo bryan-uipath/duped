@@ -18,7 +18,7 @@ cargo build --release
 duped extract [DIR] [--out records.jsonl]   # every top-level function and type, as JSON Lines
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
 duped types [DIR]                           # types that share most of their properties
-duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript)
+duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript, Rust)
 duped imports [DIR]                         # TS/JS files that import the same rare things
 duped names [DIR]                           # file pairs that declare the same names
 duped report [DIR] [--base REF]             # every analysis, grouped by file pair
@@ -116,7 +116,7 @@ Every pair is evidence, not a verdict. Read both types before consolidating them
 
 ### Finding copied function bodies
 
-`duped bodies` finds functions whose bodies are near-copies, whatever they are called, such as a module ported to another package with renamed locals and a few added guards. TypeScript and JavaScript only for now.
+`duped bodies` finds functions whose bodies are near-copies, whatever they are called, such as a module ported to another package with renamed locals and a few added guards. TypeScript, JavaScript and Rust for now.
 
 - **Tokens:** each body's tokens, with comments dropped and every identifier (local or not) replaced by one placeholder, including those inside template `${…}`. Keywords, operators, property names (shorthand `{ id }` too) and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
 - **similarity:** Jaccard similarity of the two bodies' token shingles (runs of `--shingle` tokens). Repeated shingles count separately, so a ten-case `switch` doesn't match a three-case one.

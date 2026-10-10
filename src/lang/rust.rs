@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser};
 
+use crate::lang::{TokenClass, body_tokens};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
     format_params,
@@ -260,7 +261,10 @@ impl<'a> Extractor<'a> {
             exported,
             location: self.location(pre.anchor, item),
             doc: pre.doc.clone(),
-            body: Vec::new(),
+            body: item
+                .child_by_field_name("body")
+                .map(|b| body_tokens(b, self.source, token_class))
+                .unwrap_or_default(),
         }));
     }
 
@@ -589,6 +593,22 @@ fn signature(params: &[Param], returns: Option<&str>) -> String {
     format!("({}) => {}", format_params(params), returns.unwrap_or("()"))
 }
 
+/// Body token classes. Field names, including shorthand `S { id }`, stay text; macro
+/// arguments are bare token trees, so their identifiers are abstracted like code.
+fn token_class(kind: &str) -> Option<TokenClass> {
+    Some(match kind {
+        "line_comment" | "block_comment" => TokenClass::Skip,
+        "string_literal"
+        | "raw_string_literal"
+        | "char_literal"
+        | "integer_literal"
+        | "float_literal"
+        | "shorthand_field_initializer" => TokenClass::Literal,
+        "identifier" | "type_identifier" => TokenClass::Identifier,
+        _ => return None,
+    })
+}
+
 fn join_scope(scope: &[String]) -> Option<String> {
     (!scope.is_empty()).then(|| scope.join("."))
 }
@@ -832,5 +852,33 @@ mod tests {
     fn macros_are_skipped() {
         let records = run("macro_rules! m { () => { fn inside() {} }; }\nm!();");
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn body_tokens_class_leaves_and_drop_comments() {
+        use crate::record::{Token, token_hash};
+        let text = |s| Token::Text(token_hash(s));
+        let records = run("fn f(user: &User) -> String { // note\n  user.name + \"x\" + 2 }");
+        assert_eq!(
+            functions(&records)[0].body,
+            vec![
+                text("{"),
+                Token::Identifier,
+                text("."),
+                text("name"),
+                text("+"),
+                text("\"x\""),
+                text("+"),
+                text("2"),
+                text("}"),
+            ]
+        );
+        // Shorthand fields stay; macro names and arguments are abstracted; signatures have no body.
+        let records =
+            run("fn g(id: u32) -> S { println!(\"{}\", id); S { id } }\ntrait T { fn h(&self); }");
+        let body = &functions(&records)[0].body;
+        assert!(body.contains(&text("id")) && body.contains(&text("\"{}\"")));
+        assert!(!body.contains(&text("println")) && !body.contains(&text("S")));
+        assert_eq!(functions(&records).len(), 1);
     }
 }
