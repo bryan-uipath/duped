@@ -582,7 +582,7 @@ pub fn to_json(records: &[Record], report: &TypeReport, judge: &dyn Judge) -> Va
     })
 }
 
-pub(crate) fn type_at(records: &[Record], index: usize) -> &TypeRecord {
+fn type_at(records: &[Record], index: usize) -> &TypeRecord {
     match &records[index] {
         Record::Type(t) => t,
         Record::Function(_) => unreachable!("pairs only reference type records"),

@@ -46,6 +46,44 @@ enum Command {
     Names(NamesArgs),
     /// Run every analysis with its defaults and rank file pairs by how many agree.
     Report(ReportArgs),
+    /// Find functions that share most of their parameter names, whatever they are called.
+    Fns(FnsArgs),
+}
+
+#[derive(Args)]
+struct FnsArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// Only compare functions with at least this many parameter names; a destructured object counts its keys.
+    #[arg(long, default_value_t = 2)]
+    min_params: usize,
+    /// A pair needs at least this many shared parameter names.
+    #[arg(long, default_value_t = 2)]
+    min_shared: usize,
+    /// Minimum IDF-weighted similarity of parameter names (Jaccard, 0–1).
+    #[arg(long, default_value_t = 0.7, value_parser = fraction)]
+    threshold: f64,
+    /// Skip pairs whose shared names all appear together on more functions than this, e.g. `(a, b)` comparators.
+    #[arg(long, default_value_t = 5)]
+    max_sharing: usize,
+    /// Also report pairs whose two functions are in the same module.
+    #[arg(long)]
+    include_same_module: bool,
+    /// Also report pairs acknowledged as deliberate (in `duped.toml` or by a doc comment).
+    #[arg(long)]
+    include_acknowledged: bool,
+    /// Also report same-name methods whose classes share a base class or interface.
+    #[arg(long)]
+    include_implementations: bool,
+    /// Also report pairs where one function calls the other, e.g. a hook around a fetcher.
+    #[arg(long)]
+    include_wrappers: bool,
+    /// How many pairs to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit every pair as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -219,7 +257,8 @@ fn run(cli: Cli) -> Result<()> {
     | Command::Bodies(BodiesArgs { scan, .. })
     | Command::Imports(ImportsArgs { scan, .. })
     | Command::Names(NamesArgs { scan, .. })
-    | Command::Report(ReportArgs { scan, .. })) = &cli.command;
+    | Command::Report(ReportArgs { scan, .. })
+    | Command::Fns(FnsArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -240,7 +279,7 @@ fn run(cli: Cli) -> Result<()> {
         _ => None,
     };
     let graph = match &cli.command {
-        Command::Types(_) | Command::Bodies(_) | Command::Names(_) => {
+        Command::Types(_) | Command::Bodies(_) | Command::Names(_) | Command::Fns(_) => {
             Some(modules::ModuleGraph::discover(&root, &config.modules)?)
         }
         _ => None,
@@ -315,6 +354,41 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let text =
                     analysis::names::render_text(&records, &report, args.top, &options, &judge);
+                out.write_all(text.as_bytes())?;
+            }
+        }
+        (Command::Fns(args), _, Some(graph)) => {
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base.clone(),
+                &config.acknowledged,
+                "functions",
+                |r| matches!(r, record::Record::Function(_)),
+            );
+            let options = analysis::fns::FnOptions {
+                min_params: args.min_params,
+                min_shared: args.min_shared,
+                threshold: args.threshold,
+                max_sharing: args.max_sharing,
+                include_same_module: args.include_same_module,
+                include_acknowledged: args.include_acknowledged,
+                include_implementations: args.include_implementations,
+                include_wrappers: args.include_wrappers,
+            };
+            let source = |file: &str| {
+                std::fs::read(base.join(file))
+                    .ok()
+                    .map(|b| lang::decode(&b))
+            };
+            let report = analysis::fns::find_duplicate_fns(&records, &options, &judge, &source);
+            if args.json {
+                let json = analysis::fns::to_json(&records, &report, &judge);
+                serde_json::to_writer(&mut out, &json)?;
+                out.write_all(b"\n")?;
+            } else {
+                let text =
+                    analysis::fns::render_text(&records, &report, args.top, &options, &judge);
                 out.write_all(text.as_bytes())?;
             }
         }

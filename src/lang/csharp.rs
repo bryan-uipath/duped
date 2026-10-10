@@ -245,6 +245,7 @@ impl Extractor<'_> {
                 name: self.text(name),
                 ty,
                 optional: has_token(param, "="),
+                fields: Vec::new(),
             });
         }
         // A `params T[] rest` array is stored on the list itself, not as a `parameter`.
@@ -256,6 +257,7 @@ impl Extractor<'_> {
                 name: self.text(name),
                 ty: Some(format!("params {}", self.text(ty))),
                 optional: false,
+                fields: Vec::new(),
             });
         }
         params

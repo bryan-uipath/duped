@@ -51,13 +51,13 @@ source files ──► language extractor (tree-sitter) ──► shared records
 
 One JSON object per line. Every analysis reads these, so only the extractors are language-specific.
 
-- **function:** name, enclosing scope, parameters (name and type text), return type text, visibility, file, line span, doc comment, and body tokens (in memory only, not in the JSON).
+- **function:** name, enclosing scope, parameters (name and type text; a destructured object also lists its keys), return type text, visibility, file, line span, doc comment, and body tokens (in memory only, not in the JSON).
 - **type:** name, kind, fields (name, type text, optional), extends/implements, visibility, file, line span, doc comment.
 
 ### Analyses
 
 - **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs are clustered with union-find.
-- **fns:** similarity of parameter names and types plus return type.
+- **fns:** Jaccard similarity of parameter names, weighted by how rare each name is, plus a stricter score that also compares parameter and return types. Conventions (a shared name set on many functions), implementations of one base, and wrappers are filtered.
 - **names:** file pairs that declare several of the same top-level names, scored by name rarity, export and matching signature, with each name's shape or signature marked as matching or diverging.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
 - **imports:** files whose imports overlap on rare items (IDF-weighted Jaccard over `specifier#name`), for ported copies whose declarations were all renamed. It reads import statements itself rather than adding a record kind: imports aren't declarations, and no other analysis needs them. TypeScript/JavaScript only.
@@ -117,7 +117,7 @@ Each step ships on its own.
 4. Python extractor.
 5. C# extractor.
 6. Rust extractor.
-7. `fns` and `names`, including divergent-shape reporting. `names` (file pairs) is prototyped.
+7. `fns` (prototype: signatures only) and `names` (file pairs, prototype), including divergent-shape reporting.
 8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.
