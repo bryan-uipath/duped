@@ -593,20 +593,25 @@ fn signature(params: &[Param], returns: Option<&str>) -> String {
     format!("({}) => {}", format_params(params), returns.unwrap_or("()"))
 }
 
-/// Body token classes. Field names, including shorthand `S { id }`, stay text; macro
-/// arguments are bare token trees, so their identifiers are abstracted like code.
-fn token_class(kind: &str) -> Option<TokenClass> {
-    Some(match kind {
+/// Body token classes. Field names stay text, including shorthand `S { id }` and `self.id`
+/// inside a macro, whose arguments are bare token trees; other identifiers are abstracted.
+fn token_class(node: Node) -> Option<TokenClass> {
+    Some(match node.kind() {
         "line_comment" | "block_comment" => TokenClass::Skip,
-        "string_literal"
-        | "raw_string_literal"
-        | "char_literal"
-        | "integer_literal"
-        | "float_literal"
-        | "shorthand_field_initializer" => TokenClass::Literal,
+        "string_literal" | "raw_string_literal" | "char_literal" | "integer_literal"
+        | "float_literal" => TokenClass::Literal,
+        "identifier" if is_field_name(node) => return None,
         "identifier" | "type_identifier" => TokenClass::Identifier,
         _ => return None,
     })
+}
+
+fn is_field_name(identifier: Node) -> bool {
+    match identifier.parent().map(|p| p.kind()) {
+        Some("shorthand_field_initializer") => true,
+        Some("token_tree") => identifier.prev_sibling().is_some_and(|p| p.kind() == "."),
+        _ => false,
+    }
 }
 
 fn join_scope(scope: &[String]) -> Option<String> {
@@ -873,12 +878,20 @@ mod tests {
                 text("}"),
             ]
         );
-        // Shorthand fields stay; macro names and arguments are abstracted; signatures have no body.
-        let records =
-            run("fn g(id: u32) -> S { println!(\"{}\", id); S { id } }\ntrait T { fn h(&self); }");
-        let body = &functions(&records)[0].body;
-        assert!(body.contains(&text("id")) && body.contains(&text("\"{}\"")));
-        assert!(!body.contains(&text("println")) && !body.contains(&text("S")));
-        assert_eq!(functions(&records).len(), 1);
+        // Field names stay, in macros too; other macro identifiers are abstracted.
+        let records = run(
+            "fn g(id: u32) -> S { println!(\"{}\", self.len, id); S { id } }\n\
+            extern \"C\" { fn h(); }",
+        );
+        let f = functions(&records);
+        assert!(f[0].body.contains(&text("id")) && f[0].body.contains(&text("len")));
+        assert!(!f[0].body.contains(&text("println")) && !f[0].body.contains(&text("S")));
+        assert!(f[1].body.is_empty());
+        // An attribute or comment on a shorthand field is tokenized like any other.
+        let records = run("fn a(id: u32) -> S { S { #[cfg(all())] /* one */ id } }\n\
+            fn b(id: u32) -> S { S { #[cfg(all())]\n  id } }");
+        let f = functions(&records);
+        assert_eq!(f[0].body, f[1].body);
+        assert!(f[0].body.contains(&text("id")) && !f[0].body.contains(&text("cfg")));
     }
 }
