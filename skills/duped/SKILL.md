@@ -28,12 +28,14 @@ duped report <root> --json > <temporary-file>               # whole codebase
 ```
 
 The report combines bodies, imports, names, and types, grouped by file pair.
-Tests, fixtures, generated/build directories, and ignored paths are skipped by
-default. Paths are relative to the scan root. Use a unique temporary file per
-review. Reuse results for the same root, base, options, and unchanged working
-tree. Rerun only when relevant changes or missing coverage justify it.
+Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
+`target`, …) and `.gitignore`d paths are skipped by default; checked-in
+generated code is not. Paths are relative to the scan root. Use a unique
+temporary file per run and pass its literal path to later commands. Reuse a
+report only when the caller states it matches the current tree; else rerun.
 
-Inspect `detectors` statuses/counts, `filePairs`, and `truncated`, then select
+Inspect `detectors` statuses and counts (`kept` touches the change, `total` is
+repo-wide), `filePairs`, and `truncated`, then select
 relevant `groups`; avoid dumping the full JSON. Failed detectors are gaps,
 not clean results. `--top` defaults to 40 even for JSON. Expand it when needed
 for coverage or disclose that only the selected groups were reviewed.
@@ -41,9 +43,10 @@ for coverage or disclose that only the selected groups were reviewed.
 ## Reading a finding
 
 Scores prioritize inspection, not conclusions. Agreement between detectors
-is stronger evidence. Prioritize near-copy bodies and behavioral drift.
-`changed` identifies changed files, not changed lines: confirm the duplicated
-code belongs to the change. Respect dependency direction (`tag.copy` imports
+is stronger evidence. Prioritize behavioral drift: `~` in `names`, or `bodies`
+similarity below ~0.95, means the copies already differ; diff them. With
+`--base`, `changed` identifies changed files, not changed lines: confirm the
+duplicated code belongs to the change. Respect dependency direction (`tag.copy` imports
 `tag.owner`); consult the reference for other tag kinds.
 
 ## Verifying a finding
@@ -59,8 +62,12 @@ Syntax-based scans cannot rule out structurally different semantic duplicates.
 One line per verified finding, strongest first:
 
 ```text
-diverged|reuse|merge|extract: what to change and why [path:line <-> path:line]
+diverged|reuse|merge|extract: what to change and why [path:line <-> path:line] (detectors, evidence)
 ```
+
+`diverged`: copies behave differently, probable bug, list first. `reuse`: call
+the existing code. `merge`: two implementations of one idea, keep one.
+`extract`: both move to a shared home.
 
 State scan root/base, detector statuses/counts, and coverage limits. If nothing
 survives verification, say "No actionable duplication" within that scope.

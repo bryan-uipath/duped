@@ -7,20 +7,21 @@ description: "Review a branch, PR, or local diff for duplicated code with duped.
 
 Answers "does this *change* duplicate something that already exists?" This
 workflow is self-contained; read the sibling `duped/references/cli.md` only
-for unfamiliar flags, dependency tags, or configuration.
+for installation, unfamiliar flags, dependency tags, or configuration.
 
 **Scope: duplication only.** Correctness, security and style belong to other reviewers. Read-only: don't edit files.
 
 ## 1. Run
 
-Reuse a supplied report only when its repository, base, scan options, and
-working tree are unchanged. Otherwise run once and save the result to a unique
-temporary file for this review (use `mktemp`); do not rescan after every edit.
+Reuse a supplied report only when the caller states it matches the current
+repository, base, options, and working tree. Otherwise run once into a unique
+temporary file and use the printed literal path in later commands (shell
+variables don't persist between calls).
 
 ```bash
 BASE=<the PR's base branch; for a stacked PR, its parent branch, not main>
 REPORT=$(mktemp /tmp/duped-review.XXXXXX)
-duped report <repo root> --base "$BASE" --json > "$REPORT"
+duped report <repo root> --base "$BASE" --json > "$REPORT"; echo "$REPORT"
 ```
 
 Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only file pairs where a side was added or modified since the merge base (committed, uncommitted or untracked). Filtering is per file: confirm the duplicated code is in the changed lines before reporting.
@@ -29,8 +30,8 @@ Candidates are generated across the whole repo, so copies of *unchanged* code ar
 
 Inspect detector statuses, counts, and `truncated` before selected groups;
 avoid dumping the full JSON into context. Report failed detectors as gaps.
-If truncated, either expand the selection to complete the requested review or
-state the coverage limit; do not claim a complete clean result from a subset.
+If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
+`--top` or state the coverage limit; do not claim a complete clean result from a subset.
 
 `changed` says which side the change touched. Work in this order:
 
@@ -51,6 +52,6 @@ For the fix direction, follow `tag.copy → tag.owner` regardless of which side 
 
 Report one line per verified finding: `diverged|reuse|merge|extract`, what to
 change and why, and `[changed path:line <-> existing path:line]`. State the base,
-`changedFiles`, detector statuses/counts, and coverage limits. If none survive,
+`changedFiles`, each detector's status and `kept` count, and coverage limits. If none survive,
 say "No actionable duplication" with that scope. For deliberate pairs, suggest
 acknowledgements only for `bodies`/`types`; `names`/`imports` ignore them.
