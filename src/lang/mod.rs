@@ -94,13 +94,13 @@ pub enum TokenClass {
 
 /// Leaves of `node` in source order as body tokens, classed by `class`; whitespace-only
 /// leaves (such as JSX text between tags) are dropped.
-pub fn body_tokens(node: Node, source: &str, class: fn(&str) -> Option<TokenClass>) -> Vec<Token> {
+pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClass>) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut cursor = node.walk();
     'walk: loop {
         let node = cursor.node();
         let text = &source[node.byte_range()];
-        let class = class(node.kind());
+        let class = class(node);
         let leaf = class.is_some() || node.child_count() == 0;
         if leaf && !text.trim().is_empty() {
             tokens.extend(match class {

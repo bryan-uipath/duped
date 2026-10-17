@@ -10,6 +10,7 @@ use std::fmt::Write;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
+use super::names::family;
 use super::{Judge, jaccard, pair_notes, tag_rank};
 use crate::modules::Tag;
 use crate::record::{FunctionRecord, Record, Token, qualified};
@@ -23,6 +24,8 @@ pub struct BodyOptions {
     pub min_tokens: usize,
     /// Report pairs whose two functions are in one file.
     pub include_same_file: bool,
+    /// Pair functions across language families.
+    pub cross_language: bool,
     /// Report pairs acknowledged as deliberate.
     pub include_acknowledged: bool,
 }
@@ -100,6 +103,11 @@ pub fn find_duplicate_bodies(
             .into_par_iter()
             .filter_map(|(i, j)| {
                 let (a, b) = (&candidates[i], &candidates[j]);
+                // Off by default: a Rust body is rarely a copy of a TypeScript one, however similar.
+                let language = |c: &Candidate| family(function_at(records, c.record).language);
+                if !options.cross_language && language(a) != language(b) {
+                    return None;
+                }
                 let shared = shared(&a.shingles, &b.shingles);
                 let similarity = jaccard(a.shingles.len(), b.shingles.len(), shared);
                 (similarity >= options.threshold)
@@ -506,7 +514,7 @@ fn member_json(records: &[Record], index: usize, judge: &dyn Judge) -> Value {
 mod tests {
     use super::*;
     use crate::analysis::NoJudge;
-    use crate::lang::typescript;
+    use crate::lang::{rust, typescript};
     use crate::record::Language;
     use tree_sitter::Parser;
 
@@ -516,6 +524,7 @@ mod tests {
             threshold: 0.5,
             min_tokens: 20,
             include_same_file: false,
+            cross_language: false,
             include_acknowledged: false,
         }
     }
@@ -594,6 +603,31 @@ mod tests {
         ]);
         let report = find_duplicate_bodies(&records, &options(), &NoJudge);
         assert!(report.pairs.is_empty(), "{:?}", names(&records, &report));
+    }
+
+    #[test]
+    fn languages_only_match_themselves() {
+        let body = "{ let x = a.first(b, 1); let y = a.second(x, 2); let z = a.third(y, 3); return a.fourth(z, 4); }";
+        let mut records = extract(&[("a.ts", &format!("export function f(a, b) {body}"))]);
+        let rs = format!("pub fn f(a: &A, b: u32) -> u32 {body}");
+        records.extend(rust::extract(&mut Parser::new(), &rs, "b.rs"));
+        let shown = BodyOptions {
+            min_tokens: 1,
+            ..options()
+        };
+        let report = find_duplicate_bodies(&records, &shown, &NoJudge);
+        assert!(report.pairs.is_empty(), "{:?}", names(&records, &report));
+
+        let cross = BodyOptions {
+            cross_language: true,
+            ..shown
+        };
+        assert_eq!(
+            find_duplicate_bodies(&records, &cross, &NoJudge)
+                .pairs
+                .len(),
+            1
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 
 | Command | Finds | Languages |
 |---|---|---|
-| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS |
+| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |

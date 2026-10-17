@@ -798,8 +798,8 @@ impl<'a> Extractor<'a> {
 
 /// Body token classes. Property names, including shorthand `{ id }`, stay text, as do
 /// template strings' fragments; their `${…}` substitutions are tokenized like code.
-fn token_class(kind: &str) -> Option<TokenClass> {
-    Some(match kind {
+fn token_class(node: Node) -> Option<TokenClass> {
+    Some(match node.kind() {
         "comment" => TokenClass::Skip,
         "string" | "regex" | "jsx_text" | "number" => TokenClass::Literal,
         "identifier" | "type_identifier" | "statement_identifier" => TokenClass::Identifier,

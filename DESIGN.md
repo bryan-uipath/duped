@@ -118,7 +118,7 @@ Each step ships on its own.
 5. C# extractor.
 6. Rust extractor.
 7. `fns` (prototype: signatures only) and `names` (file pairs, prototype), including divergent-shape reporting.
-8. `bodies`: fuzzy matching for TypeScript/JavaScript (prototype). Next: the other languages' tokenizers and a `[bodies]` section in `duped.toml`.
+8. `bodies`: fuzzy matching for TypeScript/JavaScript and Rust (prototype). Next: Python and C# tokenizers and a `[bodies]` section in `duped.toml`.
 9. Skills.
 10. Regression suite: reproduce the findings of the original monorepo audit.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.

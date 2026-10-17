@@ -178,7 +178,7 @@ pub fn find_shared_names(
 }
 
 /// TypeScript and JavaScript share names; other languages only match themselves.
-fn family(language: Language) -> Language {
+pub(super) fn family(language: Language) -> Language {
     match language {
         Language::JavaScript => Language::TypeScript,
         other => other,
