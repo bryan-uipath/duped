@@ -1,24 +1,37 @@
 ---
 name: duped-review
-description: "Check a branch, pull request or local diff for code that duplicates existing code, using duped (about two seconds repo-wide, no embeddings). Finds new functions that near-copy existing ones, files ported from another package, re-declared types, and copies that have already drifted. Use when reviewing a PR or branch for duplication, as the duplication step of a larger code review, or after porting code between packages. For a whole-repo audit, use duped-audit."
+description: "Review a branch, PR, or local diff for duplicated code with duped. Use for a requested duplication check or the dedicated duplication step of xreview. For a whole-codebase audit, use duped-audit."
 ---
 
 # duped-review
 
-Answers "does this *change* duplicate something that already exists?" Uses the `duped` skill, installed next to this one: its **All analyses at once** (`duped report`), **Reading a finding**, **Verifying a finding** and **Reporting** sections.
+Answers "does this *change* duplicate something that already exists?" This
+workflow is self-contained; read the sibling `duped/references/cli.md` only
+for installation, unfamiliar flags, dependency tags, or configuration.
 
 **Scope: duplication only.** Correctness, security and style belong to other reviewers. Read-only: don't edit files.
 
 ## 1. Run
 
+Reuse a supplied report only when the caller states it matches the current
+repository, base, options, and working tree. Otherwise run once into a unique
+temporary file and use the printed literal path in later commands (shell
+variables don't persist between calls).
+
 ```bash
 BASE=<the PR's base branch; for a stacked PR, its parent branch, not main>
-duped report <repo root> --base "$BASE" --json > /tmp/duped-review.json
+REPORT=$(mktemp /tmp/duped-review.XXXXXX)
+duped report <repo root> --base "$BASE" --json > "$REPORT"; echo "$REPORT"
 ```
 
 Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only file pairs where a side was added or modified since the merge base (committed, uncommitted or untracked). Filtering is per file: confirm the duplicated code is in the changed lines before reporting.
 
 ## 2. Read the groups
+
+Inspect detector statuses, counts, and `truncated` before selected groups;
+avoid dumping the full JSON into context. Report failed detectors as gaps.
+If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
+`--top` or state the coverage limit; do not claim a complete clean result from a subset.
 
 `changed` says which side the change touched. Work in this order:
 
@@ -30,6 +43,15 @@ Candidates are generated across the whole repo, so copies of *unchanged* code ar
 
 ## 3. Verify and report
 
-Read both sides, as in the `duped` skill. For the fix direction, follow `tag.copy → tag.owner` regardless of which side changed: if the change added the *owner*-side copy, the recommendation is that the existing downstream copy import the new one, or that the change reuse what's already there; never a dependency `tag` doesn't allow.
+Read both sides and relevant callers. Drop framework-required similarities,
+intentional inverses/families, documented package boundaries, and tiny copies
+whose consolidation would cost more. Scores nominate candidates; they do not
+prove duplication. Prioritize copies whose behavior has drifted.
 
-Report in the `duped` skill's format, with the changed side first in `[changed path:line <-> existing path:line]`. State the base ref, `changedFiles`, and each analysis's `kept` count. For a pair confirmed deliberate, suggest an `[[acknowledged]]` entry when it came from `bodies` or `types`; `names` and `imports` don't apply acknowledgements.
+For the fix direction, follow `tag.copy → tag.owner` regardless of which side changed: if the change added the *owner*-side copy, the recommendation is that the existing downstream copy import the new one, or that the change reuse what's already there; never a dependency `tag` doesn't allow.
+
+Report one line per verified finding: `diverged|reuse|merge|extract`, what to
+change and why, and `[changed path:line <-> existing path:line]`. State the base,
+`changedFiles`, each detector's status and `kept` count, and coverage limits. If none survive,
+say "No actionable duplication" with that scope. For deliberate pairs, suggest
+acknowledgements only for `bodies`/`types`; `names`/`imports` ignore them.
