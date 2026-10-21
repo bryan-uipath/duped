@@ -329,7 +329,7 @@ fn python_resolves_absolute_relative_and_private_modules() {
     write(
         &root,
         "libs/proj/src/proj/__init__.py",
-        "from .core import run\n",
+        "from .core import run\n\ndef lazy():\n    from ._impl import helper\n    return helper\n",
     );
     write(
         &root,
@@ -363,10 +363,11 @@ fn python_resolves_absolute_relative_and_private_modules() {
             e(cli, "libs/proj/src/proj/core.py", 1),
         ]
     );
-    // The project's one package is its entry; `run` is surfaced by re-export.
+    // The project's one package is its entry; `run` is surfaced by re-export, but the
+    // function-local `helper` import is not.
     let proj = boundary(&report, "libs/proj");
     assert_eq!(proj["entries"][0], "libs/proj/src/proj/__init__.py");
-    assert_eq!(proj["surface"], serde_json::json!(["run"]));
+    assert_eq!(proj["surface"], serde_json::json!(["lazy", "run"]));
     assert_eq!(report["totals"]["crossBoundarySymbols"], 4);
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -431,6 +432,86 @@ fn rust_resolves_crates_modules_and_globs() {
 }
 
 /// The `billing` / `orders` regression fixture, at `main`.
+#[test]
+fn folder_must_hold_a_boundary() {
+    let root = billing("folder");
+    let text = text(&root, &["--folder", "src/billing"]);
+    assert!(text.contains("folder src/billing: score"), "{text}");
+    for bad in ["nope", "../x"] {
+        let output = duped(&root, &["--folder", bad]);
+        assert!(!output.status.success(), "--folder {bad} should fail");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn whole_module_imports_are_keyed_by_target() {
+    let root = billing("default");
+    // Two default imports from different internals: distinct symbols, not one `default`.
+    write(&root, "src/billing/internal/a.ts", "export default 1;\n");
+    write(&root, "src/billing/internal/b.ts", "export default 2;\n");
+    write(
+        &root,
+        "src/orders/place.ts",
+        "import a from '../billing/internal/a';\nexport const place = () => a;\n",
+    );
+    commit(&root, "one default");
+    write(
+        &root,
+        "src/orders/place.ts",
+        "import a from '../billing/internal/a';\nimport b from '../billing/internal/b';\nexport const place = () => a + b;\n",
+    );
+    let report = branch(&root, "two-defaults");
+    assert_eq!(
+        names(&report["diff"]["regressed"]),
+        vec!["src/orders/place.ts#default"]
+    );
+    assert_eq!(
+        report["diff"]["regressed"][0]["head"]["target"],
+        "src/billing/internal/b.ts"
+    );
+    assert_eq!(report["diff"]["improved"], serde_json::json!([]));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn subpath_only_exports_do_not_name_a_root_entry() {
+    let root = packages("subpaths");
+    write(
+        &root,
+        "packages/lib/package.json",
+        r#"{"name":"@m/lib","exports":{"./utils":"./src/utils.ts"}}"#,
+    );
+    write(
+        &root,
+        "packages/lib/src/index.ts",
+        "export const root = 1;\n",
+    );
+    write(
+        &root,
+        "packages/lib/src/utils.ts",
+        "export const util = 1;\n",
+    );
+    write(
+        &root,
+        "packages/app/src/main.ts",
+        "import { root } from '@m/lib';\nimport { util } from '@m/lib/utils';\n",
+    );
+    let report = json(&root, &[]);
+    // `@m/lib` falls back to `src/index.ts`; `./utils` is an entry too. Neither bypasses.
+    assert_eq!(report["totals"]["bypassSymbols"], 0);
+    let lib = boundary(&report, "packages/lib");
+    assert!(
+        lib["entries"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("packages/lib/src/index.ts")),
+        "{}",
+        lib["entries"]
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 fn billing(test: &str) -> PathBuf {
     let root = temp(test);
     write(

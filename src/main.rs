@@ -14,7 +14,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, FromArgMatches, Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -606,6 +606,13 @@ fn coupling(
         ))
     };
     let head = at(rev.as_deref())?;
+    for folder in &args.folders {
+        let key = analysis::coupling::folder_key(folder)
+            .with_context(|| format!("--folder `{folder}` is outside the scan"))?;
+        if !analysis::coupling::has_boundary(&head, &key) {
+            bail!("--folder `{folder}` has no module boundary under it");
+        }
+    }
     let before = merge_base.as_deref().map(|c| at(Some(c))).transpose()?;
     let diff = before.as_ref().map(|b| analysis::coupling::diff(b, &head));
     let shown = analysis::coupling::Output {

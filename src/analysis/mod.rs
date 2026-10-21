@@ -11,6 +11,17 @@ pub mod types;
 use std::collections::HashMap;
 use std::hash::Hash;
 
+/// TypeScript and JavaScript source extensions, as import resolution tries them.
+pub(crate) const SCRIPT: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
+
+/// `a/b.tsx` → `a/b`; other paths unchanged.
+pub(crate) fn strip_script(path: &str) -> &str {
+    SCRIPT
+        .iter()
+        .find_map(|ext| path.strip_suffix(ext))
+        .unwrap_or(path)
+}
+
 use crate::modules::{Home, Tag};
 
 /// What the project says about a pair: its module tag and any acknowledgement.

@@ -406,12 +406,23 @@ impl Worktree {
             .map_or(0, |d| d.subsec_nanos());
         let path = std::env::temp_dir().join(format!("duped-rev-{}-{nanos}", std::process::id()));
         let shown = path.display().to_string();
+        // Hooks (post-checkout installs, etc.) don't belong in a scan. If `add` fails
+        // after checking out, or the path can't be canonicalized, the guard still removes it.
+        let guard = Worktree {
+            top,
+            path: path.clone(),
+        };
+        let no_hooks = format!("core.hooksPath={}", path.join("no-hooks").display());
         git(
-            &["worktree", "add", "--detach", "--quiet", &shown, commit],
-            &top,
+            &[
+                "-c", &no_hooks, "worktree", "add", "--detach", "--quiet", &shown, commit,
+            ],
+            &guard.top,
         )?;
         // Canonical, so paths under it compare with canonical scan paths.
         let path = path.canonicalize()?;
+        let top = guard.top.clone();
+        std::mem::forget(guard);
         Ok(Worktree { top, path })
     }
 

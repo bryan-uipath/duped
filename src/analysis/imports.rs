@@ -6,7 +6,7 @@ use std::fmt::{self, Write};
 
 use serde_json::{Value, json};
 
-use super::{Interner, Judge};
+use super::{Interner, Judge, strip_script};
 use crate::lang::Import;
 use crate::modules::Tag;
 
@@ -242,14 +242,6 @@ fn normalize_specifier(file: &str, specifier: &str) -> String {
         _ => path.strip_suffix("/index").unwrap_or(path),
     };
     format!("./{}", path.rsplit('/').next().unwrap_or(path))
-}
-
-fn strip_script(path: &str) -> &str {
-    const SCRIPT: &[&str] = &[".tsx", ".ts", ".jsx", ".js", ".mts", ".cts", ".mjs", ".cjs"];
-    SCRIPT
-        .iter()
-        .find_map(|ext| path.strip_suffix(ext))
-        .unwrap_or(path)
 }
 
 // ----- output -----

@@ -24,6 +24,7 @@ while read -r sha; do
     "$(git -C "$repo" log -1 --format=%s "$sha")" >> "$out/history.tsv"
 done < "$out/commits"
 # Deltas between consecutive commits, biggest movers first.
+tab=$(printf '\t')
 awk -F'\t' 'NR>1 { d=$2-ps; printf "%+.4f\t%+.4f\t%s\t%s\n", d, $3-pr, substr($1,1,10), $7 } { ps=$2; pr=$3 }' \
-  "$out/history.tsv" | sort -t$'\t' -k1,1g > "$out/deltas.tsv"
+  "$out/history.tsv" | sort -t "$tab" -k1,1g > "$out/deltas.tsv"
 echo "wrote $out/history.tsv and $out/deltas.tsv (score delta, bypassRate delta, sha, subject)"

@@ -8,12 +8,12 @@ use std::path::Path;
 use rayon::prelude::*;
 use serde_json::{Value, json};
 
+use super::{SCRIPT, strip_script};
 use crate::lang::Import;
 use crate::modules::{self, ModuleGraph};
 use crate::record::{Language, Record};
 use crate::walk::SourceFile;
 
-const SCRIPT: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"];
 const MANIFESTS: &[&str] = &["package.json", "Cargo.toml", "pyproject.toml", "setup.py"];
 /// Boundaries declaring fewer symbols than this count as fully hiding.
 const HIDING_FLOOR: usize = 5;
@@ -214,12 +214,18 @@ impl Coupling {
     }
 
     /// `(importer, symbol)` → its target and bypass, the deepest when imported twice.
-    fn symbol_map(&self) -> HashMap<(&str, &str), (&str, usize)> {
-        let mut map: HashMap<(&str, &str), (&str, usize)> = HashMap::new();
+    /// Whole-module names (`default`, `*`, none) are keyed with their target too, so one
+    /// file's default imports don't collapse into one entry.
+    fn symbol_map(&self) -> HashMap<(&str, String), (&str, usize)> {
+        let mut map: HashMap<(&str, String), (&str, usize)> = HashMap::new();
         for e in &self.edges {
             for name in e.symbols() {
+                let key = match name {
+                    "default" | "*" | "" => format!("{name}@{}", e.target),
+                    _ => name.to_string(),
+                };
                 let slot = map
-                    .entry((e.importer.as_str(), name))
+                    .entry((e.importer.as_str(), key))
                     .or_insert((e.target.as_str(), e.bypass));
                 if e.bypass > slot.1 {
                     *slot = (e.target.as_str(), e.bypass);
@@ -784,14 +790,18 @@ impl<'a> Tree<'a> {
     }
 
     fn package_json(&self, dir: &str) -> Option<Value> {
-        let bytes = std::fs::read(self.base.join(dir).join("package.json")).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        modules::read_json(&self.base.join(dir).join("package.json"))
     }
 
     /// `exports["."]`, `main`, `module` or `types`, else `index` or `src/index`.
     fn package_entry(&self, dir: &str) -> Option<String> {
         let json = self.package_json(dir).unwrap_or_default();
-        let exports = json.get("exports").map(|e| e.get(".").unwrap_or(e));
+        // An object keyed by subpaths (`./utils`) has no root entry; conditions (`import`) do.
+        let exports = json.get("exports").and_then(|e| match e {
+            Value::Object(map) if map.contains_key(".") => map.get("."),
+            Value::Object(map) if map.keys().any(|k| k.starts_with('.')) => None,
+            _ => Some(e),
+        });
         let declared = [
             exports,
             json.get("main"),
@@ -1128,13 +1138,6 @@ fn is_entry_name(name: &str) -> bool {
             .is_some_and(|ext| SCRIPT.contains(&ext))
 }
 
-fn strip_script(path: &str) -> &str {
-    SCRIPT
-        .iter()
-        .find_map(|ext| path.strip_suffix(ext))
-        .unwrap_or(path)
-}
-
 /// `a/index.d.ts` → `a/index`.
 fn strip_declaration(path: &str) -> &str {
     [".d.ts", ".d.mts", ".d.cts"]
@@ -1228,9 +1231,10 @@ pub struct Diff {
 pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
     let (before, after) = (base.symbol_map(), head.symbol_map());
     let side = |s: Option<&(&str, usize)>| s.map(|(t, d)| (t.to_string(), *d));
-    let change = |key: &(&str, &str), reason, grew| Change {
+    let change = |key: &(&str, String), reason, grew| Change {
         importer: key.0.to_string(),
-        symbol: key.1.to_string(),
+        // Whole-module keys carry their target after `@`; the symbol is the part before.
+        symbol: key.1.split('@').next().unwrap_or_default().to_string(),
         before: side(before.get(key)),
         after: side(after.get(key)),
         reason,
@@ -1243,7 +1247,8 @@ pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
     let mut improved = Vec::new();
     let mut removed_without_move = Vec::new();
     for (key, &(target, depth)) in before.iter().filter(|(_, (_, d))| *d > 0) {
-        let (importer, name) = *key;
+        let importer = key.0;
+        let name = key.1.split('@').next().unwrap_or_default();
         match after.get(key) {
             Some(&(_, now)) if now < depth => improved.push(change(key, "lower depth", false)),
             Some(_) => {}
@@ -1269,13 +1274,18 @@ pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
     // Bypassing importers per (target, symbol) at base, for `prior_importers`.
     let mut prior: HashMap<(&str, &str), usize> = HashMap::new();
     for ((_, name), (target, _)) in before.iter().filter(|(_, (_, d))| *d > 0) {
-        *prior.entry((target, name)).or_default() += 1;
+        *prior
+            .entry((target, name.split('@').next().unwrap_or_default()))
+            .or_default() += 1;
     }
     let mut regressed: Vec<Change> = after
         .iter()
         .filter(|(key, (_, now))| *now > 0 && before.get(*key).is_none_or(|(_, d)| d < now))
         .map(|(key, (target, _))| Change {
-            prior_importers: prior.get(&(target, key.1)).copied().unwrap_or_default(),
+            prior_importers: prior
+                .get(&(target, key.1.split('@').next().unwrap_or_default()))
+                .copied()
+                .unwrap_or_default(),
             ..change(key, "", false)
         })
         .collect();
@@ -1344,8 +1354,16 @@ fn shown(dir: &str) -> &str {
 }
 
 /// `--folder` as given, relative to the scanned directory: `./src/` → `src`.
-pub fn folder_key(folder: &str) -> String {
-    normalize("", folder).unwrap_or_default()
+/// `None` when the folder leaves the scan root.
+pub fn folder_key(folder: &str) -> Option<String> {
+    normalize("", &folder.replace('\\', "/"))
+}
+
+/// Whether any boundary sits at or under `folder` (a normalized key).
+pub fn has_boundary(c: &Coupling, folder: &str) -> bool {
+    c.boundaries
+        .iter()
+        .any(|b| b.dir == folder || within(&b.dir, folder))
 }
 
 pub fn render_text(o: &Output) -> String {
@@ -1382,7 +1400,7 @@ pub fn render_text(o: &Output) -> String {
     )
     .ok();
     for folder in o.folders {
-        let key = folder_key(folder);
+        let key = folder_key(folder).unwrap_or_default();
         let (bypass, unused, hiding) = c.ratios(&key);
         writeln!(
             out,
@@ -1590,7 +1608,7 @@ pub fn to_json(o: &Output) -> Value {
         .folders
         .iter()
         .map(|f| {
-            let key = folder_key(f);
+            let key = folder_key(f).unwrap_or_default();
             let (bypass, unused, hiding) = c.ratios(&key);
             let ratios = json!({ "score": c.score(&key), "bypassRate": bypass, "unusedSurface": unused, "hiding": hiding });
             (f.clone(), ratios)

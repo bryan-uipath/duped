@@ -37,7 +37,7 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str) -> Vec<Record> {
 }
 
 /// Every `import` and `from … import` statement, at any depth (lazy imports are still
-/// dependencies). In an `__init__.py`, `from` imports are re-exports.
+/// dependencies). In an `__init__.py`, module-level `from` imports are re-exports.
 pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
     parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -54,6 +54,7 @@ pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
     let mut out = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
+        let top_level = node.parent().is_none_or(|p| p.kind() == "module");
         let mut cursor = node.walk();
         let names: Vec<Node> = node.children_by_field_name("name", &mut cursor).collect();
         match node.kind() {
@@ -85,7 +86,11 @@ pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
                 out.push(Import {
                     specifier: text(module),
                     names: imported,
-                    reexported: if package { bound } else { Vec::new() },
+                    reexported: if package && top_level {
+                        bound
+                    } else {
+                        Vec::new()
+                    },
                 });
             }
             _ => {
