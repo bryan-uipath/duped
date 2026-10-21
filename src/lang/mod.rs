@@ -52,21 +52,44 @@ pub fn extract_files(files: &[SourceFile]) -> Extraction {
     Extraction { records, skipped }
 }
 
-/// Each TypeScript or JavaScript file's imports, in file order; other languages are skipped.
-pub fn extract_imports(files: &[SourceFile]) -> (Vec<(String, Vec<typescript::Import>)>, usize) {
-    let results: Vec<Option<(String, Vec<typescript::Import>)>> = files
+/// One import statement, or one leaf of a Rust `use` tree.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Import {
+    /// Module as written: `./util` or `react`, Python `.models` or `a.b`, Rust `crate::a`.
+    pub specifier: String,
+    /// Imported names (not local aliases): `default`, `*` for a namespace or glob, or a named
+    /// export; empty for a side-effect or whole-module import such as `import './a.css'`.
+    pub names: Vec<String>,
+    /// Names this file re-exports from it, aliases applied, e.g. `y` for `export { x as y }
+    /// from`; empty for a plain import.
+    pub reexported: Vec<String>,
+}
+
+/// Each file's imports, in file order, for files whose language `keep` accepts; C# is skipped.
+pub fn extract_imports(
+    files: &[SourceFile],
+    keep: fn(Language) -> bool,
+) -> (Vec<(String, Vec<Import>)>, usize) {
+    let results: Vec<Option<(String, Vec<Import>)>> = files
         .par_iter()
-        .filter(|f| matches!(f.language, Language::TypeScript | Language::JavaScript))
+        .filter(|f| keep(f.language) && f.language != Language::CSharp)
         .map_init(Parser::new, |parser, file| {
             let source = decode(&std::fs::read(&file.path).ok()?);
-            Some((
-                file.rel.clone(),
-                typescript::imports(parser, &source, &file.rel),
-            ))
+            let imports = match file.language {
+                Language::Python => python::imports(parser, &source, &file.rel),
+                Language::Rust => rust::imports(parser, &source),
+                _ => typescript::imports(parser, &source, &file.rel),
+            };
+            Some((file.rel.clone(), imports))
         })
         .collect();
     let skipped = results.iter().filter(|r| r.is_none()).count();
     (results.into_iter().flatten().collect(), skipped)
+}
+
+/// TypeScript or JavaScript, the languages `duped imports` compares.
+pub fn is_script(language: Language) -> bool {
+    matches!(language, Language::TypeScript | Language::JavaScript)
 }
 
 /// UTF-8 (lossy, so legacy single-byte files still parse), or UTF-16 with a byte-order mark,

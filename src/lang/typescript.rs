@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Parser};
 
 use super::{
-    TokenClass, body_tokens, collapse_whitespace, has_token, join_scope, push_field, signature,
+    Import, TokenClass, body_tokens, collapse_whitespace, has_token, join_scope, push_field,
+    signature,
 };
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
@@ -29,17 +30,8 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str, language: Language)
     extractor.records
 }
 
-/// One top-level `import` statement.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Import {
-    /// Module specifier as written, e.g. `react` or `./util`.
-    pub specifier: String,
-    /// Imported names (not local aliases): `default`, `*` for a namespace, or a named
-    /// export; empty for a side-effect import such as `import './a.css'`.
-    pub names: Vec<String>,
-}
-
-/// Top-level `import` statements; re-exports, `require` and dynamic `import()` are skipped.
+/// Top-level `import` statements, and `export … from` re-exports; `require` and dynamic
+/// `import()` are skipped.
 pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
     let Some(tree) = parse(parser, source, rel) else {
         return Vec::new();
@@ -50,37 +42,62 @@ pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
     let mut out = Vec::new();
     for statement in root
         .named_children(&mut cursor)
-        .filter(|n| n.kind() == "import_statement")
+        .filter(|n| matches!(n.kind(), "import_statement" | "export_statement"))
     {
         let Some(specifier) = statement.child_by_field_name("source") else {
             continue;
         };
         let mut names = Vec::new();
+        let mut reexported = Vec::new();
         let mut clauses = statement.walk();
-        for clause in statement
-            .named_children(&mut clauses)
-            .filter(|n| n.kind() == "import_clause")
-        {
-            let mut parts = clause.walk();
-            for part in clause.named_children(&mut parts) {
-                match part.kind() {
-                    "identifier" => names.push("default".to_string()),
-                    "namespace_import" => names.push("*".to_string()),
-                    "named_imports" => {
-                        let mut specs = part.walk();
-                        names.extend(
-                            part.named_children(&mut specs)
-                                .filter_map(|s| s.child_by_field_name("name"))
-                                .map(text),
-                        );
+        for clause in statement.named_children(&mut clauses) {
+            match clause.kind() {
+                "import_clause" => {
+                    let mut parts = clause.walk();
+                    for part in clause.named_children(&mut parts) {
+                        match part.kind() {
+                            "identifier" => names.push("default".to_string()),
+                            "namespace_import" => names.push("*".to_string()),
+                            "named_imports" => {
+                                let mut specs = part.walk();
+                                names.extend(
+                                    part.named_children(&mut specs)
+                                        .filter_map(|s| s.child_by_field_name("name"))
+                                        .map(text),
+                                );
+                            }
+                            _ => {}
+                        }
                     }
-                    _ => {}
                 }
+                // `export * as ns from`
+                "namespace_export" => {
+                    names.push("*".to_string());
+                    reexported.push(text(clause.named_child(0).unwrap_or(clause)));
+                }
+                // `export { x as y } from`
+                "export_clause" => {
+                    let mut specs = clause.walk();
+                    for spec in clause.named_children(&mut specs) {
+                        let Some(name) = spec.child_by_field_name("name") else {
+                            continue;
+                        };
+                        names.push(text(name));
+                        reexported.push(text(spec.child_by_field_name("alias").unwrap_or(name)));
+                    }
+                }
+                _ => {}
             }
+        }
+        // `export * from`
+        if statement.kind() == "export_statement" && reexported.is_empty() {
+            names.push("*".to_string());
+            reexported.push("*".to_string());
         }
         out.push(Import {
             specifier: text(specifier),
             names,
+            reexported,
         });
     }
     out
@@ -1304,15 +1321,16 @@ mod tests {
             import * as path from \"node:path\";\n\
             import './a.css';\n\
             import type { Ref } from '../ref';\n\
-            export { x } from './x';\n\
+            export { x as w } from './x';\n\
+            export * from './all';\n\
             const y = require('y');\n\
             function f() { return import('z'); }";
         let found = imports(&mut Parser::new(), source, "src/a.tsx");
         let found: Vec<(&str, Vec<&str>)> = found
             .iter()
             .map(|i| {
-                let names = i.names.iter().map(String::as_str).collect();
-                (i.specifier.as_str(), names)
+                let names = i.names.iter().chain(&i.reexported);
+                (i.specifier.as_str(), names.map(String::as_str).collect())
             })
             .collect();
         assert_eq!(
@@ -1322,6 +1340,8 @@ mod tests {
                 ("node:path", vec!["*"]),
                 ("./a.css", vec![]),
                 ("../ref", vec!["Ref"]),
+                ("./x", vec!["x", "w"]),
+                ("./all", vec!["*", "*"]),
             ]
         );
     }

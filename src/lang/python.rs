@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
 
 use super::typescript::member;
-use super::{collapse_whitespace, join_scope, push_field, signature};
+use super::{Import, collapse_whitespace, join_scope, push_field, signature};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
 };
@@ -34,6 +34,69 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str) -> Vec<Record> {
     let implemented = extractor.implemented(root, true);
     extractor.statements(root, &implemented);
     extractor.records
+}
+
+/// Every `import` and `from … import` statement, at any depth (lazy imports are still
+/// dependencies). In an `__init__.py`, `from` imports are re-exports.
+pub fn imports(parser: &mut Parser, source: &str, rel: &str) -> Vec<Import> {
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .expect("bundled grammar is compatible");
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let package = rel == "__init__.py" || rel.ends_with("/__init__.py");
+    let text = |n: Node| {
+        source[n.byte_range()]
+            .split_whitespace()
+            .collect::<String>()
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        let names: Vec<Node> = node.children_by_field_name("name", &mut cursor).collect();
+        match node.kind() {
+            // `import a.b as c, d`: whole modules.
+            "import_statement" => out.extend(names.iter().map(|&n| Import {
+                specifier: text(n.child_by_field_name("name").unwrap_or(n)),
+                names: Vec::new(),
+                reexported: Vec::new(),
+            })),
+            "import_from_statement" => {
+                let Some(module) = node.child_by_field_name("module_name") else {
+                    continue;
+                };
+                let mut imported = Vec::new();
+                let mut bound = Vec::new();
+                for n in names {
+                    let name = n.child_by_field_name("name").unwrap_or(n);
+                    imported.push(text(name));
+                    bound.push(text(n.child_by_field_name("alias").unwrap_or(name)));
+                }
+                let mut cursor = node.walk();
+                if node
+                    .named_children(&mut cursor)
+                    .any(|c| c.kind() == "wildcard_import")
+                {
+                    imported.push("*".to_string());
+                    bound.push("*".to_string());
+                }
+                out.push(Import {
+                    specifier: text(module),
+                    names: imported,
+                    reexported: if package { bound } else { Vec::new() },
+                });
+            }
+            _ => {
+                // Reversed, so statements pop in file order.
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.named_children(&mut cursor).collect();
+                stack.extend(children.into_iter().rev());
+            }
+        }
+    }
+    out
 }
 
 struct Extractor<'a> {
@@ -685,6 +748,31 @@ mod tests {
 
     fn run(source: &str) -> Vec<Record> {
         extract(&mut Parser::new(), source, "pkg/a.py")
+    }
+
+    #[test]
+    fn imports_resolve_relative_and_aliased_forms() {
+        let source = "import a.b.c as d, e\nfrom . import x as y\nfrom ..m.n import *\n\
+            def f():\n    from q import (r, s)\n";
+        let found = |rel| {
+            imports(&mut Parser::new(), source, rel)
+                .into_iter()
+                .map(|i| (i.specifier, i.names, i.reexported))
+                .collect::<Vec<_>>()
+        };
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            found("pkg/a.py"),
+            vec![
+                ("a.b.c".into(), vec![], vec![]),
+                ("e".into(), vec![], vec![]),
+                (".".into(), s(&["x"]), vec![]),
+                ("..m.n".into(), s(&["*"]), vec![]),
+                ("q".into(), s(&["r", "s"]), vec![]),
+            ]
+        );
+        // A package's `from` imports are re-exports, under their bound names.
+        assert_eq!(found("pkg/__init__.py")[2].2, s(&["y"]));
     }
 
     fn types(records: &[Record]) -> Vec<&TypeRecord> {

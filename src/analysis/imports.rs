@@ -7,7 +7,7 @@ use std::fmt::{self, Write};
 use serde_json::{Value, json};
 
 use super::{Interner, Judge};
-use crate::lang::typescript::Import;
+use crate::lang::Import;
 use crate::modules::Tag;
 
 pub struct ImportOptions {
@@ -81,7 +81,8 @@ pub fn file_items(files: Vec<(String, Vec<Import>)>) -> Vec<FileImports> {
         .into_iter()
         .filter_map(|(file, imports)| {
             let mut items = Vec::new();
-            for import in imports {
+            // Re-exports (`export … from`) aren't imports here.
+            for import in imports.into_iter().filter(|i| i.reexported.is_empty()) {
                 let specifier = normalize_specifier(&file, &import.specifier);
                 if import.names.is_empty() {
                     items.push(Item {
@@ -395,10 +396,12 @@ mod tests {
                 Some((specifier, name)) => Import {
                     specifier: specifier.into(),
                     names: vec![name.into()],
+                    reexported: Vec::new(),
                 },
                 None => Import {
                     specifier: item.to_string(),
                     names: Vec::new(),
+                    reexported: Vec::new(),
                 },
             })
             .collect();
@@ -483,6 +486,7 @@ mod tests {
         let names = |n: &[&str]| Import {
             specifier: "lib".into(),
             names: n.iter().map(|n| n.to_string()).collect(),
+            reexported: Vec::new(),
         };
         let mut input = filler(10);
         for f in ["a.ts", "b.ts"] {

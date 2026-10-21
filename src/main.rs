@@ -414,7 +414,7 @@ fn imports(
         &args.scan.path,
         &walk_options(&args.scan, config, rules, root, base),
     )?;
-    let (imports, skipped) = lang::extract_imports(&files);
+    let (imports, skipped) = lang::extract_imports(&files, lang::is_script);
     if skipped > 0 {
         eprintln!("duped: skipped {skipped} unreadable files");
     }
@@ -482,7 +482,7 @@ fn report(
     });
     let imports = report::attempt(|| {
         // Unreadable files were counted above.
-        let (imports, _) = lang::extract_imports(&files);
+        let (imports, _) = lang::extract_imports(&files, lang::is_script);
         let files = analysis::imports::file_items(imports);
         let judge = judge::FileJudge::new(&graph, base, files.iter().map(|f| f.file.as_str()));
         let found =

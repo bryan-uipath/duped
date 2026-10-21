@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::{Node, Parser};
 
-use crate::lang::{TokenClass, body_tokens};
+use crate::lang::{Import, TokenClass, body_tokens};
 use crate::record::{
     Field, FieldKind, FunctionRecord, Language, Location, Param, Record, TypeKind, TypeRecord,
     format_params,
@@ -36,6 +36,100 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str) -> Vec<Record> {
     extractor.collect_visibility(root, &[]);
     extractor.items(root, &[]);
     extractor.records
+}
+
+/// Each leaf of every `use` tree, outside inline `mod`s (whose paths start elsewhere):
+/// `use a::{b::C, d::*}` is `a::b` → `C` and `a::d` → `*`. `pub use` leaves are re-exports.
+pub fn imports(parser: &mut Parser, source: &str) -> Vec<Import> {
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .expect("bundled grammar is compatible");
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "mod_item" => {}
+            "use_declaration" => {
+                let Some(argument) = node.child_by_field_name("argument") else {
+                    continue;
+                };
+                let exported = is_pub(node, source);
+                for (path, alias) in use_leaves(argument, source, &[]) {
+                    let Some((name, prefix)) = path.split_last() else {
+                        continue;
+                    };
+                    out.push(Import {
+                        specifier: prefix.join("::"),
+                        names: vec![name.clone()],
+                        reexported: if exported {
+                            vec![alias.unwrap_or_else(|| name.clone())]
+                        } else {
+                            Vec::new()
+                        },
+                    });
+                }
+            }
+            _ => {
+                // Reversed, so declarations pop in file order.
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.named_children(&mut cursor).collect();
+                stack.extend(children.into_iter().rev());
+            }
+        }
+    }
+    out
+}
+
+/// Full paths of a `use` tree's leaves under `prefix`, each with its `as` alias; a glob ends in `*`.
+fn use_leaves(node: Node, source: &str, prefix: &[String]) -> Vec<(Vec<String>, Option<String>)> {
+    let path = |n: Node| {
+        let mut path = prefix.to_vec();
+        path.extend(
+            source[n.byte_range()]
+                .split("::")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+        path
+    };
+    let mut cursor = node.walk();
+    match node.kind() {
+        "use_as_clause" => {
+            let alias = node
+                .child_by_field_name("alias")
+                .map(|a| source[a.byte_range()].to_string());
+            node.child_by_field_name("path")
+                .map(|p| vec![(path(p), alias)])
+                .unwrap_or_default()
+        }
+        "use_wildcard" => {
+            let mut leaf = match node.named_child(0) {
+                Some(p) => path(p),
+                None => prefix.to_vec(),
+            };
+            leaf.push("*".to_string());
+            vec![(leaf, None)]
+        }
+        "scoped_use_list" => {
+            let inner = match node.child_by_field_name("path") {
+                Some(p) => path(p),
+                None => prefix.to_vec(),
+            };
+            node.child_by_field_name("list")
+                .map(|l| use_leaves(l, source, &inner))
+                .unwrap_or_default()
+        }
+        "use_list" => node
+            .named_children(&mut cursor)
+            .flat_map(|c| use_leaves(c, source, prefix))
+            .collect(),
+        // `{self, …}` names the prefix itself.
+        "self" if !prefix.is_empty() => vec![(prefix.to_vec(), None)],
+        _ => vec![(path(node), None)],
+    }
 }
 
 struct Extractor<'a> {
@@ -624,6 +718,30 @@ mod tests {
 
     fn run(source: &str) -> Vec<Record> {
         extract(&mut Parser::new(), source, "src/lib.rs")
+    }
+
+    #[test]
+    fn imports_expand_use_trees() {
+        let source = "pub use crate::a::{self, b::C as D, e::*};\nuse super::x;\n\
+            pub(crate) use foo::Bar;\nuse baz;\nmod inline { use skipped::Y; }\n\
+            fn f() { use self::local::Z; }";
+        let found: Vec<(String, Vec<String>, Vec<String>)> = imports(&mut Parser::new(), source)
+            .into_iter()
+            .map(|i| (i.specifier, i.names, i.reexported))
+            .collect();
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![
+                ("crate".into(), s(&["a"]), s(&["a"])),
+                ("crate::a::b".into(), s(&["C"]), s(&["D"])),
+                ("crate::a::e".into(), s(&["*"]), s(&["*"])),
+                ("super".into(), s(&["x"]), vec![]),
+                ("foo".into(), s(&["Bar"]), vec![]),
+                ("".into(), s(&["baz"]), vec![]),
+                ("self::local".into(), s(&["Z"]), vec![]),
+            ]
+        );
     }
 
     fn types(records: &[Record]) -> Vec<&TypeRecord> {
