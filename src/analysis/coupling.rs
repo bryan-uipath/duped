@@ -60,7 +60,7 @@ pub struct Boundary {
     pub unused: Vec<String>,
     /// Top-level declarations in files whose innermost boundary this is.
     pub declared: usize,
-    /// Declarations no file outside the boundary imports, directly or via a re-export.
+    /// Declarations neither on an entry's surface nor imported from outside the boundary.
     pub hidden: usize,
     /// Imported symbols from outside that land inside, and how many go past the entry.
     pub incoming: usize,
@@ -87,7 +87,7 @@ impl Boundary {
     pub fn no_consumers(&self) -> bool {
         self.incoming == 0
     }
-    /// Geometric mean of `1 − bypassRate`, `1 − unusedSurface` and hiding; higher is better.
+    /// Mean of `1 − bypassRate`, `1 − unusedSurface` and hiding; higher is better.
     /// Without consumers, unused surface says nothing, so its term is 1.
     pub fn score(&self) -> f64 {
         let unused = if self.no_consumers() {
@@ -95,7 +95,7 @@ impl Boundary {
         } else {
             self.unused_rate()
         };
-        ((1.0 - self.bypass_rate()) * (1.0 - unused) * self.hiding()).cbrt()
+        (2.0 - self.bypass_rate() - unused + self.hiding()) / 3.0
     }
 }
 
@@ -125,8 +125,12 @@ pub struct Totals {
     /// Σ bypass and Σ bypass² over symbols.
     pub symbol_depth: usize,
     pub bypass_cost: usize,
+    /// Entry exports of boundaries with consumers, and those no outside file imports.
     pub surface: usize,
     pub unused_surface: usize,
+    /// Declarations in all boundaries, and those hidden.
+    pub declared: usize,
+    pub hidden: usize,
 }
 
 impl Totals {
@@ -139,6 +143,15 @@ impl Totals {
     }
     pub fn unused_surface_rate(&self) -> f64 {
         ratio(self.unused_surface, self.surface)
+    }
+}
+
+/// Hidden share of declarations; 1 when there are none.
+fn hiding_of(hidden: usize, declared: usize) -> f64 {
+    if declared == 0 {
+        1.0
+    } else {
+        ratio(hidden, declared)
     }
 }
 
@@ -160,21 +173,44 @@ pub struct Coupling {
 }
 
 impl Coupling {
-    /// Declaration-weighted mean of the scores of boundaries under `folder` (all when empty);
-    /// 1 when they declare nothing.
-    pub fn score(&self, folder: &str) -> f64 {
-        let (sum, weight) = self
+    /// `(bypassRate, unusedSurface, hiding)` over the boundaries under `folder`, or the
+    /// whole scan when empty, where bypassRate is over cross-boundary symbols.
+    pub fn ratios(&self, folder: &str) -> (f64, f64, f64) {
+        if folder.is_empty() {
+            let t = &self.totals;
+            return (
+                t.bypass_rate(),
+                t.unused_surface_rate(),
+                hiding_of(t.hidden, t.declared),
+            );
+        }
+        let (mut incoming, mut bypass, mut surface, mut unused, mut declared, mut hidden) =
+            (0, 0, 0, 0, 0, 0);
+        for b in self
             .boundaries
             .iter()
-            .filter(|b| folder.is_empty() || b.dir == folder || within(&b.dir, folder))
-            .fold((0.0, 0), |(s, w), b| {
-                (s + b.score() * b.declared as f64, w + b.declared)
-            });
-        if weight == 0 {
-            1.0
-        } else {
-            sum / weight as f64
+            .filter(|b| b.dir == folder || within(&b.dir, folder))
+        {
+            incoming += b.incoming;
+            bypass += b.bypass_in;
+            if !b.no_consumers() {
+                surface += b.surface.len();
+                unused += b.unused.len();
+            }
+            declared += b.declared;
+            hidden += b.hidden;
         }
+        (
+            ratio(bypass, incoming),
+            ratio(unused, surface),
+            hiding_of(hidden, declared),
+        )
+    }
+
+    /// Mean of `1 − bypassRate`, `1 − unusedSurface` and hiding, from [`Self::ratios`].
+    pub fn score(&self, folder: &str) -> f64 {
+        let (bypass, unused, hiding) = self.ratios(folder);
+        (2.0 - bypass - unused + hiding) / 3.0
     }
 
     /// `(importer, symbol)` → its target and bypass, the deepest when imported twice.
@@ -426,6 +462,20 @@ pub fn analyze(
     let is_used = |file: &str, name: &str| {
         used_all.contains(file) || used.contains(&(file.to_string(), name.to_string()))
     };
+    // Declarations on any entry's surface, directly or by one-hop re-export.
+    let mut surfaced: HashSet<(&str, &str)> = HashSet::new();
+    for entry in tree.boundaries.values().flatten() {
+        let own = exported.get(entry.as_str()).into_iter().flatten();
+        surfaced.extend(own.map(|n| (entry.as_str(), *n)));
+        for (outward, target, original) in reexports.get(entry).into_iter().flatten() {
+            if outward == "*" {
+                let all = exported.get(target.as_str()).into_iter().flatten();
+                surfaced.extend(all.map(|n| (target.as_str(), *n)));
+            } else {
+                surfaced.insert((target.as_str(), original.as_str()));
+            }
+        }
+    }
     let mut boundaries = Vec::new();
     for (dir, entry_files) in &tree.boundaries {
         if tree.passthrough.contains(dir) {
@@ -460,15 +510,23 @@ pub fn analyze(
             .collect();
         let own = owned.get(dir).map(Vec::as_slice).unwrap_or_default();
         let (incoming, bypass_in) = incoming.get(dir).copied().unwrap_or_default();
-        totals.surface += surface.len();
-        totals.unused_surface += unused.len();
+        let hidden = own
+            .iter()
+            .filter(|(f, n)| !is_used(f, n) && !surfaced.contains(&(*f, *n)))
+            .count();
+        if incoming > 0 {
+            totals.surface += surface.len();
+            totals.unused_surface += unused.len();
+        }
+        totals.declared += own.len();
+        totals.hidden += hidden;
         boundaries.push(Boundary {
             dir: dir.clone(),
             entries: entry_files.clone(),
             surface: surface.into_iter().collect(),
             unused,
             declared: own.len(),
-            hidden: own.iter().filter(|(f, n)| !is_used(f, n)).count(),
+            hidden,
             incoming,
             bypass_in,
             leaks: leaks.iter().filter(|l| l.boundary == *dir).count(),
@@ -1284,14 +1342,17 @@ pub fn render_text(o: &Output) -> String {
     let mut out = String::new();
     writeln!(
         out,
-        "score {:.2} · bypassRate {:.2} ({} of {} cross-boundary symbols) · unusedSurface {:.2} ({} of {} entry exports)",
+        "score {:.3} · bypassRate {:.3} ({} of {} cross-boundary symbols) · unusedSurface {:.3} ({} of {} entry exports) · hiding {:.3} ({} of {} declarations)",
         c.score(""),
         t.bypass_rate(),
         t.bypass_symbols,
         t.cross_symbols,
         t.unused_surface_rate(),
         t.unused_surface,
-        t.surface
+        t.surface,
+        hiding_of(t.hidden, t.declared),
+        t.hidden,
+        t.declared
     )
     .ok();
     writeln!(
@@ -1309,10 +1370,12 @@ pub fn render_text(o: &Output) -> String {
     )
     .ok();
     for folder in o.folders {
+        let key = folder_key(folder);
+        let (bypass, unused, hiding) = c.ratios(&key);
         writeln!(
             out,
-            "folder {folder}: score {:.2}",
-            c.score(&folder_key(folder))
+            "folder {folder}: score {:.3} · bypassRate {bypass:.3} · unusedSurface {unused:.3} · hiding {hiding:.3}",
+            c.score(&key)
         )
         .ok();
     }
@@ -1471,6 +1534,9 @@ fn totals_json(c: &Coupling) -> Value {
         "score": c.score(""),
         "bypassRate": t.bypass_rate(),
         "unusedSurface": t.unused_surface_rate(),
+        "hiding": hiding_of(t.hidden, t.declared),
+        "declared": t.declared,
+        "hidden": t.hidden,
         "files": t.files,
         "edges": t.edges,
         "crossBoundaryEdges": t.cross_edges,
@@ -1505,7 +1571,12 @@ pub fn to_json(o: &Output) -> Value {
     let folders: serde_json::Map<String, Value> = o
         .folders
         .iter()
-        .map(|f| (f.clone(), json!(c.score(&folder_key(f)))))
+        .map(|f| {
+            let key = folder_key(f);
+            let (bypass, unused, hiding) = c.ratios(&key);
+            let ratios = json!({ "score": c.score(&key), "bypassRate": bypass, "unusedSurface": unused, "hiding": hiding });
+            (f.clone(), ratios)
+        })
         .collect();
     let boundaries: Vec<Value> = ranked(c)
         .into_iter()

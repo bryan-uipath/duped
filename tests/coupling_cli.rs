@@ -137,28 +137,32 @@ fn typescript_workspace_scores_bypass_depth_and_leaks() {
     assert_eq!(foo["entries"][0], "packages/foo/src/index.ts");
     assert_eq!(foo["surface"], serde_json::json!(["api", "util"]));
     assert_eq!(foo["unused"], serde_json::json!([]));
-    // `api` is used from outside, so nothing foo declares is hidden; under 5 symbols, hiding is 1.
+    // `api` is surfaced, so nothing foo declares is hidden; under 5 symbols, hiding is 1.
     assert_eq!(
         (foo["declared"].as_u64(), foo["hidden"].as_u64()),
         (Some(1), Some(0))
     );
     assert_eq!(foo["hiding"], 1.0);
-    // 3 incoming symbols, 2 past the entry: score ∛(1/3 · 1 · 1).
+    // 3 incoming symbols, 2 past the entry: score (1/3 + 1 + 1) / 3.
     assert_eq!(
         (foo["incoming"].as_u64(), foo["bypassIn"].as_u64()),
         (Some(3), Some(2))
     );
     let score = foo["score"].as_f64().unwrap();
-    assert!((score - (1.0f64 / 3.0).cbrt()).abs() < 1e-9, "{score}");
+    assert!((score - 7.0 / 9.0).abs() < 1e-9, "{score}");
 
     let text = text(&root, &["--folder", "packages/foo"]);
     assert!(text.starts_with("score "), "{text}");
     assert!(
-        text.contains("bypassRate 0.80 (4 of 5 cross-boundary symbols)"),
+        text.contains("bypassRate 0.800 (4 of 5 cross-boundary symbols)"),
         "{text}"
     );
-    // foo (0.69) and its `internal/` (0.00), one declaration each.
-    assert!(text.contains("folder packages/foo: score 0.35"), "{text}");
+    // foo and its `internal/`: 3 of 4 incoming bypass, no unused surface, neither of
+    // their 2 declarations hidden (no floor across boundaries): (0.25 + 1 + 0) / 3.
+    assert!(
+        text.contains("folder packages/foo: score 0.417 · bypassRate 0.750 · unusedSurface 0.000 · hiding 0.000"),
+        "{text}"
+    );
     assert!(
         text.contains(
             "packages/app/src/main.ts -> packages/foo/src/internal/deep.ts  ups=1 downs=2 bypass=2"
@@ -280,6 +284,36 @@ fn boundaries_nobody_imports_have_neutral_unused_surface() {
     assert!(
         text.contains("1.00  packages/pub (no consumers)  surface 1 (unused 1)"),
         "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_barrel_that_re_exports_everything_hides_nothing() {
+    let root = temp("barrel");
+    write(&root, "kit/index.ts", "export * from './parts';\n");
+    let parts: String = (0..5)
+        .map(|i| format!("export function p{i}() {{}}\n"))
+        .collect();
+    write(&root, "kit/parts.ts", &parts);
+    write(&root, "app/main.ts", "import { p0 } from '../kit';\n");
+    let report = json(&root, &[]);
+    let kit = boundary(&report, "kit");
+    assert_eq!(
+        (kit["declared"].as_u64(), kit["hidden"].as_u64()),
+        (Some(5), Some(0))
+    );
+    assert_eq!(kit["hiding"], 0.0);
+    // (1 − 0) + (1 − 4/5) + 0, over 3.
+    assert!((kit["score"].as_f64().unwrap() - 0.4).abs() < 1e-9, "{kit}");
+    let totals = &report["totals"];
+    assert_eq!(
+        (totals["hiding"].as_f64(), totals["unusedSurface"].as_f64()),
+        (Some(0.0), Some(0.8))
+    );
+    assert!(
+        (totals["score"].as_f64().unwrap() - 0.4).abs() < 1e-9,
+        "{totals}"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -463,7 +497,8 @@ fn base_delta_credits_real_fixes_only() {
     let root = billing("delta");
     let base = json(&root, &[]);
     assert_eq!(base["totals"]["bypassRate"], 1.0);
-    assert_eq!(base["totals"]["unusedSurfaceCount"], 2);
+    // `orders` has no consumers, so only billing's unused `charge` counts.
+    assert_eq!(base["totals"]["unusedSurfaceCount"], 1);
 
     // Good: through billing's entry, and `fmt` moved behind a new module's entry.
     write(
