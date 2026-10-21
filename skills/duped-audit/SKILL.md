@@ -25,12 +25,25 @@ duped report <dir> --top 60 --exclude '**/examples' --json > /tmp/duped-audit.js
 
 Work through `groups` in order (most analyses agreeing first), reading both sides of each, as in the `duped` skill. Diff every near-copy: copies that disagree are the most valuable findings.
 
-## 4. Report, biggest cut first
+## 4. Coupling hotspots
+
+```bash
+duped coupling <dir> --top 20 --json > /tmp/duped-audit-coupling.json
+```
+
+From `boundaries` (worst first) take the few with the most incoming bypass
+edges and leaks, ignoring `noConsumers` ones. For each, name the internal
+files most reached into (`edges` grouped by target) and the leaked symbols
+with the most importers. These are the consolidation targets; the fix
+workflow lives in `duped-coupling`.
+
+## 5. Report, biggest cut first
 
 Use the `duped` skill's report format, but rank by payoff (lines removable × how many places must stay in sync), not by score: a 0.7 pair spanning two packages beats a 0.95 pair inside one module. Close with:
 
 ```
 net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <dir>, excluded: <globs>.
+coupling: score <s>, bypassRate <r>; hotspots: <boundary> (<n> bypass in, <m> leaks), …
 ```
 
 Afterwards, offer to persist what you learned in `duped.toml`: repeated exclusions as `[scan] exclude = [...]`, and confirmed-deliberate `bodies`/`types` pairs as `[[acknowledged]]` entries (`names` and `imports` don't apply acknowledgements).

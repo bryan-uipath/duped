@@ -106,6 +106,7 @@ Shipped in `skills/`, installable as a Claude Code plugin or copied into any age
 - **duped:** how to use the CLI, check for prior art before writing code, read a finding, and record deliberate copies.
 - **duped-audit:** whole-repo scan; reads both sides of each finding and ranks a cleanup list by payoff.
 - **duped-review:** for a branch or pull request, flags changed files that copy existing code, and copies that have drifted.
+- **duped-coupling:** ranks the most reached-into boundaries, proposes per-edge fixes, and proves them with a `--base` delta.
 
 Audit and review run `duped report`. For now `duped-audit` suggests `duped.toml` entries; a separate setup skill can follow.
 
