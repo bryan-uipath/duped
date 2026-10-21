@@ -61,6 +61,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 - **names:** file pairs that declare several of the same top-level names, scored by name rarity, export and matching signature, with each name's shape or signature marked as matching or diverging.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules.
 - **imports:** files whose imports overlap on rare items (IDF-weighted Jaccard over `specifier#name`), for ported copies whose declarations were all renamed. It reads import statements itself rather than adding a record kind: imports aren't declarations, and no other analysis needs them. TypeScript/JavaScript only.
+- **coupling:** not duplication, but its cause: imports resolved to files and scored by how many boundaries (directories with an entry file, a manifest, or named `internal`) they enter past an entry. Headline `bypassRate` over cross-boundary imported symbols, plus unused entry surface, hiding and a per-boundary score. `--base` matches symbols by (importer, name), so a fix only counts when the import got shallower or the symbol moved, not when it was copied or inlined. TypeScript/JavaScript, Python and Rust; C# `using` maps to namespaces rather than files and is left for later.
 
 ### Module graph and actionability
 
@@ -86,8 +87,9 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped bodies [PATH]` | functions with near-copy bodies, and files that share several |
 | `duped imports [PATH]` | file pairs that import the same rare things |
 | `duped report [PATH]` | `bodies`, `imports`, `names` and `types` pairs grouped by file pair, ranked by how many analyses agree |
+| `duped coupling [PATH]` | imports that bypass entry files, by depth; surface, hiding and leaks per boundary |
 
-All but `fns` are implemented. Every analysis supports `--json`. `report --base <ref>` keeps only file pairs with a side the diff since the merge base touches; the other commands don't take `--base`.
+All but `fns` are implemented. Every analysis supports `--json`. `report --base <ref>` keeps only file pairs with a side the diff since the merge base touches; `coupling --base <ref>` compares with a scan of the merge base, and `coupling --rev <ref>` scans a commit. The other commands don't take `--base`.
 
 ## Per-repo config: `duped.toml`
 
@@ -104,6 +106,7 @@ Shipped in `skills/`, installable as a Claude Code plugin or copied into any age
 - **duped:** how to use the CLI, check for prior art before writing code, read a finding, and record deliberate copies.
 - **duped-audit:** whole-repo scan; reads both sides of each finding and ranks a cleanup list by payoff.
 - **duped-review:** for a branch or pull request, flags changed files that copy existing code, and copies that have drifted.
+- **duped-coupling:** ranks the most reached-into boundaries, proposes per-edge fixes, and proves them with a `--base` delta.
 
 Audit and review run `duped report`. For now `duped-audit` suggests `duped.toml` entries; a separate setup skill can follow.
 
@@ -123,3 +126,4 @@ Each step ships on its own.
 10. Regression suite: reproduce the findings of the original monorepo audit.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.
 12. `report`: every analysis grouped by file pair, diff-filtered with `--base`.
+13. `coupling`: API-bypass depth, surface, hiding and leaks per boundary, with edge-matched `--base` deltas and `--rev` for history. Next: C# `using` → namespace directories, tsconfig `paths`.

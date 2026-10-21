@@ -14,6 +14,7 @@ code search needs structural evidence.
 
 - Branch/PR duplication: use the sibling `duped-review` skill alone.
 - Whole-codebase duplication: use `duped-audit` and the essentials below.
+- Coupling, encapsulation, or "what reaches into what": use `duped-coupling`.
 - A specific reuse question: search names/domain terms with `rg` first. If
   needed, save `duped index <root> --out <temporary-file>` and search that file;
   do not load the entire index or automatically run a follow-up scan.

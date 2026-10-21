@@ -25,12 +25,33 @@ duped report <dir> --top 60 --exclude '**/examples' --json > /tmp/duped-audit.js
 
 Work through `groups` in order (most analyses agreeing first), reading both sides of each, as in the `duped` skill. Diff every near-copy: copies that disagree are the most valuable findings.
 
-## 4. Report, biggest cut first
+## 4. Coupling hotspots
+
+```bash
+duped coupling <dir> --top 20 --json > /tmp/duped-audit-coupling.json
+```
+
+`totals.score` (0–1, higher is better) averages `1 − bypassRate`,
+`1 − unusedSurface` and `hiding`; report all four. `boundaries` is worst
+first. Skip `noConsumers` ones (nothing in the scan imports them). For the
+top few, say which term drags them down and name the evidence:
+
+- low `1 − bypassRate`, many `leaks`: internal files others reach into.
+  Group `edges` by target and `leaks` by symbol; the most-imported internals
+  are the consolidation targets.
+- high `unusedSurface`: the entry exports more than anyone uses; often a
+  barrel. List the unused names.
+- low `hiding`: most declarations are on the face or imported from outside.
+
+The fix workflow lives in `duped-coupling`.
+
+## 5. Report, biggest cut first
 
 Use the `duped` skill's report format, but rank by payoff (lines removable × how many places must stay in sync), not by score: a 0.7 pair spanning two packages beats a 0.95 pair inside one module. Close with:
 
 ```
 net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <dir>, excluded: <globs>.
+coupling: score <s> (bypassRate <b>, unusedSurface <u>, hiding <h>); hotspots: <boundary> (<n> bypass in, <m> leaks, <term>), …
 ```
 
 Afterwards, offer to persist what you learned in `duped.toml`: repeated exclusions as `[scan] exclude = [...]`, and confirmed-deliberate `bodies`/`types` pairs as `[[acknowledged]]` entries (`names` and `imports` don't apply acknowledgements).

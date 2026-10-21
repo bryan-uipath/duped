@@ -1,0 +1,4 @@
+interface:
+  display_name: "duped coupling"
+  short_description: "Find and reduce reach-ins past module entry files"
+  default_prompt: "Use $duped-coupling to find the most reached-into modules in this repository and propose fixes."

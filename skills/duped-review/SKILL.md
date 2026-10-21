@@ -41,7 +41,34 @@ If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
 4. **`types`**: a new type matches an existing one field for field (`exact`) or extends it (`superset`); look for one that can be imported instead.
 5. **`imports` alone**: a new file imports the same unusual set as an existing one. Confirm with the code; per-host setup files (i18n, bootstrapping) are often deliberate.
 
-## 3. Verify and report
+## 3. Coupling delta
+
+```bash
+duped coupling <repo root> --base "$BASE" --json > "$REPORT.coupling"
+```
+
+Compares head against the merge base. `totals` is head, `diff.totals` is
+base. `score` and `hiding` are better higher; `bypassRate` and
+`unusedSurface` better lower. Flag everything that got worse:
+
+- `diff.regressed`: an import now reaches past an entry file, or deeper than
+  before. Recommend importing through the entry, or moving the symbol. A
+  `priorImporters` count of 5 or more means other files already reach the
+  same symbol the same way: an established convention, so note it in one
+  line instead of flagging each one.
+- `diff.removedWithoutMove`: an import vanished but the symbol stayed put:
+  the code was likely copied or inlined (`grew: true` means the importer grew
+  by at least the symbol's size). Cross-check against the duplication groups.
+- `diff.surface` without `newModule`: an existing module's API widened. Ask
+  whether each new export is used outside the module; unused ones lower
+  `hiding` and raise `unusedSurface`. Surface on a `newModule` is expected;
+  note it in one line.
+- `diff.leaks.added`: an internal symbol gained an importer from outside.
+
+Report the four ratios before and after. Improvements (`diff.improved`,
+`leaks.removed`) get one line. Measure only; no threshold fails a PR.
+
+## 4. Verify and report
 
 Read both sides and relevant callers. Drop framework-required similarities,
 intentional inverses/families, documented package boundaries, and tiny copies
@@ -51,7 +78,9 @@ prove duplication. Prioritize copies whose behavior has drifted.
 For the fix direction, follow `tag.copy → tag.owner` regardless of which side changed: if the change added the *owner*-side copy, the recommendation is that the existing downstream copy import the new one, or that the change reuse what's already there; never a dependency `tag` doesn't allow.
 
 Report one line per verified finding: `diverged|reuse|merge|extract`, what to
-change and why, and `[changed path:line <-> existing path:line]`. State the base,
+change and why, and `[changed path:line <-> existing path:line]`. Coupling
+findings use `reach|leak|surface` the same way, e.g.
+`reach: import X via packages/foo (entry), not foo/internal/x [path:line]`. State the base,
 `changedFiles`, each detector's status and `kept` count, and coverage limits. If none survive,
 say "No actionable duplication" with that scope. For deliberate pairs, suggest
 acknowledgements only for `bodies`/`types`; `names`/`imports` ignore them.

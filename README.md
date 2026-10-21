@@ -23,6 +23,7 @@ duped imports [DIR]                         # TS/JS files that import the same r
 duped names [DIR]                           # file pairs that declare the same names
 duped report [DIR] [--base REF]             # every analysis, grouped by file pair
 duped fns [DIR]                             # functions that share most of their parameter names
+duped coupling [DIR] [--base REF] [--rev REF]  # imports that bypass a directory's entry file
 ```
 
 `DIR` can also be a single file.
@@ -210,6 +211,49 @@ Pairs are ranked like type pairs: most actionable tag first, then most similar. 
 | `--min-shared` | `2` | a pair needs at least this many shared names |
 | `--max-sharing` | `5` | skip pairs whose shared names all appear together on more functions than this |
 | `--top` | `40` | pairs to show |
+
+### Measuring coupling past entry files
+
+`duped coupling` measures how much code reaches into other directories' internals instead of going through their entry files. It never fails the command; use the numbers to compare revisions.
+
+- **Boundary:** a directory with an entry file (`index.ts` and the other script extensions, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`, or a sibling `a.rs` for `a/`), a manifest (`package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `*.csproj`), or the name `internal`. Other directories are organization only and cost nothing. A manifest's entry is the file its importers reach by name (`exports["."]`, `main`, `module`, `types`, `index` or `src/index`; `src/lib.rs`; a project's one top-level package), and the directories between, such as `src/`, belong to the manifest's boundary. Every file a `package.json` `main`, `module`, `types` or `exports` path names is an entry of the package too, `*` patterns included, so `@x/svc/debug` through `"./*": "./dist/*/index.js"` costs nothing. A path into a missing `dist/` is read as the same path under `src/` (`./dist/a/index.js` → `src/a/index.ts`), where built files usually come from. A Python `_private.py` module counts as one more boundary.
+- **Edge:** an import resolved to another scanned file. Each edge walks up from the importer to the common ancestor (**ups**: boundaries exited) and down to the target (**downs**: boundaries entered). Ups are noisier and stay out of the headline numbers.
+- **Bypass:** boundaries entered after the first, plus 1 when the target isn't its boundary's entry. `../foo` resolving to `foo/index.ts` is 0, `../foo/bar.ts` is 1, and `../foo/internal/x.ts` is 2. Edges with no downs are counted but not listed.
+- **Re-exports** are followed one hop. A name an entry re-exports from its own directory stays scored against the entry, since that is its API; a name it re-exports from elsewhere is scored against the real file, marked `via` the entry.
+- **Symbol:** one imported name per (importer, target); a whole-module import is one symbol.
+- **bypassRate:** the share of cross-boundary symbols (downs > 0) that bypass an entry. `bypassCost` (Σ bypass²) and `meanBypassDepth` are diagnostics; Σ bypass² alone rewards flattening the tree.
+- **Surface:** names a boundary's entry files export, including one-hop re-exports. **unusedSurface** is the share no file outside the boundary imports, which catches barrels that `export *` everything.
+- **Hiding:** the share of a boundary's own declarations (functions and types in files whose nearest boundary it is) that are hidden: not on an entry's surface, directly or by re-export, and not imported from outside. A barrel that re-exports everything hides nothing. Boundaries with fewer than 5 declarations count as 1.
+- **Leak:** a declaration in a non-entry file imported from outside its boundary without going through the entry.
+- **score:** per boundary, the mean of `1 − bypassRate` (its incoming symbols), `1 − unusedSurface` and hiding, from 0 to 1, higher is better. A boundary nothing in the scan imports (an app, a published package) has unknown usage: it's marked `(no consumers)`, and its unused surface is reported but its term is 1. The repository score is the mean of the same three terms as repository ratios: `bypassRate` over all cross-boundary symbols, `unusedSurface` as Σ unused ÷ Σ surface over boundaries with consumers, and `hiding` as Σ hidden ÷ Σ declared over all boundaries (no floor). `--folder <path>` (repeatable) prints the same over the boundaries under a path, with bypassRate as Σ bypass-in ÷ Σ incoming.
+
+Imports resolve per language: TypeScript/JavaScript relative specifiers (with `.js` → `.ts` and `dir/index.*`) and workspace package names with subpaths; Python `import a.b`, `from a.b import c` (module `c` first, else name `c` in `a.b`) and relative imports, from the scan root, each project's directory and `src/`, and the parents of top-level packages; Rust `use` trees with `crate::`, `self::`, `super::`, workspace crate names and child modules, globs and braces expanded. tsconfig `paths`, `require`, dynamic `import()` and C# `using` aren't resolved yet.
+
+`--base <ref>` also scans the merge base of `<ref>` and `HEAD` (or `--rev`) in a temporary `git worktree`, with the same options, and matches imported symbols by (importer, name):
+
+- **improved:** a symbol bypassing at base is now imported at a lower depth, or its base file no longer declares it (moved or deleted), or its importer was deleted.
+- **removedWithoutMove:** a bypassing import is gone while the symbol still sits in its base file, likely copied or inlined; it earns no credit. `grew` marks importers that grew by at least the symbol's line span.
+- **regressed:** a symbol now bypassing deeper than at base, or not imported there at all.
+- **surface:** names added to or removed from each boundary's surface; boundaries absent at base are marked `new module`, so expected growth is easy to skip.
+- **leaks:** added and removed.
+
+`--rev <ref>` scans a commit instead of the working tree; paths stay relative to `DIR`, so results line up across revisions. A history of the score along the first-parent chain:
+
+```sh
+for c in $(git rev-list --first-parent -n 30 HEAD); do
+  printf '%s ' "$c"; duped coupling --rev "$c" --json | jq -c '.totals | {score, bypassRate, unusedSurface}'
+done
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--base <ref>` | | edge-matched changes since the merge base |
+| `--rev <ref>` | working tree | scan this commit instead |
+| `--folder <path>` | | also print the score of the boundaries under this path (repeatable) |
+| `--all-edges` | off | list every cross-boundary edge, not only bypass edges |
+| `--top` | `40` | boundaries (worst score first), edges and leaks to show |
+
+`--json` prints `{ totals, folders, boundaries, edges, leaks, diff? }`. `totals` has `score`, `bypassRate`, `unusedSurface`, `hiding`, `declared`, `hidden`, `files`, `edges`, `crossBoundaryEdges`, `bypassEdges`, `bypassDepth`, `symbols`, `crossBoundarySymbols`, `bypassSymbols`, `bypassCost`, `meanBypassDepth`, `surface` and `unusedSurfaceCount` (boundaries with consumers only) and `leaks`; `folders` maps each `--folder` to `{ score, bypassRate, unusedSurface, hiding }`. Each boundary has `dir`, `score`, `entries`, `surface`, `unused`, `unusedSurface`, `declared`, `hidden`, `hiding`, `incoming`, `bypassIn`, `bypassRate`, `leaks` and `noConsumers`; each edge `importer`, `target`, `via`, `names`, `ups`, `downs` and `bypass`; each leak `file`, `symbol`, `boundary` and `importers`. With `--base`, `diff` has `base`, `mergeBase`, the base's `totals`, `improved`, `regressed` and `removedWithoutMove` (each `{ importer, symbol, base, head, reason?, grew? }`, sides `{ target, bypass }` or `null`), `surface` (`{ dir, newModule, added, removed }`) and `leaks` (`{ added, removed }`).
 
 ### Modules and what to do about a pair
 
