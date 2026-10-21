@@ -48,6 +48,32 @@ enum Command {
     Report(ReportArgs),
     /// Find functions that share most of their parameter names, whatever they are called.
     Fns(FnsArgs),
+    /// Measure imports that bypass a directory's entry file, and how well boundaries hide internals.
+    Coupling(CouplingArgs),
+}
+
+#[derive(Args)]
+struct CouplingArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// Compare with the merge base of this ref and `--rev` (or HEAD): edge-matched changes.
+    #[arg(long)]
+    base: Option<String>,
+    /// Scan the tree at this ref, in a temporary worktree, instead of the working tree.
+    #[arg(long)]
+    rev: Option<String>,
+    /// Also print the score of the boundaries under this path, relative to DIR (repeatable).
+    #[arg(long = "folder")]
+    folders: Vec<String>,
+    /// List every cross-boundary edge, not only bypass edges.
+    #[arg(long)]
+    all_edges: bool,
+    /// How many boundaries, edges and leaks to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit everything as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -261,7 +287,8 @@ fn run(cli: Cli) -> Result<()> {
     | Command::Imports(ImportsArgs { scan, .. })
     | Command::Names(NamesArgs { scan, .. })
     | Command::Report(ReportArgs { scan, .. })
-    | Command::Fns(FnsArgs { scan, .. })) = &cli.command;
+    | Command::Fns(FnsArgs { scan, .. })
+    | Command::Coupling(CouplingArgs { scan, .. })) = &cli.command;
     let base = scan_base(&scan.path)?;
     let root = match &scan.root {
         Some(root) => root
@@ -274,6 +301,7 @@ fn run(cli: Cli) -> Result<()> {
     match &cli.command {
         Command::Imports(args) => return imports(args, &config, rules, &root, &base),
         Command::Report(args) => return report(args, &config, rules, &root, &base),
+        Command::Coupling(args) => return coupling(args, &config, rules, &root, &base),
         _ => {}
     }
     // Validate options and modules before scanning or truncating `--out`.
@@ -522,6 +550,80 @@ fn report(
         out.write_all(b"\n")?;
     } else {
         out.write_all(report::render_text(&report).as_bytes())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// `duped coupling`: the working tree or `--rev`, and with `--base` the merge base too, each
+/// scanned in its own temporary worktree with the same options.
+fn coupling(
+    args: &CouplingArgs,
+    config: &Config,
+    rules: Rules,
+    root: &Path,
+    base: &Path,
+) -> Result<()> {
+    // Validate refs before scanning or truncating `--out`.
+    let scanned = args.scan.path.canonicalize()?;
+    let rev = args
+        .rev
+        .as_deref()
+        .map(|r| report::commit(base, r))
+        .transpose()?;
+    let merge_base = args
+        .base
+        .as_deref()
+        .map(|b| report::merge_base(base, b, rev.as_deref().unwrap_or("HEAD")))
+        .transpose()?;
+    let at = |commit: Option<&str>| -> Result<analysis::coupling::Coupling> {
+        let worktree = commit.map(|c| report::Worktree::new(base, c)).transpose()?;
+        let map = |p: &Path| {
+            worktree
+                .as_ref()
+                .map_or_else(|| p.to_path_buf(), |w| w.map(p))
+        };
+        let (scanned, root) = (map(&scanned), map(root));
+        // A directory the branch added has nothing at the merge base.
+        if !scanned.exists() {
+            return Ok(Default::default());
+        }
+        let base = scan_base(&scanned)?;
+        let graph = modules::ModuleGraph::discover(&root, &config.modules)?;
+        let walk = walk_options(&args.scan, config, rules.clone(), &root, &base);
+        let files = walk::discover(&scanned, &walk)?;
+        let extraction = lang::extract_files(&files);
+        if extraction.skipped > 0 {
+            eprintln!("duped: skipped {} unreadable files", extraction.skipped);
+        }
+        let (imports, _) = lang::extract_imports(&files, |_| true);
+        Ok(analysis::coupling::analyze(
+            &base,
+            &graph,
+            &files,
+            imports,
+            &extraction.records,
+        ))
+    };
+    let head = at(rev.as_deref())?;
+    let before = merge_base.as_deref().map(|c| at(Some(c))).transpose()?;
+    let diff = before.as_ref().map(|b| analysis::coupling::diff(b, &head));
+    let shown = analysis::coupling::Output {
+        coupling: &head,
+        base: match (&args.base, &merge_base, &before, &diff) {
+            (Some(r), Some(c), Some(b), Some(d)) => Some((r.as_str(), c.as_str(), b, d)),
+            _ => None,
+        },
+        folders: &args.folders,
+        top: args.top,
+        all_edges: args.all_edges,
+    };
+    let mut out = output(&args.scan)?;
+    if args.json {
+        serde_json::to_writer_pretty(&mut out, &analysis::coupling::to_json(&shown))?;
+        out.write_all(b"\n")?;
+    } else {
+        out.write_all(analysis::coupling::render_text(&shown).as_bytes())?;
     }
     out.flush()?;
     Ok(())

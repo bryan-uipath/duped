@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -385,6 +385,70 @@ pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<HashSet<S
         .filter(|path| path.starts_with(scanned))
         .map(|path| modules::relative(dir, &path))
         .collect())
+}
+
+/// A detached checkout of one commit in a temporary directory, removed on drop.
+pub struct Worktree {
+    /// Canonical top of the checkout it was made from.
+    top: PathBuf,
+    path: PathBuf,
+}
+
+impl Worktree {
+    /// Check out `commit` (a full hash) of the git checkout containing `dir`.
+    pub fn new(dir: &Path, commit: &str) -> Result<Self> {
+        let top = git(&["rev-parse", "--show-toplevel"], dir)?;
+        let top = Path::new(top.trim())
+            .canonicalize()
+            .with_context(|| format!("cannot open git checkout {}", top.trim()))?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = std::env::temp_dir().join(format!("duped-rev-{}-{nanos}", std::process::id()));
+        let shown = path.display().to_string();
+        git(
+            &["worktree", "add", "--detach", "--quiet", &shown, commit],
+            &top,
+        )?;
+        // Canonical, so paths under it compare with canonical scan paths.
+        let path = path.canonicalize()?;
+        Ok(Worktree { top, path })
+    }
+
+    /// `path`, inside the checkout, at the same place in the worktree.
+    pub fn map(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.top)
+            .map_or_else(|_| path.to_path_buf(), |rel| self.path.join(rel))
+    }
+}
+
+impl Drop for Worktree {
+    fn drop(&mut self) {
+        let shown = self.path.display().to_string();
+        if git(&["worktree", "remove", "--force", &shown], &self.top).is_err() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+/// The commit `reference` names, from the checkout containing `dir`.
+pub fn commit(dir: &Path, reference: &str) -> Result<String> {
+    if reference.starts_with('-') {
+        bail!("`{reference}` is not a ref");
+    }
+    let spec = format!("{reference}^{{commit}}");
+    Ok(git(&["rev-parse", "--verify", "--quiet", &spec], dir)
+        .with_context(|| format!("unknown ref `{reference}`"))?
+        .trim()
+        .to_string())
+}
+
+/// The merge base of `a` and `b`.
+pub fn merge_base(dir: &Path, a: &str, b: &str) -> Result<String> {
+    if a.starts_with('-') {
+        bail!("--base `{a}` is not a ref");
+    }
+    Ok(git(&["merge-base", a, b], dir)?.trim().to_string())
 }
 
 fn git(args: &[&str], cwd: &Path) -> Result<String> {
