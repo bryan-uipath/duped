@@ -1321,8 +1321,7 @@ pub fn render_text(o: &Output) -> String {
         return out;
     }
 
-    let mut boundaries: Vec<&Boundary> = c.boundaries.iter().collect();
-    boundaries.sort_by(|a, b| a.score().total_cmp(&b.score()).then(a.dir.cmp(&b.dir)));
+    let boundaries = ranked(c);
     section(
         &mut out,
         "Boundaries, worst first",
@@ -1489,6 +1488,18 @@ fn totals_json(c: &Coupling) -> Value {
 }
 
 /// Everything, untruncated: `{ totals, folders, boundaries, edges, leaks, diff? }`.
+/// Worst first; ties (many boundaries score 0) by how reached-into they are.
+fn ranked(c: &Coupling) -> Vec<&Boundary> {
+    let mut boundaries: Vec<&Boundary> = c.boundaries.iter().collect();
+    boundaries.sort_by(|a, b| {
+        a.score()
+            .total_cmp(&b.score())
+            .then((b.bypass_in + b.leaks).cmp(&(a.bypass_in + a.leaks)))
+            .then(a.dir.cmp(&b.dir))
+    });
+    boundaries
+}
+
 pub fn to_json(o: &Output) -> Value {
     let c = o.coupling;
     let folders: serde_json::Map<String, Value> = o
@@ -1496,9 +1507,8 @@ pub fn to_json(o: &Output) -> Value {
         .iter()
         .map(|f| (f.clone(), json!(c.score(&folder_key(f)))))
         .collect();
-    let boundaries: Vec<Value> = c
-        .boundaries
-        .iter()
+    let boundaries: Vec<Value> = ranked(c)
+        .into_iter()
         .map(|b| {
             json!({
                 "dir": b.dir,
