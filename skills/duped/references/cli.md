@@ -19,10 +19,20 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
 | `duped report` | all four analyses at once, grouped by file pair (see SKILL.md) | all |
+| `duped coupling` | imports that bypass a directory's entry file, by depth; surface, hiding, leaks and a 0–1 score per boundary | TS/JS, Python, Rust |
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
 
 Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths are skipped by default.
+
+## Coupling
+
+`duped coupling [PATH] [--base REF] [--rev REF] [--folder P] [--all-edges]` measures, never gates. A boundary is a directory with an entry file (`index.*`, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`), a manifest, or the name `internal`. `bypass` counts boundaries entered after the first, plus 1 when the target isn't the entry: `../foo` → `foo/index.ts` is 0, `../foo/bar.ts` 1, `../foo/internal/x.ts` 2.
+
+- Headline: `totals.bypassRate` (bypassing ÷ cross-boundary imported symbols), `unusedSurface` (entry exports nobody outside imports), `score` (0–1, higher is better). `bypassCost` and `meanBypassDepth` are diagnostics only.
+- `--base REF`: `diff.improved` (shallower, moved, or importer deleted), `diff.regressed`, `diff.removedWithoutMove` (import gone, symbol still in place: likely copied or inlined; no credit), `diff.surface` (`newModule` marks boundaries absent at base), `diff.leaks`.
+- `--rev REF` scans a commit; combine with `--json` over `git rev-list --first-parent` for a history.
+- Not resolved: tsconfig `paths`, `require`, C# `using`.
 
 ## Dependency tags
 
