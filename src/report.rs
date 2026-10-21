@@ -392,6 +392,8 @@ pub struct Worktree {
     /// Canonical top of the checkout it was made from.
     top: PathBuf,
     path: PathBuf,
+    /// Empty directory used as `core.hooksPath` during checkout.
+    hooks: PathBuf,
 }
 
 impl Worktree {
@@ -406,13 +408,18 @@ impl Worktree {
             .map_or(0, |d| d.subsec_nanos());
         let path = std::env::temp_dir().join(format!("duped-rev-{}-{nanos}", std::process::id()));
         let shown = path.display().to_string();
-        // Hooks (post-checkout installs, etc.) don't belong in a scan. If `add` fails
-        // after checking out, or the path can't be canonicalized, the guard still removes it.
+        // Hooks don't belong in a scan, and the commit is untrusted: `hooksPath` is an empty
+        // directory of our own, outside the checkout, so nothing checked out can run. If
+        // `add` fails after checking out, or the path can't be canonicalized, the guard
+        // still removes both.
+        let hooks = path.with_file_name(format!("duped-hooks-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&hooks).context("cannot create hooks directory")?;
         let guard = Worktree {
             top,
             path: path.clone(),
+            hooks,
         };
-        let no_hooks = format!("core.hooksPath={}", path.join("no-hooks").display());
+        let no_hooks = format!("core.hooksPath={}", guard.hooks.display());
         git(
             &[
                 "-c", &no_hooks, "worktree", "add", "--detach", "--quiet", &shown, commit,
@@ -420,10 +427,9 @@ impl Worktree {
             &guard.top,
         )?;
         // Canonical, so paths under it compare with canonical scan paths.
-        let path = path.canonicalize()?;
-        let top = guard.top.clone();
-        std::mem::forget(guard);
-        Ok(Worktree { top, path })
+        let mut guard = guard;
+        guard.path = path.canonicalize()?;
+        Ok(guard)
     }
 
     /// `path`, inside the checkout, at the same place in the worktree.
@@ -439,6 +445,7 @@ impl Drop for Worktree {
         if git(&["worktree", "remove", "--force", &shown], &self.top).is_err() {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+        let _ = std::fs::remove_dir(&self.hooks);
     }
 }
 
