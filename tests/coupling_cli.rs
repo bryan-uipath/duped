@@ -172,6 +172,118 @@ fn typescript_workspace_scores_bypass_depth_and_leaks() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// `svc` exposes subpaths through an `exports` pattern into `dist/`, `lib` a `main` in
+/// `dist/`, and `pub` is published but imported by nothing here.
+fn packages(test: &str) -> PathBuf {
+    let root = temp(test);
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(&root, "package.json", r#"{"name":"mono","private":true}"#);
+    write(
+        &root,
+        "packages/svc/package.json",
+        r#"{"name":"@m/svc","exports":{"./*":{"types":"./dist/svc/src/*/index.d.ts","import":"./dist/*/index.js"}}}"#,
+    );
+    write(
+        &root,
+        "packages/svc/src/debug/index.ts",
+        "export { run } from './run';\n",
+    );
+    write(
+        &root,
+        "packages/svc/src/debug/run.ts",
+        "export function run() {}\n",
+    );
+    write(
+        &root,
+        "packages/svc/src/util/index.ts",
+        "export function util() {}\n",
+    );
+    write(
+        &root,
+        "packages/lib/package.json",
+        r#"{"name":"@m/lib","main":"./dist/index.cjs","types":"./dist/index.d.ts"}"#,
+    );
+    write(
+        &root,
+        "packages/lib/src/index.ts",
+        "export function lib() {}\n",
+    );
+    write(
+        &root,
+        "packages/lib/src/extra.ts",
+        "export function extra() {}\n",
+    );
+    write(
+        &root,
+        "packages/pub/package.json",
+        r#"{"name":"@m/pub","main":"index.ts"}"#,
+    );
+    write(
+        &root,
+        "packages/pub/index.ts",
+        "export function published() {}\n",
+    );
+    write(&root, "packages/app/package.json", r#"{"name":"@m/app"}"#);
+    write(
+        &root,
+        "packages/app/src/main.ts",
+        "import { run } from '@m/svc/debug';\nimport { lib } from '@m/lib';\nimport { extra } from '@m/lib/extra';\n",
+    );
+    root
+}
+
+#[test]
+fn package_exports_targets_are_entries() {
+    let root = packages("exports");
+    let report = json(&root, &[]);
+    // `@m/svc/debug` and `@m/lib` resolve, via `dist/` → `src/`, to entries: bypass 0.
+    assert_eq!(
+        edges(&report),
+        vec![e(
+            "packages/app/src/main.ts",
+            "packages/lib/src/extra.ts",
+            1
+        )]
+    );
+    let svc = boundary(&report, "packages/svc");
+    assert_eq!(
+        svc["entries"],
+        serde_json::json!([
+            "packages/svc/src/debug/index.ts",
+            "packages/svc/src/util/index.ts"
+        ])
+    );
+    assert_eq!(svc["surface"], serde_json::json!(["run", "util"]));
+    assert_eq!(svc["unused"], serde_json::json!(["util"]));
+    assert_eq!(
+        boundary(&report, "packages/lib")["entries"][0],
+        "packages/lib/src/index.ts"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn boundaries_nobody_imports_have_neutral_unused_surface() {
+    let root = packages("consumers");
+    let report = json(&root, &[]);
+    let published = boundary(&report, "packages/pub");
+    assert_eq!(published["noConsumers"], true);
+    // The raw count stays; the score ignores it.
+    assert_eq!(published["unusedSurface"], 1.0);
+    assert_eq!(published["score"], 1.0);
+    assert_eq!(boundary(&report, "packages/svc")["noConsumers"], false);
+    let text = text(&root, &[]);
+    assert!(
+        text.contains("1.00  packages/pub (no consumers)  surface 1 (unused 1)"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn python_resolves_absolute_relative_and_private_modules() {
     let root = temp("py");

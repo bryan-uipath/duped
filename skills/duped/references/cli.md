@@ -32,6 +32,8 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 - Headline: `totals.bypassRate` (bypassing ÷ cross-boundary imported symbols), `unusedSurface` (entry exports nobody outside imports), `score` (0–1, higher is better). `bypassCost` and `meanBypassDepth` are diagnostics only.
 - `--base REF`: `diff.improved` (shallower, moved, or importer deleted), `diff.regressed`, `diff.removedWithoutMove` (import gone, symbol still in place: likely copied or inlined; no credit), `diff.surface` (`newModule` marks boundaries absent at base), `diff.leaks`.
 - `--rev REF` scans a commit; combine with `--json` over `git rev-list --first-parent` for a history.
+- `package.json` `exports` (patterns too), `main`, `module` and `types` targets are entries; a missing `dist/` path is read under `src/`.
+- `noConsumers: true`: nothing in the scan imports the boundary, so its unused surface doesn't lower its score.
 - Not resolved: tsconfig `paths`, `require`, C# `using`.
 
 ## Dependency tags

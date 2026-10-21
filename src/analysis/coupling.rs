@@ -83,9 +83,19 @@ impl Boundary {
             ratio(self.hidden, self.declared)
         }
     }
+    /// Nothing outside imports it (an app root, a published package): usage is unknown.
+    pub fn no_consumers(&self) -> bool {
+        self.incoming == 0
+    }
     /// Geometric mean of `1 − bypassRate`, `1 − unusedSurface` and hiding; higher is better.
+    /// Without consumers, unused surface says nothing, so its term is 1.
     pub fn score(&self) -> f64 {
-        ((1.0 - self.bypass_rate()) * (1.0 - self.unused_rate()) * self.hiding()).cbrt()
+        let unused = if self.no_consumers() {
+            0.0
+        } else {
+            self.unused_rate()
+        };
+        ((1.0 - self.bypass_rate()) * (1.0 - unused) * self.hiding()).cbrt()
     }
 }
 
@@ -570,6 +580,9 @@ impl<'a> Tree<'a> {
                 }
                 entries.push(main);
             }
+            if tree.has_manifest(dir, "package.json") {
+                entries.extend(tree.export_entries(dir));
+            }
             entries.sort();
             entries.dedup();
             tree.boundaries.insert(dir.clone(), entries);
@@ -603,12 +616,19 @@ impl<'a> Tree<'a> {
             .map(String::from)
             .collect();
         entered.reverse();
+        // A package `exports` target is the package's entry, whatever lies between.
+        if let Some(door) = entered
+            .iter()
+            .position(|b| self.boundaries[b].iter().any(|e| e == target))
+        {
+            entered.truncate(door + 1);
+        }
         let Some(last) = entered.last() else {
             return (ups, 0, 0, Vec::new());
         };
         // A Python `_private` module is one more boundary, with no entry of its own.
         let private = is_private_python(target);
-        let at_entry = !private && self.boundaries[last].contains(&target.to_string());
+        let at_entry = !private && self.boundaries[last].iter().any(|e| e == target);
         let downs = entered.len() + usize::from(private);
         let bypass = downs - 1 + usize::from(!at_entry);
         if at_entry {
@@ -649,10 +669,7 @@ impl<'a> Tree<'a> {
         if self.files.contains(path) {
             return Some(path.to_string());
         }
-        let stem = SCRIPT
-            .iter()
-            .find_map(|ext| path.strip_suffix(ext))
-            .unwrap_or(path);
+        let stem = strip_script(path);
         SCRIPT
             .iter()
             .map(|ext| format!("{stem}{ext}"))
@@ -686,15 +703,24 @@ impl<'a> Tree<'a> {
             return self.package_entry(&dir);
         }
         let exported = self.package_json(&dir).and_then(|json| {
-            Some(
-                json.get("exports")?
-                    .get(format!("./{sub}"))?
-                    .as_str()?
-                    .to_string(),
-            )
+            let exports = json.get("exports")?.as_object()?;
+            let key = format!("./{sub}");
+            // `./*` patterns substitute the subpath into their target.
+            let (value, star) = exports.get(&key).map(|v| (v, None)).or_else(|| {
+                exports.iter().find_map(|(k, v)| {
+                    let (prefix, suffix) = k.split_once('*')?;
+                    let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                    Some((v, Some(star.to_string())))
+                })
+            })?;
+            let path = first_string(value)?;
+            Some(match star {
+                Some(star) => path.replace('*', &star),
+                None => path.to_string(),
+            })
         });
         exported
-            .and_then(|e| self.script_file(&normalize(&dir, &e)?))
+            .and_then(|e| self.export_file(&dir, &e))
             .or_else(|| self.script_file(&join(&dir, sub)))
             .or_else(|| self.script_file(&join(&dir, &format!("src/{sub}"))))
     }
@@ -704,19 +730,85 @@ impl<'a> Tree<'a> {
         serde_json::from_slice(&bytes).ok()
     }
 
-    /// `exports["."]`, `main` or `module`, else `index` or `src/index`.
+    /// `exports["."]`, `main`, `module` or `types`, else `index` or `src/index`.
     fn package_entry(&self, dir: &str) -> Option<String> {
         let json = self.package_json(dir).unwrap_or_default();
         let exports = json.get("exports").map(|e| e.get(".").unwrap_or(e));
-        let declared = [exports, json.get("main"), json.get("module")]
-            .into_iter()
-            .flatten()
-            .filter_map(first_string);
+        let declared = [
+            exports,
+            json.get("main"),
+            json.get("module"),
+            json.get("types"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(first_string);
         declared
-            .filter_map(|path| self.script_file(&normalize(dir, path)?))
+            .filter_map(|path| self.export_file(dir, path))
             .next()
             .or_else(|| self.script_file(&join(dir, "index")))
             .or_else(|| self.script_file(&join(dir, "src/index")))
+    }
+
+    /// Every file `main`, `module`, `types` or an `exports` path (`*` patterns too) names.
+    fn export_entries(&self, dir: &str) -> Vec<String> {
+        let Some(json) = self.package_json(dir) else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for key in ["main", "module", "types", "exports"] {
+            if let Some(value) = json.get(key) {
+                all_strings(value, &mut paths);
+            }
+        }
+        let mut found = Vec::new();
+        for path in paths {
+            if path.contains('*') {
+                found.extend(self.export_pattern(dir, path));
+            } else {
+                found.extend(self.export_file(dir, path));
+            }
+        }
+        found
+    }
+
+    /// A package path to a scanned file, trying `src/` for a missing `dist/` one:
+    /// `./dist/a/index.js` (or `.d.ts`) → `src/a/index.ts`.
+    fn export_file(&self, dir: &str, path: &str) -> Option<String> {
+        let path = normalize(dir, path)?;
+        let path = strip_declaration(&path);
+        self.script_file(path)
+            .or_else(|| self.script_file(&dist_to_src(dir, path)?))
+    }
+
+    /// Scanned files under `dir` an `exports` pattern such as `./dist/*/index.js` matches,
+    /// as written or mapped from `dist/` to `src/`.
+    fn export_pattern(&self, dir: &str, pattern: &str) -> Vec<String> {
+        let Some(path) = normalize(dir, pattern) else {
+            return Vec::new();
+        };
+        let stem = strip_script(strip_declaration(&path)).to_string();
+        let mut patterns = vec![stem.clone()];
+        patterns.extend(dist_to_src(dir, &stem));
+        let mut found = Vec::new();
+        for pattern in patterns {
+            let Some((prefix, suffix)) = pattern.split_once('*') else {
+                continue;
+            };
+            found.extend(
+                self.files
+                    .iter()
+                    .filter(|f| within(f, dir) && strip_script(f).len() < f.len())
+                    .filter(|f| {
+                        let stem = strip_script(f);
+                        stem.len() > prefix.len() + suffix.len()
+                            && stem.starts_with(prefix)
+                            && stem.ends_with(suffix)
+                    })
+                    .cloned(),
+            );
+        }
+        found
     }
 
     fn has_manifest(&self, dir: &str, name: &str) -> bool {
@@ -978,6 +1070,37 @@ fn is_entry_name(name: &str) -> bool {
             .is_some_and(|ext| SCRIPT.contains(&ext))
 }
 
+fn strip_script(path: &str) -> &str {
+    SCRIPT
+        .iter()
+        .find_map(|ext| path.strip_suffix(ext))
+        .unwrap_or(path)
+}
+
+/// `a/index.d.ts` → `a/index`.
+fn strip_declaration(path: &str) -> &str {
+    [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .find_map(|ext| path.strip_suffix(ext))
+        .unwrap_or(path)
+}
+
+/// `pkg/dist/a/index.js` → `pkg/src/a/index.js`: where built files usually come from.
+fn dist_to_src(dir: &str, path: &str) -> Option<String> {
+    let rest = path.strip_prefix(&join(dir, "dist/"))?;
+    Some(join(dir, &format!("src/{rest}")))
+}
+
+/// Every string in a `package.json` value, e.g. each condition of an `exports` map.
+fn all_strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Object(map) => map.values().for_each(|v| all_strings(v, out)),
+        Value::Array(list) => list.iter().for_each(|v| all_strings(v, out)),
+        _ => {}
+    }
+}
+
 fn is_private_python(file: &str) -> bool {
     let name = name_of(file);
     name.ends_with(".py") && name.starts_with('_') && !name.starts_with("__")
@@ -1207,9 +1330,14 @@ pub fn render_text(o: &Output) -> String {
         o.top,
         |b| {
             format!(
-                "{:.2}  {}  surface {} (unused {}), hiding {:.2} ({} of {} hidden), bypass in {} of {}, leaks {}",
+                "{:.2}  {}{}  surface {} (unused {}), hiding {:.2} ({} of {} hidden), bypass in {} of {}, leaks {}",
                 b.score(),
                 shown(&b.dir),
+                if b.no_consumers() {
+                    " (no consumers)"
+                } else {
+                    ""
+                },
                 b.surface.len(),
                 b.unused.len(),
                 b.hiding(),
@@ -1386,6 +1514,7 @@ pub fn to_json(o: &Output) -> Value {
                 "bypassIn": b.bypass_in,
                 "bypassRate": b.bypass_rate(),
                 "leaks": b.leaks,
+                "noConsumers": b.no_consumers(),
             })
         })
         .collect();
