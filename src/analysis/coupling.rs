@@ -1196,6 +1196,9 @@ pub struct Change {
     pub reason: &'static str,
     /// The importer grew by at least the symbol's base line span: likely pasted in.
     pub grew: bool,
+    /// Regressions only: how many other files already bypassed to this target and symbol at
+    /// base. Many means an established convention rather than a new kind of reach-in.
+    pub prior_importers: usize,
 }
 
 #[derive(Debug)]
@@ -1232,6 +1235,7 @@ pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
         after: side(after.get(key)),
         reason,
         grew,
+        prior_importers: 0,
     };
     let declares = |c: &Coupling, file: &str, name: &str| {
         c.declared.get(file).is_some_and(|d| d.contains_key(name))
@@ -1262,10 +1266,18 @@ pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
             }
         }
     }
+    // Bypassing importers per (target, symbol) at base, for `prior_importers`.
+    let mut prior: HashMap<(&str, &str), usize> = HashMap::new();
+    for ((_, name), (target, _)) in before.iter().filter(|(_, (_, d))| *d > 0) {
+        *prior.entry((target, name)).or_default() += 1;
+    }
     let mut regressed: Vec<Change> = after
         .iter()
         .filter(|(key, (_, now))| *now > 0 && before.get(*key).is_none_or(|(_, d)| d < now))
-        .map(|(key, _)| change(key, "", false))
+        .map(|(key, (target, _))| Change {
+            prior_importers: prior.get(&(target, key.1)).copied().unwrap_or_default(),
+            ..change(key, "", false)
+        })
         .collect();
     for list in [&mut improved, &mut regressed, &mut removed_without_move] {
         list.sort_by(|a, b| (&a.importer, &a.symbol).cmp(&(&b.importer, &b.symbol)));
@@ -1475,8 +1487,12 @@ fn render_diff(
             format!(" ({})", ch.reason)
         };
         let grew = if ch.grew { " (importer grew)" } else { "" };
+        let prior = match ch.prior_importers {
+            0 => String::new(),
+            n => format!(" ({n} prior importers)"),
+        };
         format!(
-            "{}#{}  {} -> {}{reason}{grew}",
+            "{}#{}  {} -> {}{reason}{grew}{prior}",
             ch.importer,
             ch.symbol,
             side(&ch.before),
@@ -1647,6 +1663,9 @@ pub fn to_json(o: &Output) -> Value {
                     }
                     if ch.grew {
                         v["grew"] = json!(true);
+                    }
+                    if ch.prior_importers > 0 {
+                        v["priorImporters"] = json!(ch.prior_importers);
                     }
                     v
                 })

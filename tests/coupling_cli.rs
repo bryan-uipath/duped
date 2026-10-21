@@ -608,13 +608,24 @@ fn base_delta_flags_new_modules_and_new_bypass_edges() {
         "src/orders/place.ts",
         &format!("import {{ send }} from '../notify/send';\n{place}"),
     );
+    // A second file reaching `charge` the way `place.ts` already did at base.
+    write(
+        &root,
+        "src/orders/cancel.ts",
+        "import { charge } from '../billing/charge';\nexport const cancel = () => charge();\n",
+    );
     commit(&root, "feature");
 
     let report = json(&root, &["--base", "main"]);
     let diff = &report["diff"];
     assert_eq!(diff["base"], "main");
-    assert_eq!(names(&diff["regressed"]), vec!["src/orders/place.ts#send"]);
-    assert_eq!(diff["regressed"][0]["head"]["bypass"], 1);
+    assert_eq!(
+        names(&diff["regressed"]),
+        vec!["src/orders/cancel.ts#charge", "src/orders/place.ts#send"]
+    );
+    assert_eq!(diff["regressed"][0]["priorImporters"], 1);
+    assert_eq!(diff["regressed"][1]["head"]["bypass"], 1);
+    assert!(diff["regressed"][1].get("priorImporters").is_none());
     let surface: Vec<(&str, bool, &Value)> = diff["surface"]
         .as_array()
         .unwrap()
@@ -635,13 +646,13 @@ fn base_delta_flags_new_modules_and_new_bypass_edges() {
         ]
     );
     assert_eq!(diff["leaks"]["added"][0]["symbol"], "send");
-    // Head totals are absolute: three bypassing symbols now.
-    assert_eq!(report["totals"]["bypassSymbols"], 3);
+    // Head totals are absolute: four bypassing symbols now.
+    assert_eq!(report["totals"]["bypassSymbols"], 4);
 
     let text = text(&root, &["--base", "main"]);
     assert!(
         text.contains(
-            "Regressed (1):\n  src/orders/place.ts#send  gone -> src/notify/send.ts bypass=1"
+            "Regressed (2):\n  src/orders/cancel.ts#charge  gone -> src/billing/charge.ts bypass=1 (1 prior importers)\n  src/orders/place.ts#send  gone -> src/notify/send.ts bypass=1"
         ),
         "{text}"
     );
