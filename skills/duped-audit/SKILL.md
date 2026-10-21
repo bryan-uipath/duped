@@ -31,11 +31,19 @@ Work through `groups` in order (most analyses agreeing first), reading both side
 duped coupling <dir> --top 20 --json > /tmp/duped-audit-coupling.json
 ```
 
-From `boundaries` (worst first) take the few with the most incoming bypass
-edges and leaks, ignoring `noConsumers` ones. For each, name the internal
-files most reached into (`edges` grouped by target) and the leaked symbols
-with the most importers. These are the consolidation targets; the fix
-workflow lives in `duped-coupling`.
+`totals.score` (0–1, higher is better) averages `1 − bypassRate`,
+`1 − unusedSurface` and `hiding`; report all four. `boundaries` is worst
+first. Skip `noConsumers` ones (nothing in the scan imports them). For the
+top few, say which term drags them down and name the evidence:
+
+- low `1 − bypassRate`, many `leaks`: internal files others reach into.
+  Group `edges` by target and `leaks` by symbol; the most-imported internals
+  are the consolidation targets.
+- high `unusedSurface`: the entry exports more than anyone uses; often a
+  barrel. List the unused names.
+- low `hiding`: most declarations are on the face or imported from outside.
+
+The fix workflow lives in `duped-coupling`.
 
 ## 5. Report, biggest cut first
 
@@ -43,7 +51,7 @@ Use the `duped` skill's report format, but rank by payoff (lines removable × ho
 
 ```
 net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <dir>, excluded: <globs>.
-coupling: score <s>, bypassRate <r>; hotspots: <boundary> (<n> bypass in, <m> leaks), …
+coupling: score <s> (bypassRate <b>, unusedSurface <u>, hiding <h>); hotspots: <boundary> (<n> bypass in, <m> leaks, <term>), …
 ```
 
 Afterwards, offer to persist what you learned in `duped.toml`: repeated exclusions as `[scan] exclude = [...]`, and confirmed-deliberate `bodies`/`types` pairs as `[[acknowledged]]` entries (`names` and `imports` don't apply acknowledgements).

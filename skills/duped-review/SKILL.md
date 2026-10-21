@@ -47,12 +47,23 @@ If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
 duped coupling <repo root> --base "$BASE" --json > "$REPORT.coupling"
 ```
 
-Read `diff` only. Scrutinize `regressed` (new or deeper reach past an entry
-file), `removedWithoutMove` (import dropped while the symbol stayed: likely
-copied or inlined; cross-check with the duplication groups), and `surface`
-entries without `newModule` (an existing module's API widened). Surface on a
-`newModule` is expected; mention it in one line. Report the head and base
-`score` and `bypassRate` with the delta. Measure only; no threshold fails a PR.
+Compares head against the merge base. `totals` is head, `diff.totals` is
+base. `score` and `hiding` are better higher; `bypassRate` and
+`unusedSurface` better lower. Flag everything that got worse:
+
+- `diff.regressed`: an import now reaches past an entry file, or deeper than
+  before. Recommend importing through the entry, or moving the symbol.
+- `diff.removedWithoutMove`: an import vanished but the symbol stayed put:
+  the code was likely copied or inlined (`grew: true` means the importer grew
+  by at least the symbol's size). Cross-check against the duplication groups.
+- `diff.surface` without `newModule`: an existing module's API widened. Ask
+  whether each new export is used outside the module; unused ones lower
+  `hiding` and raise `unusedSurface`. Surface on a `newModule` is expected;
+  note it in one line.
+- `diff.leaks.added`: an internal symbol gained an importer from outside.
+
+Report the four ratios before and after. Improvements (`diff.improved`,
+`leaks.removed`) get one line. Measure only; no threshold fails a PR.
 
 ## 4. Verify and report
 

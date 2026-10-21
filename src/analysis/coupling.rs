@@ -1451,13 +1451,15 @@ fn render_diff(
     let (was, now) = (&base.totals, &c.totals);
     writeln!(
         out,
-        "\nSince {reference} ({short}): score {:.2} -> {:.2}, bypassRate {:.2} -> {:.2}, unusedSurface {:.2} -> {:.2}, bypassCost {} -> {}.",
+        "\nSince {reference} ({short}): score {:.3} -> {:.3}, bypassRate {:.3} -> {:.3}, unusedSurface {:.3} -> {:.3}, hiding {:.3} -> {:.3}, bypassCost {} -> {}.",
         base.score(""),
         c.score(""),
         was.bypass_rate(),
         now.bypass_rate(),
         was.unused_surface_rate(),
         now.unused_surface_rate(),
+        hiding_of(was.hidden, was.declared),
+        hiding_of(now.hidden, now.declared),
         was.bypass_cost,
         now.bypass_cost
     )
