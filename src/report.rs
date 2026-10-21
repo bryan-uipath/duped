@@ -413,7 +413,8 @@ impl Worktree {
         // `add` fails after checking out, or the path can't be canonicalized, the guard
         // still removes both.
         let hooks = path.with_file_name(format!("duped-hooks-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&hooks).context("cannot create hooks directory")?;
+        // Exclusive: fails if something pre-created the (predictable) path to plant hooks.
+        private_dir(&hooks).context("cannot create hooks directory")?;
         let guard = Worktree {
             top,
             path: path.clone(),
@@ -447,6 +448,17 @@ impl Drop for Worktree {
         }
         let _ = std::fs::remove_dir(&self.hooks);
     }
+}
+
+/// Creates `dir`, failing if it exists; owner-only on Unix.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// The commit `reference` names, from the checkout containing `dir`.
