@@ -277,23 +277,35 @@ fn typescript_resolves_tsconfig_paths() {
     write(
         &root,
         "tsconfig.base.json",
-        "{\n  // shared\n  \"compilerOptions\": { \"baseUrl\": \"packages\", },\n}\n",
+        "\u{feff}{\n  // shared\n  \"compilerOptions\": { \"baseUrl\": \"packages\", },\n}\n",
+    );
+    // No `baseUrl` here: targets are relative to the one `tsconfig.json` inherits.
+    write(
+        &root,
+        "packages/app/paths.json",
+        r#"{
+  /* aliases */
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["app/src/*"], // self
+      "@lib/*": ["lib/src/*"],
+      "@lib/special": ["lib/src/index.ts"],
+      "@m/lib": ["lib/src/extra.ts"],
+      "*": ["types/*"],
+    },
+  },
+}"#,
     );
     write(
         &root,
         "packages/app/tsconfig.json",
-        r#"{
-  /* aliases */
-  "extends": "../../tsconfig.base",
-  "compilerOptions": {
-    "paths": {
-      "@/*": ["./src/*"], // self
-      "@lib/*": ["../lib/src/*"],
-      "@lib/special": ["../lib/src/index.ts"],
-      "@m/lib": ["../lib/src/extra.ts"],
-    },
-  },
-}"#,
+        r#"{"extends": ["./paths", "../../tsconfig.base"]}"#,
+    );
+    // Ignored: `tsconfig.json` comes first.
+    write(
+        &root,
+        "packages/app/jsconfig.json",
+        r#"{"compilerOptions":{"paths":{"@/*":["./src/feature/index.ts"]}}}"#,
     );
     write(
         &root,
@@ -327,7 +339,8 @@ fn typescript_resolves_tsconfig_paths() {
         .collect();
     got.sort();
     let main = "packages/app/src/main.ts";
-    // An exact pattern beats `@lib/*`; `paths` beats the `@m/lib` package name.
+    // An exact pattern beats `@lib/*`; `paths` beats the `@m/lib` package name; `svc/src/util`
+    // misses `*` → `types/*` and falls back to `baseUrl`.
     let want = [
         "packages/app/src/feature/deep.ts",
         "packages/lib/src/extra.ts",

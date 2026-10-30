@@ -604,11 +604,16 @@ impl<'a> Tree<'a> {
             if !configs.is_empty() {
                 // `tsconfig.json` decides; `tsconfig.app.json` and the like fill in.
                 configs.sort_by_key(|n| {
-                    (!matches!(n.as_str(), "tsconfig.json" | "jsconfig.json"), *n)
+                    let rank = match n.as_str() {
+                        "tsconfig.json" => 0,
+                        "jsconfig.json" => 1,
+                        _ => 2,
+                    };
+                    (rank, *n)
                 });
                 let found = configs
                     .into_iter()
-                    .filter_map(|n| load_aliases(base, &join(d, n), 0))
+                    .filter_map(|n| load_aliases(base, &join(d, n)))
                     .collect();
                 aliases.insert(d.clone(), found);
             }
@@ -758,26 +763,19 @@ impl<'a> Tree<'a> {
         let configs = std::iter::successors(Some(dir_of(importer)), |d| parent(d))
             .find_map(|d| self.aliases.get(d))?;
         configs.iter().find_map(|config| {
-            let matched = config
-                .paths
-                .iter()
-                .filter_map(|(pattern, targets)| {
-                    let Some((prefix, suffix)) = pattern.split_once('*') else {
-                        return (pattern == spec).then_some((usize::MAX, targets, ""));
-                    };
-                    let star = spec.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                    Some((prefix.len(), targets, star))
+            // A matched pattern whose targets all miss falls back to `baseUrl`.
+            best_match(config.paths.iter().map(|(p, _)| p.as_str()), spec)
+                .and_then(|(pattern, star)| {
+                    let (_, targets) = config.paths.iter().find(|(p, _)| p == pattern)?;
+                    targets.iter().find_map(|t| {
+                        let t = star.map_or(t.clone(), |star| t.replacen('*', star, 1));
+                        self.script_file(strip_declaration(&t))
+                    })
                 })
-                .max_by_key(|(rank, _, _)| *rank);
-            match matched {
-                Some((_, targets, star)) => targets
-                    .iter()
-                    .find_map(|t| self.script_file(strip_declaration(&t.replacen('*', star, 1)))),
-                None => config
-                    .base_url
-                    .as_ref()
-                    .and_then(|url| self.script_file(&join(url, spec))),
-            }
+                .or_else(|| {
+                    let url = config.base_url.as_ref()?;
+                    self.script_file(&join(url, spec))
+                })
         })
     }
 
@@ -823,18 +821,9 @@ impl<'a> Tree<'a> {
             let exports = json.get("exports")?.as_object()?;
             let key = format!("./{sub}");
             // `./*` patterns substitute the subpath into their target.
-            let (value, star) = exports.get(&key).map(|v| (v, None)).or_else(|| {
-                exports.iter().find_map(|(k, v)| {
-                    let (prefix, suffix) = k.split_once('*')?;
-                    let star = key.strip_prefix(prefix)?.strip_suffix(suffix)?;
-                    Some((v, Some(star.to_string())))
-                })
-            })?;
-            let path = first_string(value)?;
-            Some(match star {
-                Some(star) => path.replace('*', &star),
-                None => path.to_string(),
-            })
+            let (pattern, star) = best_match(exports.keys().map(String::as_str), &key)?;
+            let path = first_string(&exports[pattern])?;
+            Some(star.map_or(path.to_string(), |star| path.replace('*', star)))
         });
         exported
             .and_then(|e| self.export_file(&dir, &e))
@@ -1228,60 +1217,103 @@ fn is_tsconfig(name: &str) -> bool {
 
 /// The `paths` and `baseUrl` in force for `config`, following relative `extends`.
 /// `None` when it sets neither.
-fn load_aliases(base: &Path, config: &str, depth: usize) -> Option<Aliases> {
+fn load_aliases(base: &Path, config: &str) -> Option<Aliases> {
+    let Inherited { paths, base_url } = inherited(base, config, &mut HashSet::new())?;
+    // Targets are relative to the effective `baseUrl`, else to the tsconfig declaring them.
+    let paths = paths.map_or_else(Vec::new, |(dir, paths)| {
+        let from = base_url.clone().unwrap_or(dir);
+        paths
+            .into_iter()
+            .map(|(pattern, targets)| {
+                let targets = targets
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|t| normalize(&from, t.as_str()?))
+                    .collect();
+                (pattern, targets)
+            })
+            .collect()
+    });
+    (!paths.is_empty() || base_url.is_some()).then_some(Aliases { paths, base_url })
+}
+
+/// A tsconfig's `paths` (with the directory declaring them) and `baseUrl`, after `extends`.
+#[derive(Default)]
+struct Inherited {
+    paths: Option<(String, serde_json::Map<String, Value>)>,
+    base_url: Option<String>,
+}
+
+/// Each setting comes from `config`, else the last `extends` entry setting it.
+/// `seen` stops cycles and repeat reads.
+fn inherited(base: &Path, config: &str, seen: &mut HashSet<String>) -> Option<Inherited> {
+    if !seen.insert(config.to_string()) {
+        return None;
+    }
     let json = read_jsonc(&base.join(config))?;
     let dir = dir_of(config);
-    let options = json.get("compilerOptions");
-    let base_url = options
-        .and_then(|o| o.get("baseUrl")?.as_str())
-        .and_then(|url| normalize(dir, url));
-    let paths = options
-        .and_then(|o| o.get("paths")?.as_object())
-        .map(|paths| {
-            // Targets are relative to `baseUrl`, else to the tsconfig declaring them.
-            let from = base_url.clone().unwrap_or_else(|| dir.to_string());
-            paths
-                .iter()
-                .map(|(pattern, targets)| {
-                    let targets = targets
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|t| normalize(&from, t.as_str()?))
-                        .collect();
-                    (pattern.clone(), targets)
-                })
-                .collect()
-        });
-    // A child's `paths` or `baseUrl` replaces its parent's; the last `extends` wins.
-    let parent = match json.get("extends") {
+    let extends = match json.get("extends") {
         Some(Value::String(s)) => vec![s.as_str()],
         Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
-    }
-    .into_iter()
-    .rev()
-    .filter(|e| e.starts_with('.') && depth < 8)
-    .find_map(|e| {
-        let path = normalize(dir, e)?;
+    };
+    let mut merged = Inherited::default();
+    for e in extends.into_iter().filter(|e| e.starts_with('.')) {
+        let Some(path) = normalize(dir, e) else {
+            continue;
+        };
         let path = if path.ends_with(".json") {
             path
         } else {
             format!("{path}.json")
         };
-        load_aliases(base, &path, depth + 1)
-    })
-    .unwrap_or_default();
-    let aliases = Aliases {
-        paths: paths.unwrap_or(parent.paths),
-        base_url: base_url.or(parent.base_url),
-    };
-    (!aliases.paths.is_empty() || aliases.base_url.is_some()).then_some(aliases)
+        if let Some(parent) = inherited(base, &path, seen) {
+            merged.paths = parent.paths.or(merged.paths);
+            merged.base_url = parent.base_url.or(merged.base_url);
+        }
+    }
+    let options = json.get("compilerOptions");
+    if let Some(paths) = options.and_then(|o| o.get("paths")?.as_object()) {
+        merged.paths = Some((dir.to_string(), paths.clone()));
+    }
+    if let Some(url) = options.and_then(|o| o.get("baseUrl")?.as_str()) {
+        merged.base_url = normalize(dir, url);
+    }
+    Some(merged)
+}
+
+/// The pattern `spec` matches: an exact one, else the longest prefix before a `*`, with
+/// what the `*` stands for. `@/*` matches `@/a/b` with `a/b`.
+fn best_match<'p, 's>(
+    patterns: impl Iterator<Item = &'p str>,
+    spec: &'s str,
+) -> Option<(&'p str, Option<&'s str>)> {
+    let mut best: Option<(usize, &'p str, Option<&'s str>)> = None;
+    for pattern in patterns {
+        let Some((prefix, suffix)) = pattern.split_once('*') else {
+            if pattern == spec {
+                return Some((pattern, None));
+            }
+            continue;
+        };
+        let Some(star) = spec
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_suffix(suffix))
+        else {
+            continue;
+        };
+        if best.is_none_or(|(len, _, _)| prefix.len() > len) {
+            best = Some((prefix.len(), pattern, Some(star)));
+        }
+    }
+    best.map(|(_, pattern, star)| (pattern, star))
 }
 
 /// JSON with `//` and `/* */` comments and trailing commas, as tsconfigs allow.
 fn read_jsonc(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
