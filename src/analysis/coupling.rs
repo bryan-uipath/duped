@@ -1218,7 +1218,7 @@ fn is_tsconfig(name: &str) -> bool {
 /// The `paths` and `baseUrl` in force for `config`, following relative `extends`.
 /// `None` when it sets neither.
 fn load_aliases(base: &Path, config: &str) -> Option<Aliases> {
-    let Inherited { paths, base_url } = inherited(base, config, &mut HashSet::new())?;
+    let Inherited { paths, base_url } = inherited(base, config, &mut HashSet::new(), 0)?;
     // Targets are relative to the effective `baseUrl`, else to the tsconfig declaring them.
     let paths = paths.map_or_else(Vec::new, |(dir, paths)| {
         let from = base_url.clone().unwrap_or(dir);
@@ -1246,9 +1246,14 @@ struct Inherited {
 }
 
 /// Each setting comes from `config`, else the last `extends` entry setting it.
-/// `seen` stops cycles and repeat reads.
-fn inherited(base: &Path, config: &str, seen: &mut HashSet<String>) -> Option<Inherited> {
-    if !seen.insert(config.to_string()) {
+/// `seen` stops cycles and repeat reads; `depth` stops long chains.
+fn inherited(
+    base: &Path,
+    config: &str,
+    seen: &mut HashSet<String>,
+    depth: usize,
+) -> Option<Inherited> {
+    if depth > 16 || !seen.insert(config.to_string()) {
         return None;
     }
     let json = read_jsonc(&base.join(config))?;
@@ -1268,7 +1273,7 @@ fn inherited(base: &Path, config: &str, seen: &mut HashSet<String>) -> Option<In
         } else {
             format!("{path}.json")
         };
-        if let Some(parent) = inherited(base, &path, seen) {
+        if let Some(parent) = inherited(base, &path, seen, depth + 1) {
             merged.paths = parent.paths.or(merged.paths);
             merged.base_url = parent.base_url.or(merged.base_url);
         }
