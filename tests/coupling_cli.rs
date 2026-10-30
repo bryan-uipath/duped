@@ -270,6 +270,82 @@ fn package_exports_targets_are_entries() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// `app` imports through tsconfig `paths` (JSONC, `extends`, a `tsconfig.app.json`) and `baseUrl`.
+#[test]
+fn typescript_resolves_tsconfig_paths() {
+    let root = packages("tsconfig");
+    write(
+        &root,
+        "tsconfig.base.json",
+        "{\n  // shared\n  \"compilerOptions\": { \"baseUrl\": \"packages\", },\n}\n",
+    );
+    write(
+        &root,
+        "packages/app/tsconfig.json",
+        r#"{
+  /* aliases */
+  "extends": "../../tsconfig.base",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"], // self
+      "@lib/*": ["../lib/src/*"],
+      "@lib/special": ["../lib/src/index.ts"],
+      "@m/lib": ["../lib/src/extra.ts"],
+    },
+  },
+}"#,
+    );
+    write(
+        &root,
+        "packages/app/tsconfig.app.json",
+        r##"{"compilerOptions":{"paths":{"#pub":["../pub/index.ts"]}}}"##,
+    );
+    write(
+        &root,
+        "packages/app/src/feature/index.ts",
+        "export { deep } from './deep';\n",
+    );
+    write(
+        &root,
+        "packages/app/src/feature/deep.ts",
+        "export function deep() {}\n",
+    );
+    write(
+        &root,
+        "packages/app/src/main.ts",
+        "import { deep } from '@/feature/deep';\nimport { extra } from '@lib/extra';\nimport { lib } from '@lib/special';\nimport { lib as viaPaths } from '@m/lib';\nimport { published } from '#pub';\nimport { util } from 'svc/src/util';\n",
+    );
+    let report = json(&root, &["--all-edges"]);
+    let mut got: Vec<(String, String)> = report["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            let s = |k: &str| e[k].as_str().unwrap().to_string();
+            (s("importer"), s("target"))
+        })
+        .collect();
+    got.sort();
+    let main = "packages/app/src/main.ts";
+    // An exact pattern beats `@lib/*`; `paths` beats the `@m/lib` package name.
+    let want = [
+        "packages/app/src/feature/deep.ts",
+        "packages/lib/src/extra.ts",
+        "packages/lib/src/index.ts",
+        "packages/pub/index.ts",
+        "packages/svc/src/util/index.ts",
+    ];
+    assert_eq!(
+        got.iter()
+            .filter(|(i, _)| i == main)
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>(),
+        want,
+        "{report}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 #[test]
 fn boundaries_nobody_imports_have_neutral_unused_surface() {
     let root = packages("consumers");

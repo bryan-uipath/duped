@@ -126,4 +126,4 @@ Each step ships on its own.
 10. Regression suite: reproduce the findings of the original monorepo audit.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.
 12. `report`: every analysis grouped by file pair, diff-filtered with `--base`.
-13. `coupling`: API-bypass depth, surface, hiding and leaks per boundary, with edge-matched `--base` deltas and `--rev` for history. Next: C# `using` → namespace directories, tsconfig `paths`.
+13. `coupling`: API-bypass depth, surface, hiding and leaks per boundary, with edge-matched `--base` deltas and `--rev` for history. Next: C# `using` → namespace directories.

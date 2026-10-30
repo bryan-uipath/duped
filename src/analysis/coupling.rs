@@ -558,6 +558,16 @@ struct Tree<'a> {
     passthrough: HashSet<String>,
     /// Where absolute Python imports start.
     python_roots: Vec<String>,
+    /// Directory → its tsconfigs' `paths`, `tsconfig.json` first.
+    aliases: HashMap<String, Vec<Aliases>>,
+}
+
+/// A tsconfig's effective `paths` and `baseUrl`, after `extends`.
+#[derive(Default)]
+struct Aliases {
+    /// `(pattern, targets)`, targets relative to the scanned directory.
+    paths: Vec<(String, Vec<String>)>,
+    base_url: Option<String>,
 }
 
 impl<'a> Tree<'a> {
@@ -572,18 +582,37 @@ impl<'a> Tree<'a> {
                 dir = parent(d);
             }
         }
-        let manifests: HashMap<String, Vec<String>> = dirs
-            .iter()
-            .filter_map(|d| {
-                let names: Vec<String> = std::fs::read_dir(base.join(d))
-                    .ok()?
-                    .flatten()
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| MANIFESTS.contains(&n.as_str()) || n.ends_with(".csproj"))
+        let mut manifests: HashMap<String, Vec<String>> = HashMap::new();
+        let mut aliases: HashMap<String, Vec<Aliases>> = HashMap::new();
+        for d in &dirs {
+            let Ok(read) = std::fs::read_dir(base.join(d)) else {
+                continue;
+            };
+            let names: Vec<String> = read
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            let found: Vec<String> = names
+                .iter()
+                .filter(|n| MANIFESTS.contains(&n.as_str()) || n.ends_with(".csproj"))
+                .cloned()
+                .collect();
+            if !found.is_empty() {
+                manifests.insert(d.clone(), found);
+            }
+            let mut configs: Vec<&String> = names.iter().filter(|n| is_tsconfig(n)).collect();
+            if !configs.is_empty() {
+                // `tsconfig.json` decides; `tsconfig.app.json` and the like fill in.
+                configs.sort_by_key(|n| {
+                    (!matches!(n.as_str(), "tsconfig.json" | "jsconfig.json"), *n)
+                });
+                let found = configs
+                    .into_iter()
+                    .filter_map(|n| load_aliases(base, &join(d, n), 0))
                     .collect();
-                (!names.is_empty()).then(|| (d.clone(), names))
-            })
-            .collect();
+                aliases.insert(d.clone(), found);
+            }
+        }
         // The scan root, Python projects and their `src/`, and the parents of top-level packages.
         let inits: BTreeSet<&str> = files
             .iter()
@@ -613,6 +642,7 @@ impl<'a> Tree<'a> {
             boundaries: BTreeMap::new(),
             passthrough: HashSet::new(),
             python_roots: roots.into_iter().collect(),
+            aliases,
         };
         let mut by_dir: HashMap<&str, Vec<String>> = HashMap::new();
         for file in tree.files.iter().filter(|f| is_entry_name(name_of(f))) {
@@ -710,7 +740,7 @@ impl<'a> Tree<'a> {
                 let target = if spec.starts_with('.') {
                     normalize(dir_of(importer), spec).and_then(|p| self.script_file(&p))
                 } else {
-                    self.package(spec)
+                    self.aliased(importer, spec).or_else(|| self.package(spec))
                 };
                 target
                     .map(|t| (t, import.names.clone()))
@@ -721,6 +751,35 @@ impl<'a> Tree<'a> {
     }
 
     // ----- TypeScript / JavaScript -----
+
+    /// `spec` through the nearest tsconfig's `paths`, else from its `baseUrl`, as `tsc` does:
+    /// an exact pattern wins, then the longest prefix before `*`.
+    fn aliased(&self, importer: &str, spec: &str) -> Option<String> {
+        let configs = std::iter::successors(Some(dir_of(importer)), |d| parent(d))
+            .find_map(|d| self.aliases.get(d))?;
+        configs.iter().find_map(|config| {
+            let matched = config
+                .paths
+                .iter()
+                .filter_map(|(pattern, targets)| {
+                    let Some((prefix, suffix)) = pattern.split_once('*') else {
+                        return (pattern == spec).then_some((usize::MAX, targets, ""));
+                    };
+                    let star = spec.strip_prefix(prefix)?.strip_suffix(suffix)?;
+                    Some((prefix.len(), targets, star))
+                })
+                .max_by_key(|(rank, _, _)| *rank);
+            match matched {
+                Some((_, targets, star)) => targets
+                    .iter()
+                    .find_map(|t| self.script_file(strip_declaration(&t.replacen('*', star, 1)))),
+                None => config
+                    .base_url
+                    .as_ref()
+                    .and_then(|url| self.script_file(&join(url, spec))),
+            }
+        })
+    }
 
     /// `path` as written, or with a script extension, or its `index`.
     fn script_file(&self, path: &str) -> Option<String> {
@@ -1157,6 +1216,127 @@ fn all_strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
         Value::Array(list) => list.iter().for_each(|v| all_strings(v, out)),
         _ => {}
     }
+}
+
+/// `tsconfig.json`, `tsconfig.app.json`, `jsconfig.json`, …
+fn is_tsconfig(name: &str) -> bool {
+    name == "jsconfig.json"
+        || name
+            .strip_prefix("tsconfig")
+            .is_some_and(|rest| rest == ".json" || rest.starts_with('.') && rest.ends_with(".json"))
+}
+
+/// The `paths` and `baseUrl` in force for `config`, following relative `extends`.
+/// `None` when it sets neither.
+fn load_aliases(base: &Path, config: &str, depth: usize) -> Option<Aliases> {
+    let json = read_jsonc(&base.join(config))?;
+    let dir = dir_of(config);
+    let options = json.get("compilerOptions");
+    let base_url = options
+        .and_then(|o| o.get("baseUrl")?.as_str())
+        .and_then(|url| normalize(dir, url));
+    let paths = options
+        .and_then(|o| o.get("paths")?.as_object())
+        .map(|paths| {
+            // Targets are relative to `baseUrl`, else to the tsconfig declaring them.
+            let from = base_url.clone().unwrap_or_else(|| dir.to_string());
+            paths
+                .iter()
+                .map(|(pattern, targets)| {
+                    let targets = targets
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|t| normalize(&from, t.as_str()?))
+                        .collect();
+                    (pattern.clone(), targets)
+                })
+                .collect()
+        });
+    // A child's `paths` or `baseUrl` replaces its parent's; the last `extends` wins.
+    let parent = match json.get("extends") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .rev()
+    .filter(|e| e.starts_with('.') && depth < 8)
+    .find_map(|e| {
+        let path = normalize(dir, e)?;
+        let path = if path.ends_with(".json") {
+            path
+        } else {
+            format!("{path}.json")
+        };
+        load_aliases(base, &path, depth + 1)
+    })
+    .unwrap_or_default();
+    let aliases = Aliases {
+        paths: paths.unwrap_or(parent.paths),
+        base_url: base_url.or(parent.base_url),
+    };
+    (!aliases.paths.is_empty() || aliases.base_url.is_some()).then_some(aliases)
+}
+
+/// JSON with `//` and `/* */` comments and trailing commas, as tsconfigs allow.
+fn read_jsonc(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                out.push(c);
+                while let Some(c) = chars.next() {
+                    out.push(c);
+                    match c {
+                        '\\' => out.extend(chars.next()),
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.find(|&c| c == '\n');
+                out.push('\n');
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    serde_json::from_str(&out)
+        .ok()
+        .or_else(|| serde_json::from_str(&without_trailing_commas(&out)).ok())
+}
+
+/// `[1, 2,]` → `[1, 2]`, leaving commas inside strings alone.
+fn without_trailing_commas(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in json.char_indices() {
+        if in_string {
+            in_string = escaped || c != '"';
+            escaped = !escaped && c == '\\';
+        } else if c == '"' {
+            in_string = true;
+        } else if c == ',' && matches!(json[i + 1..].trim_start().chars().next(), Some('}' | ']')) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn is_private_python(file: &str) -> bool {
@@ -1712,6 +1892,16 @@ mod tests {
         );
         assert_eq!(module_dir("src/a/b.rs"), "src/a/b");
         assert_eq!(module_dir("src/a/mod.rs"), "src/a");
+    }
+
+    #[test]
+    fn tsconfig_names_and_jsonc() {
+        assert!(is_tsconfig("tsconfig.json") && is_tsconfig("tsconfig.app.json"));
+        assert!(is_tsconfig("jsconfig.json") && !is_tsconfig("tsconfigs.json"));
+        assert_eq!(
+            without_trailing_commas(r#"{"a": [1, ","  ,], "b": 2 ,}"#),
+            r#"{"a": [1, ","  ], "b": 2 }"#
+        );
     }
 
     #[test]
