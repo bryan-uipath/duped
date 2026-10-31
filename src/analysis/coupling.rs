@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use rayon::prelude::*;
 use serde_json::{Value, json};
@@ -565,9 +565,9 @@ struct Tree<'a> {
 /// A tsconfig's effective `paths` and `baseUrl`, after `extends`.
 #[derive(Default)]
 struct Aliases {
-    /// `(pattern, targets)`, targets relative to the scanned directory.
-    paths: Vec<(String, Vec<String>)>,
-    base_url: Option<String>,
+    /// `(pattern, targets)`; absolute, since a config may sit above the scanned directory.
+    paths: Vec<(String, Vec<PathBuf>)>,
+    base_url: Option<PathBuf>,
 }
 
 impl<'a> Tree<'a> {
@@ -613,7 +613,7 @@ impl<'a> Tree<'a> {
                 });
                 let found = configs
                     .into_iter()
-                    .filter_map(|n| load_aliases(base, &join(d, n)))
+                    .filter_map(|n| load_aliases(&base.join(d).join(n)))
                     .collect();
                 aliases.insert(d.clone(), found);
             }
@@ -768,15 +768,24 @@ impl<'a> Tree<'a> {
                 .and_then(|(pattern, star)| {
                     let (_, targets) = config.paths.iter().find(|(p, _)| p == pattern)?;
                     targets.iter().find_map(|t| {
-                        let t = star.map_or(t.clone(), |star| t.replacen('*', star, 1));
-                        self.script_file(strip_declaration(&t))
+                        let t = t.to_string_lossy();
+                        let t = star.map_or(t.to_string(), |star| t.replacen('*', star, 1));
+                        self.script_file(strip_declaration(&self.inside(Path::new(&t))?))
                     })
                 })
                 .or_else(|| {
                     let url = config.base_url.as_ref()?;
-                    self.script_file(&join(url, spec))
+                    self.script_file(&self.inside(&url.join(spec))?)
                 })
         })
+    }
+
+    /// An absolute path as a scanned path, `None` outside the scanned directory.
+    fn inside(&self, path: &Path) -> Option<String> {
+        let rest = clean(path);
+        let rest = rest.strip_prefix(self.base).ok()?;
+        let parts: Option<Vec<&str>> = rest.iter().map(|c| c.to_str()).collect();
+        Some(parts?.join("/"))
     }
 
     /// `path` as written, or with a script extension, or its `index`.
@@ -1215,10 +1224,10 @@ fn is_tsconfig(name: &str) -> bool {
             .is_some_and(|rest| rest == ".json" || rest.starts_with('.') && rest.ends_with(".json"))
 }
 
-/// The `paths` and `baseUrl` in force for `config`, following relative `extends`.
-/// `None` when it sets neither.
-fn load_aliases(base: &Path, config: &str) -> Option<Aliases> {
-    let Inherited { paths, base_url } = inherited(base, config, &mut HashSet::new(), 0)?;
+/// The `paths` and `baseUrl` in force for `config`, following relative `extends`, even to
+/// configs above the scanned directory. `None` when it sets neither.
+fn load_aliases(config: &Path) -> Option<Aliases> {
+    let Inherited { paths, base_url } = inherited(config, &mut HashSet::new(), 0)?;
     // Targets are relative to the effective `baseUrl`, else to the tsconfig declaring them.
     let paths = paths.map_or_else(Vec::new, |(dir, paths)| {
         let from = base_url.clone().unwrap_or(dir);
@@ -1229,7 +1238,7 @@ fn load_aliases(base: &Path, config: &str) -> Option<Aliases> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|t| normalize(&from, t.as_str()?))
+                    .filter_map(|t| Some(clean(&from.join(t.as_str()?))))
                     .collect();
                 (pattern, targets)
             })
@@ -1241,23 +1250,18 @@ fn load_aliases(base: &Path, config: &str) -> Option<Aliases> {
 /// A tsconfig's `paths` (with the directory declaring them) and `baseUrl`, after `extends`.
 #[derive(Default)]
 struct Inherited {
-    paths: Option<(String, serde_json::Map<String, Value>)>,
-    base_url: Option<String>,
+    paths: Option<(PathBuf, serde_json::Map<String, Value>)>,
+    base_url: Option<PathBuf>,
 }
 
 /// Each setting comes from `config`, else the last `extends` entry setting it.
 /// `seen` stops cycles and repeat reads; `depth` stops long chains.
-fn inherited(
-    base: &Path,
-    config: &str,
-    seen: &mut HashSet<String>,
-    depth: usize,
-) -> Option<Inherited> {
-    if depth > 16 || !seen.insert(config.to_string()) {
+fn inherited(config: &Path, seen: &mut HashSet<PathBuf>, depth: usize) -> Option<Inherited> {
+    if depth > 16 || !seen.insert(config.to_path_buf()) {
         return None;
     }
-    let json = read_jsonc(&base.join(config))?;
-    let dir = dir_of(config);
+    let json = read_jsonc(config)?;
+    let dir = config.parent()?;
     let extends = match json.get("extends") {
         Some(Value::String(s)) => vec![s.as_str()],
         Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).collect(),
@@ -1265,27 +1269,40 @@ fn inherited(
     };
     let mut merged = Inherited::default();
     for e in extends.into_iter().filter(|e| e.starts_with('.')) {
-        let Some(path) = normalize(dir, e) else {
-            continue;
-        };
-        let path = if path.ends_with(".json") {
-            path
-        } else {
-            format!("{path}.json")
-        };
-        if let Some(parent) = inherited(base, &path, seen, depth + 1) {
+        // `./base` → `./base.json`, as `tsc` does.
+        let mut path = clean(&dir.join(e)).into_os_string();
+        if !path.to_string_lossy().ends_with(".json") {
+            path.push(".json");
+        }
+        let path = PathBuf::from(path);
+        if let Some(parent) = inherited(&path, seen, depth + 1) {
             merged.paths = parent.paths.or(merged.paths);
             merged.base_url = parent.base_url.or(merged.base_url);
         }
     }
     let options = json.get("compilerOptions");
     if let Some(paths) = options.and_then(|o| o.get("paths")?.as_object()) {
-        merged.paths = Some((dir.to_string(), paths.clone()));
+        merged.paths = Some((dir.to_path_buf(), paths.clone()));
     }
     if let Some(url) = options.and_then(|o| o.get("baseUrl")?.as_str()) {
-        merged.base_url = normalize(dir, url);
+        merged.base_url = Some(clean(&dir.join(url)));
     }
     Some(merged)
+}
+
+/// `/a/b/../c/./d` → `/a/c/d`, without touching the filesystem.
+fn clean(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            part => out.push(part),
+        }
+    }
+    out
 }
 
 /// The pattern `spec` matches: an exact one, else the longest prefix before a `*`, with

@@ -356,6 +356,13 @@ fn typescript_resolves_tsconfig_paths() {
         want,
         "{report}"
     );
+    // Scanning `packages/app` alone still inherits `baseUrl` from above it.
+    let app = json(&root.join("packages/app"), &["--all-edges"]);
+    assert_eq!(
+        edges(&app),
+        vec![e("src/main.ts", "src/feature/deep.ts", 1)],
+        "{app}"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
