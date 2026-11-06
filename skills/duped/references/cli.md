@@ -44,7 +44,7 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 |---|---|---|
 | `importable` | module `tag.copy` already depends on module `tag.owner` | the side in `tag.copy` deletes its version and imports `tag.owner`'s, whichever side the change touched |
 | `importable-indirect` | `tag.copy` depends on `tag.owner` only through other modules | add the direct dependency, then as above |
-| `move-down` | neither depends on the other; both depend on `tag.home` | move one copy down. `home` is *a* common dependency, not necessarily the best fit: pick the lowest module that suits the code |
+| `move-down` | neither depends on the other; both depend on `tag.home` | move one copy down. `home` is the lowest common dependency declaring the files' package imports; `missing` lists any it lacks. Files' own local imports (`./x`, `@/x`) must move too or be injected |
 | `boundary` | no dependency path either way | often deliberate; flag only real drift |
 | `same-module` | both in `tag.module` (hidden by default except in `bodies`) | consolidate locally |
 

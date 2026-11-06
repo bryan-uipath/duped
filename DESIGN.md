@@ -70,11 +70,11 @@ Modules are detected from manifests under the project root: pnpm/npm/yarn worksp
 
 - **importable:** the copy's module already depends on the original's module.
 - **importable-indirect:** it depends on it only through other modules, so a direct dependency is needed first.
-- **move-down:** both depend on a common lower module, so the shared type could live there.
+- **move-down:** both depend on a common lower module, so the shared type could live there: the lowest common dependency that declares every package the copies' files import (a package no module declares, such as `node:fs` or a path alias, doesn't count); when none does, the one missing fewest, with `missing` listing the rest.
 - **boundary:** no dependency path either way (for example, a host-injected package). Often deliberate.
 - **same-module:** both in one module; hidden by default.
 
-Each cluster also gets a suggested home: a member's module that every other member can import, or else the lowest module they all depend on.
+Each cluster also gets a suggested home: a member's module that every other member can import, or else a module they all depend on, chosen as for move-down.
 
 ## CLI
 

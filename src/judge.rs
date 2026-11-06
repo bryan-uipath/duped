@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::{Judge, Verdict};
 use crate::config::Acknowledged;
+use crate::lang::imported_packages;
 use crate::modules::{Home, ModuleGraph, ROOT_MODULE, Tag};
 use crate::record::{Record, qualified};
+use crate::walk::{SourceFile, language_for};
 
 /// Doc phrases that mark a copy as deliberate, matched case-insensitively.
 const DELIBERATE: &[&str] = &[
@@ -34,6 +36,44 @@ pub struct ProjectJudge<'a> {
     base: PathBuf,
     /// Leading comment of each file, lower-cased, read on first use.
     headers: RefCell<HashMap<String, String>>,
+    packages: Packages,
+}
+
+/// Packages each file imports, read on first use: what a move-down home must declare.
+struct Packages {
+    base: PathBuf,
+    cache: RefCell<HashMap<String, Vec<String>>>,
+}
+
+impl Packages {
+    fn new(base: &Path) -> Self {
+        Packages {
+            base: base.to_path_buf(),
+            cache: RefCell::default(),
+        }
+    }
+
+    /// Everything `files` (relative to `base`) import, sorted.
+    fn of(&self, files: &[&str]) -> Vec<String> {
+        let mut all: Vec<String> = Vec::new();
+        for &file in files {
+            let mut cache = self.cache.borrow_mut();
+            let packages = cache.entry(file.to_string()).or_insert_with(|| {
+                let path = self.base.join(file);
+                language_for(&path).map_or_else(Vec::new, |language| {
+                    imported_packages(&SourceFile {
+                        path,
+                        rel: file.to_string(),
+                        language,
+                    })
+                })
+            });
+            all.extend(packages.iter().cloned());
+        }
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
 }
 
 impl<'a> ProjectJudge<'a> {
@@ -68,6 +108,7 @@ impl<'a> ProjectJudge<'a> {
             tagging: spanned.len() >= 2,
             noun,
             acknowledged,
+            packages: Packages::new(&base),
             base,
             headers: RefCell::default(),
         }
@@ -175,8 +216,11 @@ impl Judge for ProjectJudge<'_> {
     }
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
-        self.tagging
-            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
+        self.tagging.then(|| {
+            let files = [a, b].map(|i| self.records[i].location().file.as_str());
+            let needs = self.packages.of(&files);
+            self.graph.tag(self.modules[a], self.modules[b], &needs)
+        })
     }
 
     fn module(&self, record: usize) -> Option<&str> {
@@ -188,7 +232,11 @@ impl Judge for ProjectJudge<'_> {
             return None;
         }
         let modules: Vec<Option<usize>> = members.iter().map(|&m| self.modules[m]).collect();
-        self.graph.home(&modules)
+        let files: Vec<&str> = members
+            .iter()
+            .map(|&m| self.records[m].location().file.as_str())
+            .collect();
+        self.graph.home(&modules, &self.packages.of(&files))
     }
 
     fn summary(&self) -> Option<String> {
@@ -210,6 +258,8 @@ impl Judge for ProjectJudge<'_> {
 pub struct FileJudge<'a> {
     graph: &'a ModuleGraph,
     modules: Vec<Option<usize>>,
+    files: Vec<String>,
+    packages: Packages,
     /// As for [`ProjectJudge`]: the scanned files must span at least two modules.
     tagging: bool,
 }
@@ -221,8 +271,9 @@ impl<'a> FileJudge<'a> {
         base: &Path,
         files: impl IntoIterator<Item = &'f str>,
     ) -> Self {
+        let files: Vec<String> = files.into_iter().map(str::to_string).collect();
         let modules: Vec<Option<usize>> = files
-            .into_iter()
+            .iter()
             .map(|f| graph.module_of(&base.join(f)))
             .collect();
         let spanned: HashSet<Option<usize>> = modules.iter().copied().collect();
@@ -230,6 +281,8 @@ impl<'a> FileJudge<'a> {
             graph,
             tagging: spanned.len() >= 2,
             modules,
+            files,
+            packages: Packages::new(base),
         }
     }
 }
@@ -243,8 +296,10 @@ impl Judge for FileJudge<'_> {
     }
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
-        self.tagging
-            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
+        self.tagging.then(|| {
+            let needs = self.packages.of(&[&self.files[a], &self.files[b]]);
+            self.graph.tag(self.modules[a], self.modules[b], &needs)
+        })
     }
 
     fn module(&self, file: usize) -> Option<&str> {
@@ -374,12 +429,14 @@ mod tests {
                 root: "/repo/canvas".into(),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "@x/unified-evals".into(),
                 root: "/repo/evals".into(),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ])
     }
@@ -453,12 +510,14 @@ mod tests {
                 root: base.join("canvas"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "@x/unified-evals".into(),
                 root: base.join("evals"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ]);
         let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
@@ -516,6 +575,7 @@ mod tests {
             root: "/repo".into(),
             deps: vec![],
             aliases: Vec::new(),
+            external: Vec::new(),
         }]);
         let records = vec![ty("A", "a.ts", None), ty("B", "b.ts", None)];
         let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
@@ -603,12 +663,14 @@ mod tests {
                 root: base.join("canvas"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "e".into(),
                 root: base.join("evals"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ]);
         let records = vec![
