@@ -1,7 +1,7 @@
 //! Modules (packages, crates, projects) found from manifests, their internal dependency
 //! graph, and what it says about a duplicate pair: can one side import the other?
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -35,6 +35,8 @@ pub struct ModuleGraph {
     pub modules: Vec<Module>,
     /// `reach[a][b]`: `a` depends on `b`, directly or transitively.
     reach: Vec<Vec<bool>>,
+    /// [`package_key`] → modules that are that package or list it as a direct dependency.
+    declarers: HashMap<String, Vec<usize>>,
 }
 
 /// What the dependency graph says about a duplicate pair.
@@ -163,7 +165,9 @@ impl ModuleGraph {
             for dep in &f.deps {
                 match (resolve(dep, &found), dep) {
                     (Some(d), _) if module_of[d] != own => modules[own].deps.push(module_of[d]),
-                    (None, Dep::Name(_, name)) => modules[own].external.push(name.clone()),
+                    (None, Dep::Name(_, name) | Dep::Alias(name)) => {
+                        modules[own].external.push(name.clone())
+                    }
                     _ => {}
                 }
             }
@@ -193,7 +197,24 @@ impl ModuleGraph {
                 seen
             })
             .collect();
-        ModuleGraph { modules, reach }
+        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        for (m, module) in modules.iter().enumerate() {
+            let names = |m: &'_ Module| std::iter::once(m.name.clone()).chain(m.aliases.clone());
+            let declared = names(module)
+                .chain(module.external.iter().cloned())
+                .chain(module.deps.iter().flat_map(|&d| names(&modules[d])));
+            for name in declared {
+                let entry = declarers.entry(package_key(&name)).or_default();
+                if entry.last() != Some(&m) {
+                    entry.push(m);
+                }
+            }
+        }
+        ModuleGraph {
+            modules,
+            reach,
+            declarers,
+        }
     }
 
     /// The module with the longest root containing `path`; `None` is [`ROOT_MODULE`].
@@ -238,7 +259,7 @@ impl ModuleGraph {
                 };
             }
         }
-        match self.host(|m| self.reach[a][m] && self.reach[b][m], needs) {
+        match self.host(|m| self.reach[a][m] && self.reach[b][m], needs, &[a, b]) {
             Some((home, missing)) => Tag::MoveDown {
                 home: name(home),
                 missing,
@@ -262,7 +283,7 @@ impl ModuleGraph {
                 module: self.modules[owner].name.clone(),
             });
         }
-        self.host(|m| set.iter().all(|&o| self.reach[o][m]), needs)
+        self.host(|m| set.iter().all(|&o| self.reach[o][m]), needs, &set)
             .map(|(m, missing)| Home::MoveDown {
                 module: self.modules[m].name.clone(),
                 missing,
@@ -271,40 +292,39 @@ impl ModuleGraph {
 
     /// The lowest matching module that declares every known package in `needs`, else the one
     /// missing fewest, with what it misses. A need no module declares, such as `node:fs` or a
-    /// path alias, is ignored: nothing here can supply it.
+    /// path alias, is ignored: nothing here can supply it. So is a need named by one of
+    /// `members`, such as a Python file's absolute `from svc_a.models import X`.
     fn host(
         &self,
         matches: impl Fn(usize) -> bool,
         needs: &[String],
+        members: &[usize],
     ) -> Option<(usize, Vec<String>)> {
-        let known: Vec<&String> = needs.iter().filter(|n| self.declared_anywhere(n)).collect();
+        let known: Vec<(&String, &Vec<usize>)> = needs
+            .iter()
+            .filter_map(|n| Some((n, self.declarers.get(&package_key(n))?)))
+            .filter(|(n, _)| !members.iter().any(|&m| self.named(m, n)))
+            .collect();
         let missing = |m: usize| -> Vec<String> {
             known
                 .iter()
-                .filter(|n| !self.declares(m, n))
-                .map(|n| n.to_string())
+                .filter(|(_, declarers)| !declarers.contains(&m))
+                .map(|(n, _)| n.to_string())
                 .collect()
         };
         let best = (0..self.modules.len())
             .filter(|&m| matches(m))
-            .map(|m| (missing(m).len(), m))
-            .min_by_key(|&(missing, m)| (missing, self.depth(m), self.modules[m].name.clone()))?;
-        Some((best.1, missing(best.1)))
+            .min_by_key(|&m| (missing(m).len(), self.depth(m), &self.modules[m].name))?;
+        Some((best, missing(best)))
     }
 
-    /// `m` is `package`, or lists it as a direct dependency.
-    fn declares(&self, m: usize, package: &str) -> bool {
-        let module = &self.modules[m];
+    /// `package` is `m`'s name or an alias.
+    fn named(&self, m: usize, package: &str) -> bool {
         let key = package_key(package);
-        let same = |name: &String| package_key(name) == key;
-        let named = |m: &Module| same(&m.name) || m.aliases.iter().any(same);
-        named(module)
-            || module.external.iter().any(same)
-            || module.deps.iter().any(|&d| named(&self.modules[d]))
-    }
-
-    fn declared_anywhere(&self, package: &str) -> bool {
-        (0..self.modules.len()).any(|m| self.declares(m, package))
+        let module = &self.modules[m];
+        std::iter::once(&module.name)
+            .chain(&module.aliases)
+            .any(|n| package_key(n) == key)
     }
 
     /// How many modules `m` depends on: fewer is lower in the graph.
@@ -314,9 +334,7 @@ impl ModuleGraph {
 
     /// The matching module with the fewest dependencies of its own, then by name.
     fn lowest(&self, matches: impl Fn(usize) -> bool) -> Option<usize> {
-        (0..self.modules.len())
-            .filter(|&m| matches(m))
-            .min_by_key(|&m| (self.depth(m), self.modules[m].name.clone()))
+        self.host(matches, &[], &[]).map(|(m, _)| m)
     }
 }
 
@@ -339,6 +357,9 @@ enum Dep {
     Dir(PathBuf),
     /// A manifest file, e.g. a `ProjectReference`.
     Manifest(PathBuf),
+    /// The name code imports a renamed dependency by, e.g. Cargo's `json` for
+    /// `json = { package = "serde_json" }`; never resolves to a module.
+    Alias(String),
 }
 
 #[derive(Debug)]
@@ -589,6 +610,7 @@ fn resolve(dep: &Dep, found: &[Found]) -> Option<usize> {
         Dep::Name(ecosystem, name) => f.ecosystem == *ecosystem && f.name == *name,
         Dep::Dir(dir) => f.root == *dir,
         Dep::Manifest(path) => f.manifest == *path,
+        Dep::Alias(_) => false,
     })
 }
 
@@ -621,13 +643,16 @@ fn cargo_deps(
         } else {
             (spec, dir)
         };
+        let package = spec.get("package").and_then(|p| p.as_str()).unwrap_or(key);
+        if package != key {
+            deps.push(Dep::Alias(key.to_string()));
+        }
         if let Some(path) = spec.get("path").and_then(|p| p.as_str())
             && let Ok(path) = base.join(path).canonicalize()
         {
             deps.push(Dep::Dir(path));
             continue;
         }
-        let package = spec.get("package").and_then(|p| p.as_str()).unwrap_or(key);
         deps.push(Dep::Name(Ecosystem::Cargo, package.to_string()));
     }
     deps
@@ -1065,6 +1090,14 @@ mod tests {
                 ("util-lib", vec!["core"])
             ]
         );
+        // `u` is how app's code imports `util-lib`, so homes must declare it by that name.
+        let g = graph(&root);
+        let app = g
+            .modules
+            .iter()
+            .find(|m| m.name == "app")
+            .map(|m| &m.external);
+        assert_eq!(app, Some(&vec!["u".to_string()]));
     }
 
     #[test]
@@ -1226,6 +1259,8 @@ mod tests {
         assert_eq!(tag(&["node:fs"]), down("base", &[]));
         // Nothing both depend on declares `vue`: the lowest, with what it lacks.
         assert_eq!(tag(&["vue"]), down("base", &["vue"]));
+        // The copies importing their own packages, e.g. `from web.models import X`, isn't a need.
+        assert_eq!(tag(&["web", "desk", "react"]), down("ui", &[]));
         assert_eq!(
             tag(&["vue"]).describe(),
             "move-down: both depend on base (lacks vue)"

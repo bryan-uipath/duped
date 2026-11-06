@@ -101,7 +101,11 @@ pub fn imported_packages(file: &SourceFile) -> Vec<String> {
     let mut parser = Parser::new();
     let mut packages: Vec<String> = imports_of(&mut parser, &decode(&bytes), file)
         .iter()
-        .filter_map(|i| package_of(&i.specifier, file.language))
+        .flat_map(|i| match (file.language, i.specifier.as_str()) {
+            // `use serde_json;` has no prefix: the crate is the imported name.
+            (Language::Rust, "") => i.names.clone(),
+            (language, specifier) => package_of(specifier, language).into_iter().collect(),
+        })
         .collect();
     packages.sort_unstable();
     packages.dedup();
@@ -269,6 +273,23 @@ mod tests {
         assert_eq!(rs("crate::a"), None);
         assert_eq!(package_of("a.b", Language::Python).as_deref(), Some("a"));
         assert_eq!(package_of(".models", Language::Python), None);
+    }
+
+    #[test]
+    fn imported_packages_include_whole_crate_uses() {
+        let path = std::env::temp_dir().join(format!("duped-packages-{}.rs", std::process::id()));
+        std::fs::write(
+            &path,
+            "use serde_json;\nuse crate::a::B;\nuse anyhow::Result;\n",
+        )
+        .unwrap();
+        let file = SourceFile {
+            path: path.clone(),
+            rel: "lib.rs".into(),
+            language: Language::Rust,
+        };
+        assert_eq!(imported_packages(&file), vec!["anyhow", "serde_json"]);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
