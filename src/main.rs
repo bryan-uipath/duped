@@ -508,6 +508,17 @@ fn report(
         let found = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
         Ok(report::bodies(&records, &found))
     });
+    let identical = report::attempt(|| {
+        // Unreadable files were counted above; an empty source never matches.
+        let sources: Vec<Vec<u8>> = files
+            .iter()
+            .map(|f| std::fs::read(&f.path).unwrap_or_default())
+            .collect();
+        let paths: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        let judge = judge::FileJudge::new(&graph, base, paths.iter().copied());
+        let found = analysis::files::find_identical_files(&sources, analysis::files::MIN_LINES);
+        Ok(report::files(&paths, &found, &judge))
+    });
     let imports = report::attempt(|| {
         // Unreadable files were counted above.
         let (imports, _) = lang::extract_imports(&files, lang::is_script);
@@ -538,6 +549,7 @@ fn report(
         changed,
         vec![
             ("bodies", bodies),
+            ("files", identical),
             ("imports", imports),
             ("names", names),
             ("types", types),
