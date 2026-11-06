@@ -510,9 +510,9 @@ fn report(
     });
     let identical = report::attempt(|| {
         // Unreadable files were counted above; an empty source never matches.
-        let sources: Vec<String> = files
+        let sources: Vec<Vec<u8>> = files
             .iter()
-            .map(|f| std::fs::read(&f.path).map_or_else(|_| String::new(), |b| lang::decode(&b)))
+            .map(|f| std::fs::read(&f.path).unwrap_or_default())
             .collect();
         let paths: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         let judge = judge::FileJudge::new(&graph, base, paths.iter().copied());

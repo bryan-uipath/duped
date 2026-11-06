@@ -128,6 +128,30 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
+fn identical_copies_count_once_each() {
+    // Three identical files: two pairs with the first, not three, and not y ~ z from `bodies`.
+    let root = temp("copies");
+    for dir in ["x", "y", "z"] {
+        write(
+            &root,
+            &format!("{dir}/list.ts"),
+            &LIST.replace("NAME", "uniqueItems"),
+        );
+    }
+    let report = json(&root, &[]);
+    let pairs: Vec<(&str, &str)> = groups(&report)
+        .iter()
+        .map(|g| (g["a"].as_str().unwrap(), g["b"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("x/list.ts", "y/list.ts"), ("x/list.ts", "z/list.ts")]
+    );
+    assert_eq!(report["removableLines"], 22);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let root = temp("rank");
     // `p/`: two functions copied under new names (bodies only: 2 pairs and the file pair).

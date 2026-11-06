@@ -93,10 +93,10 @@ enum Span {
     None,
     /// Identical files of this many lines.
     Whole(usize),
-    /// Each side's declaration lines, scaled by similarity.
+    /// Each side's declaration line range, inclusive, scaled by similarity.
     Lines {
-        a: usize,
-        b: usize,
+        a: (usize, usize),
+        b: (usize, usize),
         weight: f64,
     },
 }
@@ -121,11 +121,25 @@ impl Report {
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
         top: usize,
     ) -> Self {
+        // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
+        // rest among themselves, which would count the same copy twice.
+        let first_of: HashMap<String, String> = analyses
+            .iter()
+            .filter(|(name, _)| *name == "files")
+            .flat_map(|(_, result)| result.iter().flatten())
+            .map(|f| (f.b.file.clone(), f.a.file.clone()))
+            .collect();
+        let copies = |f: &Finding| {
+            first_of
+                .get(&f.a.file)
+                .is_some_and(|first| first_of.get(&f.b.file) == Some(first))
+        };
         let mut detectors = BTreeMap::new();
         let mut kept = Vec::new();
         for (name, result) in analyses {
             let status = match result {
                 Ok(found) => {
+                    let found: Vec<Finding> = found.into_iter().filter(|f| !copies(f)).collect();
                     let total = found.len();
                     let touches = |f: &Finding| {
                         changed
@@ -325,10 +339,10 @@ pub fn files(paths: &[&str], groups: &[IdenticalFiles], judge: &dyn Judge) -> Ve
 }
 
 fn lines(a: &Record, b: &Record, weight: f64) -> Span {
-    let count = |r: &Record| r.location().end_line + 1 - r.location().start_line;
+    let range = |r: &Record| (r.location().start_line, r.location().end_line);
     Span::Lines {
-        a: count(a),
-        b: count(b),
+        a: range(a),
+        b: range(b),
         weight,
     }
 }
@@ -408,20 +422,23 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
     groups
 }
 
-/// The whole file when identical; else the smaller side's matched lines, each declaration
-/// counted once at its best similarity, so one function matching three others isn't tripled.
+/// The whole file when identical; else the smaller side's matched lines, each line counted
+/// once at the best similarity covering it, so nested or repeated matches aren't summed twice.
 fn removable_lines(group: &Group) -> usize {
+    let whole = group.findings.iter().filter_map(|f| match f.span {
+        Span::Whole(lines) => Some(lines),
+        _ => None,
+    });
+    if let Some(lines) = whole.max() {
+        return lines;
+    }
     let mut best: HashMap<(&str, usize), f64> = HashMap::new();
-    let mut whole = 0;
     for f in &group.findings {
-        match f.span {
-            Span::None => {}
-            Span::Whole(lines) => whole = whole.max(lines),
-            Span::Lines { a, b, weight } => {
-                for (side, lines) in [(&f.a, a), (&f.b, b)] {
-                    let key = (side.file.as_str(), side.line.unwrap_or(0));
-                    let value = best.entry(key).or_default();
-                    *value = value.max(lines as f64 * weight);
+        if let Span::Lines { a, b, weight } = f.span {
+            for (file, (start, end)) in [(&f.a.file, a), (&f.b.file, b)] {
+                for line in start..=end {
+                    let value = best.entry((file.as_str(), line)).or_default();
+                    *value = value.max(weight);
                 }
             }
         }
@@ -432,7 +449,7 @@ fn removable_lines(group: &Group) -> usize {
             .map(|(_, v)| v)
             .sum()
     };
-    whole.max(total(&group.a).min(total(&group.b)).round() as usize)
+    total(&group.a).min(total(&group.b)).round() as usize
 }
 
 // ----- changed files -----
