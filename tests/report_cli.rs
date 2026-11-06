@@ -128,7 +128,7 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
-fn groups_rank_by_agreeing_analyses_then_finding_count() {
+fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let root = temp("rank");
     // `p/`: two functions copied under new names (bodies only: 2 pairs and the file pair).
     let p = |a, b| format!("{}{}", RETRY.replace("NAME", a), TOTALS.replace("NAME", b));
@@ -140,8 +140,20 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     // `r/`: one copied function (bodies, one finding).
     write(&root, "r/one.ts", &LIST.replace("NAME", "uniqueItems"));
     write(&root, "r/two.ts", &LIST.replace("NAME", "dedupeRows"));
+    // `s/`: an identical 12-line file, with CRLF line ends in one copy (files only).
+    let table: String = (0..12)
+        .map(|i| format!("export const LIMIT_{i} = {i};\n"))
+        .collect();
+    write(&root, "s/one.ts", &table);
+    write(&root, "s/two.ts", &table.replace('\n', "\r\n"));
 
     let report = json(&root, &[]);
+    let removable: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(removable, vec![22, 12, 11, 1]);
+    assert_eq!(report["removableLines"], 46);
     let summary: Vec<(&str, Vec<&str>, usize)> = groups(&report)
         .iter()
         .map(|g| {
@@ -156,20 +168,21 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     assert_eq!(
         summary,
         vec![
-            ("q/one.ts", vec!["names", "types"], 2),
             ("p/one.ts", vec!["bodies"], 3),
+            ("s/one.ts", vec!["files"], 1),
             ("r/one.ts", vec!["bodies"], 1),
+            ("q/one.ts", vec!["names", "types"], 2),
         ]
     );
     // Within a group, by each analysis's rank: the file pair sums its functions' shingles.
-    let kinds: Vec<&str> = report["groups"][1]["findings"]
+    let kinds: Vec<&str> = report["groups"][0]["findings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| f["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, vec!["file", "function", "function"]);
-    let order = &report["groups"][0]["findings"];
+    let order = &report["groups"][3]["findings"];
     assert_eq!(order[0]["detector"], "names");
     assert_eq!(
         order[0]["evidence"],
@@ -185,10 +198,18 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
 
     let text = text(&root);
     assert!(
-        text.starts_with("3 file pairs (bodies 4; imports 0; names 1; types 1).\n"),
+        text.starts_with(
+            "4 file pairs, ~46 removable lines (bodies 4; files 1; imports 0; names 1; types 1).\n"
+        ),
         "{text}"
     );
-    assert!(text.contains("\n1. names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"));
+    assert!(text.contains(
+        "\n4. ~1 removable lines, names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"
+    ));
+    assert!(
+        text.contains("   - files file: identical, 12 lines"),
+        "{text}"
+    );
     assert!(
         text.contains("   - bodies file: 2 function pairs"),
         "{text}"

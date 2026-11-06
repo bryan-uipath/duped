@@ -11,10 +11,11 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::analysis::bodies::{BodyReport, file_shared, function_at};
+use crate::analysis::files::IdenticalFiles;
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
-use crate::analysis::pair_notes;
 use crate::analysis::types::TypeReport;
+use crate::analysis::{Judge, pair_notes};
 use crate::modules::{self, Tag};
 use crate::record::{Record, qualified};
 
@@ -32,6 +33,8 @@ pub struct Report {
     pub detectors: BTreeMap<&'static str, Status>,
     /// Groups before `--top`.
     pub file_pairs: usize,
+    /// Sum of the groups' `removable_lines`, before `--top`.
+    pub removable_lines: usize,
     pub truncated: bool,
     pub groups: Vec<Group>,
 }
@@ -51,6 +54,7 @@ pub enum Status {
 
 /// Findings on one unordered file pair; `a` sorts first.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Group {
     pub a: String,
     pub b: String,
@@ -61,6 +65,8 @@ pub struct Group {
     pub detectors: Vec<&'static str>,
     /// The first tagged finding's tag.
     pub tag: Option<Tag>,
+    /// Estimated lines one copy loses if the pair is merged; groups sort by it.
+    pub removable_lines: usize,
     /// Highest rank first.
     pub findings: Vec<Finding>,
 }
@@ -78,6 +84,21 @@ pub struct Finding {
     /// The analysis's own ranking score, e.g. shared shingles for `bodies`.
     #[serde(skip)]
     rank: f64,
+    #[serde(skip)]
+    span: Span,
+}
+
+/// The lines a finding covers, for its group's `removable_lines`.
+enum Span {
+    None,
+    /// Identical files of this many lines.
+    Whole(usize),
+    /// Each side's declaration lines, scaled by similarity.
+    Lines {
+        a: usize,
+        b: usize,
+        weight: f64,
+    },
 }
 
 #[derive(Serialize)]
@@ -124,6 +145,7 @@ impl Report {
         }
         let mut groups = group_by_file_pair(kept, changed.as_ref());
         let file_pairs = groups.len();
+        let removable_lines = groups.iter().map(|g| g.removable_lines).sum();
         groups.truncate(top);
         Report {
             directory,
@@ -132,6 +154,7 @@ impl Report {
             changed_files: changed.as_ref().map(HashSet::len),
             detectors,
             file_pairs,
+            removable_lines,
             truncated: file_pairs > top,
             groups,
         }
@@ -170,6 +193,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
                 tokens(p.b)
             ),
             rank: p.shared as f64,
+            span: lines(&records[p.a], &records[p.b], p.similarity),
         }
     });
     let files = report.files.iter().map(|f| {
@@ -182,6 +206,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
             b: file_side(&f.b),
             evidence: format!("{} function pairs, {shared} shared shingles", f.pairs.len()),
             rank: shared as f64,
+            span: Span::None,
         }
     });
     pairs.chain(files).collect()
@@ -206,6 +231,7 @@ pub fn imports(files: &[FileImports], report: &ImportReport) -> Vec<Finding> {
                     shown.join(", ")
                 ),
                 rank: p.rare as f64,
+                span: Span::None,
             }
         })
         .collect()
@@ -244,6 +270,7 @@ pub fn names(records: &[Record], report: &NameReport) -> Vec<Finding> {
                 b: file_side(&p.b),
                 evidence: shown.join(", "),
                 rank: p.score,
+                span: Span::None,
             }
         })
         .collect()
@@ -271,9 +298,39 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                     shown.join(", ")
                 ),
                 rank: p.similarity,
+                span: lines(&records[p.a], &records[p.b], p.similarity),
             }
         })
         .collect()
+}
+
+/// Each identical group as pairs from its first file, so `n` copies count `n - 1` times.
+pub fn files(paths: &[&str], groups: &[IdenticalFiles], judge: &dyn Judge) -> Vec<Finding> {
+    groups
+        .iter()
+        .flat_map(|g| {
+            let first = g.files[0];
+            g.files[1..].iter().map(move |&other| Finding {
+                detector: "files",
+                kind: "file",
+                tag: judge.tag(first, other),
+                a: file_side(paths[first]),
+                b: file_side(paths[other]),
+                evidence: format!("identical, {} lines", g.lines),
+                rank: g.lines as f64,
+                span: Span::Whole(g.lines),
+            })
+        })
+        .collect()
+}
+
+fn lines(a: &Record, b: &Record, weight: f64) -> Span {
+    let count = |r: &Record| r.location().end_line + 1 - r.location().start_line;
+    Span::Lines {
+        a: count(a),
+        b: count(b),
+        weight,
+    }
 }
 
 fn side(record: &Record) -> Side {
@@ -316,6 +373,7 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
                 changed: None,
                 detectors: Vec::new(),
                 tag: None,
+                removable_lines: 0,
                 findings: Vec::new(),
             });
             groups.len() - 1
@@ -331,6 +389,7 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
     }
     for g in &mut groups {
         g.detectors.sort_unstable();
+        g.removable_lines = removable_lines(g);
         g.findings.sort_by(|x, y| y.rank.total_cmp(&x.rank));
         g.changed = changed.map(|c| {
             [&g.a, &g.b]
@@ -341,12 +400,39 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
         });
     }
     groups.sort_by(|x, y| {
-        y.detectors
-            .len()
-            .cmp(&x.detectors.len())
+        y.removable_lines
+            .cmp(&x.removable_lines)
+            .then(y.detectors.len().cmp(&x.detectors.len()))
             .then(y.findings.len().cmp(&x.findings.len()))
     });
     groups
+}
+
+/// The whole file when identical; else the smaller side's matched lines, each declaration
+/// counted once at its best similarity, so one function matching three others isn't tripled.
+fn removable_lines(group: &Group) -> usize {
+    let mut best: HashMap<(&str, usize), f64> = HashMap::new();
+    let mut whole = 0;
+    for f in &group.findings {
+        match f.span {
+            Span::None => {}
+            Span::Whole(lines) => whole = whole.max(lines),
+            Span::Lines { a, b, weight } => {
+                for (side, lines) in [(&f.a, a), (&f.b, b)] {
+                    let key = (side.file.as_str(), side.line.unwrap_or(0));
+                    let value = best.entry(key).or_default();
+                    *value = value.max(lines as f64 * weight);
+                }
+            }
+        }
+    }
+    let total = |file: &str| -> f64 {
+        best.iter()
+            .filter(|((f, _), _)| *f == file)
+            .map(|(_, v)| v)
+            .sum()
+    };
+    whole.max(total(&group.a).min(total(&group.b)).round() as usize)
 }
 
 // ----- changed files -----
@@ -486,14 +572,16 @@ pub fn render_text(report: &Report) -> String {
     match (&report.base, report.changed_files) {
         (Some(base), Some(changed)) => writeln!(
             out,
-            "{} file pairs touching {changed} files changed since {base} ({}).",
+            "{} file pairs, ~{} removable lines, touching {changed} files changed since {base} ({}).",
             report.file_pairs,
+            report.removable_lines,
             counts.join("; ")
         ),
         _ => writeln!(
             out,
-            "{} file pairs ({}).",
+            "{} file pairs, ~{} removable lines ({}).",
             report.file_pairs,
+            report.removable_lines,
             counts.join("; ")
         ),
     }
@@ -501,8 +589,9 @@ pub fn render_text(report: &Report) -> String {
     for (rank, group) in report.groups.iter().enumerate() {
         writeln!(
             out,
-            "\n{}. {}: {} findings{}",
+            "\n{}. ~{} removable lines, {}: {} findings{}",
             rank + 1,
+            group.removable_lines,
             group.detectors.join(" + "),
             group.findings.len(),
             pair_notes(&group.tag, &None)

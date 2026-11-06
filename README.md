@@ -180,13 +180,13 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 ### Running every analysis at once
 
-`duped report` runs `bodies`, `imports`, `names` and `types` with their defaults (and `duped.toml`), over one walk and one module graph, and groups their pairs by file pair. A file pair found by several analyses is most likely a ported module, so groups are ranked by how many analyses found them, then by how many findings they have. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
+`duped report` runs `bodies`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines, each declaration counted once and scaled by its best similarity. The header totals it across all file pairs. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
 
 - `--base <ref>` keeps only file pairs with a side added, modified or renamed since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`. It needs git; without it, git isn't used.
 - `--top` (default `40`) limits the file pairs shown, in `--json` too; `filePairs` and `truncated` say how many there were.
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
-`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, removableLines, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
 
 ### Finding duplicate functions
 

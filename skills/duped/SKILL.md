@@ -28,7 +28,9 @@ duped report <root> --base <ref> --json > <temporary-file>  # changed-file pairs
 duped report <root> --json > <temporary-file>               # whole codebase
 ```
 
-The report combines bodies, imports, names, and types, grouped by file pair.
+The report combines bodies, files (identical copies), imports, names, and types,
+grouped by file pair and ranked by `removableLines`, an estimate of what merging
+the pair removes.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
 `target`, …) and `.gitignore`d paths are skipped by default; checked-in
 generated code is not. Paths are relative to the scan root. Use a unique
