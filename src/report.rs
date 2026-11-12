@@ -42,7 +42,7 @@ pub struct Report {
     pub removable_lines: usize,
     pub truncated: bool,
     /// Directory pairs linked by two or more file pairs, most removable lines first: a port
-    /// spread over many files. Cut by `--top`, without setting `truncated`.
+    /// spread over many files. Never cut by `--top`.
     pub directories: Vec<DirectoryPair>,
     pub groups: Vec<Group>,
     /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
@@ -232,8 +232,7 @@ impl Report {
                 .map(|h| h.removable_lines)
                 .sum::<usize>();
         let helper_families = kept_families.len();
-        let mut directories = directory_pairs(&groups);
-        directories.truncate(top);
+        let directories = directory_pairs(&groups);
         groups.truncate(top);
         kept_helpers.truncate(top);
         kept_families.truncate(top);
@@ -804,7 +803,7 @@ fn git(args: &[&str], cwd: &Path) -> Result<String> {
 
 // ----- output -----
 
-/// Directory pairs the text report lists; `--json` has up to `--top`.
+/// Directory pairs the text report lists; `--json` has them all.
 const DIRECTORIES_SHOWN: usize = 10;
 
 /// Human-readable report: what each analysis found, then the ranked file pairs.
