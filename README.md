@@ -143,11 +143,12 @@ Candidate pairs come from MinHash signatures with LSH banding, tuned to find a p
 
 `duped bodies` skips bodies under 50 tokens, so a one-line `isRecord` copied into 30 files is invisible there. `duped helpers` groups top-level functions of 8–49 body tokens whose bodies are identical after normalising, N copies at a time. TypeScript, JavaScript and Rust.
 
-- **Normalising:** parameters (destructured keys too) become their position, so `isRec(v)` and `isRecord(value)` match; every other identifier keeps its name, so two `<XContext.Provider>` wrappers don't. `{ return x; }` counts as `x`, like an arrow function's expression body. Literals and property names are kept. Methods are skipped.
+- **Normalising:** plain parameters become their position, so `isRec(v)` and `isRecord(value)` match; a destructured parameter keeps its keys by name, since callers pass those names. Every other identifier keeps its name too, so two `<XContext.Provider>` wrappers don't. Text naming a parameter, such as shorthand `{ x }`, also records which parameter, so `{ x }` from the first parameter doesn't match `{ x }` from the second. `{ return x; }` counts as `x`, like an arrow function's expression body. Literals and property names are kept. Methods are skipped.
 - **removableLines:** every copy's lines but the longest one's. Groups rank by it.
 - **home:** where the one kept copy could live, chosen as for a `types` cluster; `none` when no module is reachable from all of them.
 - **Same name, different bodies:** a name with 3 or more small definitions, at least 2 bodies and one body copied at least twice: a helper whose copies drifted. Names whose definitions all differ (`run`, `parse`) are conventions and are left out.
-- A copy acknowledged against its group's first member is hidden, as for `bodies`.
+- A copy acknowledged against its group's first member is hidden from groups (there is no flag to show it); families ignore acknowledgements.
+- **Gap:** the 49-token limit applies to the raw body, but matching uses the normalised one, so `function f(x) { return E; }` with 50–53 raw tokens isn't a helper, while its arrow twin `x => E` is, and `bodies` skips the arrow. Such a pair falls between the two.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -204,7 +205,7 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 - `--top` (default `40`) limits the file pairs and helper groups shown, in `--json` too; `filePairs`, `helperGroups` and `truncated` say how many there were.
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
-`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, removableLines, truncated, groups, helpers }`. Each of `helpers` has `copies` (`file`, `line`, `name`, `lines`, `module`, and `changed` with `--base`), `removableLines` and `home`; with `--base` a group is kept when a copy changed. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, removableLines, truncated, groups, helpers }`. `helpers` are groups as `duped helpers --json` prints them, each member also `changed` with `--base`; with `--base` a group is kept when a member changed. `truncated` is true when either file pairs or helper groups exceed `--top`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
 
 ### Finding duplicate functions
 

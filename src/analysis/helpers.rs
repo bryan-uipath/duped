@@ -1,12 +1,13 @@
 //! Small top-level functions copied everywhere: N-way groups with identical normalised bodies,
 //! too small for `bodies`, plus same-name families whose bodies have drifted apart.
 //!
-//! Parameters are renamed by position, so `isRec(v)` and `isRecord(value)` match; every other
-//! name is kept, so `<AContext.Provider>` and `<BContext.Provider>` wrappers don't.
+//! Plain parameters are renamed by position, so `isRec(v)` and `isRecord(value)` match; every
+//! other name is kept, so `<AContext.Provider>` and `<BContext.Provider>` wrappers don't.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::Judge;
@@ -22,15 +23,32 @@ pub struct HelperOptions {
     pub max_tokens: usize,
 }
 
-#[derive(Debug)]
+/// One group, as both `helpers` and `report` print it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HelperGroup {
-    /// Record indices, in file order.
-    pub members: Vec<usize>,
+    /// In file order.
+    pub members: Vec<Member>,
     /// Lines merging the group removes: every copy's lines but the longest one's.
     pub removable_lines: usize,
     /// Distinct module names, sorted; empty when modules aren't tracked.
     pub modules: Vec<String>,
     pub home: Option<Home>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Member {
+    #[serde(skip)]
+    pub record: usize,
+    pub name: String,
+    pub module: Option<String>,
+    pub file: String,
+    pub line: usize,
+    pub lines: usize,
+    pub tokens: usize,
+    /// Set by `report --base` when the file changed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 /// Same-name helpers with several bodies, one of them copied: drifted copies of one helper.
@@ -97,27 +115,11 @@ pub fn find_helpers(
         let before = members.len();
         members.retain(|&m| m == first || judge.verdict(first, m).acknowledged.is_none());
         hidden_acknowledged += before - members.len();
-        if members.len() < 2 {
-            continue;
+        if members.len() >= 2 {
+            groups.push(group(records, members, judge));
         }
-        let lines: Vec<usize> = members.iter().map(|&m| line_count(&records[m])).collect();
-        let modules: BTreeSet<String> = members
-            .iter()
-            .filter_map(|&m| judge.module(m).map(str::to_string))
-            .collect();
-        groups.push(HelperGroup {
-            removable_lines: removable_lines(&lines),
-            modules: modules.into_iter().collect(),
-            home: judge.home(&members),
-            members,
-        });
     }
-    groups.sort_by(|x, y| {
-        y.removable_lines
-            .cmp(&x.removable_lines)
-            .then(y.members.len().cmp(&x.members.len()))
-            .then(x.members[0].cmp(&y.members[0]))
-    });
+    sort_groups(&mut groups);
 
     let mut families: Vec<HelperFamily> = names
         .into_iter()
@@ -158,28 +160,93 @@ pub fn find_helpers(
     }
 }
 
-/// Body tokens with parameters (destructured keys too) as their position, so renamed
-/// parameters match; text, names and positions can't collide. `{ return x; }` becomes `x`,
-/// as an arrow function's expression body would be.
+/// `groups` rebuilt without copies in `files`, e.g. identical files `report` already counts,
+/// so lines, modules and home describe only the copies left.
+pub fn without_files(
+    records: &[Record],
+    groups: Vec<HelperGroup>,
+    files: &HashSet<String>,
+    judge: &dyn Judge,
+) -> Vec<HelperGroup> {
+    let mut kept: Vec<HelperGroup> = groups
+        .into_iter()
+        .filter_map(|g| {
+            let members: Vec<usize> = g
+                .members
+                .iter()
+                .filter(|m| !files.contains(&m.file))
+                .map(|m| m.record)
+                .collect();
+            (members.len() >= 2).then(|| group(records, members, judge))
+        })
+        .collect();
+    sort_groups(&mut kept);
+    kept
+}
+
+/// A group of `members` (record indices, in file order).
+fn group(records: &[Record], members: Vec<usize>, judge: &dyn Judge) -> HelperGroup {
+    let lines: Vec<usize> = members.iter().map(|&m| line_count(&records[m])).collect();
+    let modules: BTreeSet<String> = members
+        .iter()
+        .filter_map(|&m| judge.module(m).map(str::to_string))
+        .collect();
+    HelperGroup {
+        removable_lines: lines.iter().sum::<usize>() - lines.iter().max().unwrap_or(&0),
+        modules: modules.into_iter().collect(),
+        home: judge.home(&members),
+        members: members.iter().map(|&m| member(records, m, judge)).collect(),
+    }
+}
+
+fn member(records: &[Record], index: usize, judge: &dyn Judge) -> Member {
+    let f = function_at(records, index);
+    Member {
+        record: index,
+        name: f.name.clone(),
+        module: judge.module(index).map(str::to_string),
+        file: f.location.file.clone(),
+        line: f.location.start_line,
+        lines: line_count(&records[index]),
+        tokens: f.body.len(),
+        changed: false,
+    }
+}
+
+fn sort_groups(groups: &mut [HelperGroup]) {
+    groups.sort_by(|x, y| {
+        y.removable_lines
+            .cmp(&x.removable_lines)
+            .then(y.members.len().cmp(&x.members.len()))
+            .then(x.members[0].record.cmp(&y.members[0].record))
+    });
+}
+
+/// Body tokens with plain parameters as their position, so renamed parameters match; text,
+/// names and positions can't collide. A destructured parameter keeps its keys by name, since
+/// callers pass those names. Text naming a parameter, such as shorthand `{ x }`, also records
+/// its position, so `{ x }` from the first parameter never matches `{ x }` from the second.
+/// `{ return x; }` becomes `x`, as an arrow function's expression body would be.
 fn normalised(f: &FunctionRecord) -> Vec<u64> {
-    let params: Vec<u32> = f
+    let params: Vec<Option<u32>> = f
         .params
         .iter()
-        .flat_map(|p| {
-            if p.fields.is_empty() {
-                vec![p.name.trim_start_matches("...")]
-            } else {
-                p.fields.iter().map(|k| k.name.as_str()).collect()
-            }
+        .map(|p| {
+            p.fields
+                .is_empty()
+                .then(|| token_hash(p.name.trim_start_matches("...")))
         })
-        .map(token_hash)
         .collect();
+    let position = |h: u32| params.iter().position(|&p| p == Some(h));
     let tokens: Vec<u64> = f
         .body
         .iter()
         .map(|&t| match t {
-            Token::Text(h) => u64::from(h),
-            Token::Identifier(h) => match params.iter().position(|&p| p == h) {
+            Token::Text(h) => match position(h) {
+                Some(i) => 3 << 48 | (i as u64) << 32 | u64::from(h),
+                None => u64::from(h),
+            },
+            Token::Identifier(h) => match position(h) {
                 Some(i) => 2 << 32 | i as u64,
                 None => 1 << 32 | u64::from(h),
             },
@@ -202,14 +269,9 @@ fn normalised(f: &FunctionRecord) -> Vec<u64> {
     }
 }
 
-pub fn line_count(record: &Record) -> usize {
+fn line_count(record: &Record) -> usize {
     let location = record.location();
     location.end_line + 1 - location.start_line
-}
-
-/// Keeping the longest copy removes every other copy's lines.
-pub fn removable_lines(lines: &[usize]) -> usize {
-    lines.iter().sum::<usize>() - lines.iter().max().unwrap_or(&0)
 }
 
 fn definitions(family: &HelperFamily) -> usize {
@@ -249,7 +311,8 @@ pub fn render_text(
         )
         .ok();
     }
-    out.push_str(&render_groups(records, &report.groups, top, judge));
+    let shown = &report.groups[..top.min(report.groups.len())];
+    out.push_str(&render_groups(shown, report.groups.len()));
     if !report.families.is_empty() {
         writeln!(out, "\nSame name, different bodies:").ok();
     }
@@ -264,7 +327,16 @@ pub fn render_text(
         )
         .ok();
         for v in &f.variants {
-            writeln!(out, "   {}× {}", v.len(), location(records, v[0])).ok();
+            let first = function_at(records, v[0]);
+            writeln!(
+                out,
+                "   {}× {}  {}:{}",
+                v.len(),
+                first.name,
+                first.location.file,
+                first.location.start_line
+            )
+            .ok();
         }
     }
     if report.families.len() > top {
@@ -278,19 +350,14 @@ pub fn render_text(
     out
 }
 
-/// Ranked groups.
-fn render_groups(
-    records: &[Record],
-    groups: &[HelperGroup],
-    top: usize,
-    judge: &dyn Judge,
-) -> String {
+/// The `shown` groups ranked, of `total`; shared with `report`.
+pub fn render_groups(shown: &[HelperGroup], total: usize) -> String {
     let mut out = String::new();
-    if !groups.is_empty() {
+    if !shown.is_empty() {
         writeln!(out, "\nIdentical helpers:").ok();
     }
-    for (rank, g) in groups.iter().take(top).enumerate() {
-        let mut names: Vec<&str> = g.members.iter().map(|&m| records[m].name()).collect();
+    for (rank, g) in shown.iter().enumerate() {
+        let mut names: Vec<&str> = g.members.iter().map(|m| m.name.as_str()).collect();
         names.sort_unstable();
         names.dedup();
         let modules = match &g.modules[..] {
@@ -314,29 +381,25 @@ fn render_groups(
             }
             None => None,
         };
-        for &m in &g.members {
-            let module = judge
-                .module(m)
+        for m in &g.members {
+            let module = m
+                .module
+                .as_ref()
                 .map(|name| format!("[{name}] "))
                 .unwrap_or_default();
-            writeln!(out, "   {module}{}", location(records, m)).ok();
+            let changed = if m.changed { " (changed)" } else { "" };
+            writeln!(out, "   {module}{}  {}:{}{changed}", m.name, m.file, m.line).ok();
         }
     }
-    if groups.len() > top {
+    if total > shown.len() {
         writeln!(
             out,
-            "\n… {} more groups; raise --top to see them.",
-            groups.len() - top
+            "\n… {} more helper groups; raise --top to see them.",
+            total - shown.len()
         )
         .ok();
     }
     out
-}
-
-/// e.g. `isRecord  src/util.ts:12`
-fn location(records: &[Record], index: usize) -> String {
-    let f = function_at(records, index);
-    format!("{}  {}:{}", f.name, f.location.file, f.location.start_line)
 }
 
 /// Everything, untruncated: `{ summary, groups, families }`.
@@ -345,10 +408,15 @@ pub fn to_json(records: &[Record], report: &HelperReport, judge: &dyn Judge) -> 
         .families
         .iter()
         .map(|f| {
+            let variants: Vec<Vec<Member>> = f
+                .variants
+                .iter()
+                .map(|v| v.iter().map(|&m| member(records, m, judge)).collect())
+                .collect();
             json!({
                 "name": f.name,
                 "definitions": definitions(f),
-                "variants": f.variants.iter().map(|v| members_json(records, v, judge)).collect::<Vec<_>>(),
+                "variants": variants,
             })
         })
         .collect();
@@ -361,36 +429,9 @@ pub fn to_json(records: &[Record], report: &HelperReport, judge: &dyn Judge) -> 
             "modules": judge.summary(),
             "hidden": { "acknowledged": report.hidden_acknowledged },
         },
-        "groups": report.groups.iter().map(|g| group_json(records, g, judge)).collect::<Vec<_>>(),
+        "groups": report.groups,
         "families": families,
     })
-}
-
-/// `{ members, removableLines, modules, home }`
-fn group_json(records: &[Record], group: &HelperGroup, judge: &dyn Judge) -> Value {
-    json!({
-        "members": members_json(records, &group.members, judge),
-        "removableLines": group.removable_lines,
-        "modules": group.modules,
-        "home": group.home,
-    })
-}
-
-fn members_json(records: &[Record], members: &[usize], judge: &dyn Judge) -> Vec<Value> {
-    members
-        .iter()
-        .map(|&m| {
-            let f = function_at(records, m);
-            json!({
-                "name": f.name,
-                "module": judge.module(m),
-                "file": f.location.file,
-                "line": f.location.start_line,
-                "lines": line_count(&records[m]),
-                "tokens": f.body.len(),
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -417,16 +458,11 @@ mod tests {
     }
 
     /// Each group's member names, in file order.
-    fn groups(records: &[Record], report: &HelperReport) -> Vec<Vec<String>> {
+    fn groups(report: &HelperReport) -> Vec<Vec<String>> {
         report
             .groups
             .iter()
-            .map(|g| {
-                g.members
-                    .iter()
-                    .map(|&m| records[m].name().into())
-                    .collect()
-            })
+            .map(|g| g.members.iter().map(|m| m.name.clone()).collect())
             .collect()
     }
 
@@ -437,10 +473,7 @@ mod tests {
         let arrow = "const isRec = (v: unknown) => typeof v === 'object' && v !== null && !Array.isArray(v);";
         let records = extract(&[("a.ts", IS_RECORD), ("b.ts", arrow), ("c.ts", IS_RECORD)]);
         let report = find_helpers(&records, &options(), &NoJudge);
-        assert_eq!(
-            groups(&records, &report),
-            vec![vec!["isRecord", "isRec", "isRecord"]]
-        );
+        assert_eq!(groups(&report), vec![vec!["isRecord", "isRec", "isRecord"]]);
         // Keep one 3-line copy: the other 3-line one and the 1-line arrow go.
         assert_eq!(report.groups[0].removable_lines, 4);
         assert_eq!(report.candidates, 3);
@@ -468,15 +501,46 @@ mod tests {
             ("f.ts", &method),
         ]);
         let report = find_helpers(&records, &options(), &NoJudge);
-        assert!(report.groups.is_empty(), "{:?}", groups(&records, &report));
+        assert!(report.groups.is_empty(), "{:?}", groups(&report));
         let loose = HelperOptions {
             min_tokens: 1,
             ..options()
         };
         assert_eq!(
-            groups(&records, &find_helpers(&records, &loose, &NoJudge)),
+            groups(&find_helpers(&records, &loose, &NoJudge)),
             vec![vec!["id", "id"]]
         );
+    }
+
+    #[test]
+    fn destructured_keys_stay_by_name() {
+        // Callers pass `user` and `team`: different props, so not one helper.
+        let badge = |key: &str| {
+            format!(
+                "export function B({{ {key} }}) {{ return <Badge label={{{key}.name}} size=\"sm\" />; }}"
+            )
+        };
+        let records = extract(&[
+            ("a.tsx", &badge("user")),
+            ("b.tsx", &badge("team")),
+            ("c.tsx", &badge("user")),
+        ]);
+        let report = find_helpers(&records, &options(), &NoJudge);
+        assert_eq!(groups(&report), vec![vec!["B", "B"]]);
+        assert_eq!(report.groups[0].members[1].file, "c.tsx");
+    }
+
+    #[test]
+    fn shorthand_keys_keep_their_parameter() {
+        // f(1, 2).x is 1 and g(1, 2).x is 2: same tokens, different parameters behind `x`.
+        let f = "export function f(x, y) { return { x, value: y, kind: 'pair' }; }";
+        let g = "export function g(y, x) { return { x, value: x, kind: 'pair' }; }";
+        let renamed = "export function h(a, b) { return { a, value: b, kind: 'pair' }; }";
+        let same = "export function k(x, z) { return { x, value: z, kind: 'pair' }; }";
+        let records = extract(&[("f.ts", f), ("g.ts", g), ("h.ts", renamed), ("k.ts", same)]);
+        let report = find_helpers(&records, &options(), &NoJudge);
+        // Only `k` matches `f`: `h` renames the shorthand key, which callers read.
+        assert_eq!(groups(&report), vec![vec!["f", "k"]]);
     }
 
     #[test]

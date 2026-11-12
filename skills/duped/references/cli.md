@@ -15,7 +15,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | Command | Finds | Languages |
 |---|---|---|
 | `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS, Rust |
-| `duped helpers` | small top-level helpers (8–49 tokens, below `bodies`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 6 bodies). Parameters renamed by position, other names kept | TS/JS, Rust |
+| `duped helpers` | small top-level helpers (8–49 tokens, below `bodies`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 6 bodies). Plain parameters renamed by position, other names (and destructured keys) kept | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
@@ -60,7 +60,7 @@ b = "@x/cli:formatBytes"
 reason = "cli is published standalone and can't depend on web"
 ```
 
-Acknowledgements apply to `bodies`, `types` and `helpers` (a copy acknowledged against its group's first member is dropped); `names` and `imports` keep reporting the pair. `--include-acknowledged` shows hidden pairs.
+Acknowledgements apply to `bodies` and `types`, where `--include-acknowledged` shows hidden pairs, and to `helpers` groups (a copy acknowledged against its group's first member is dropped, with no flag to show it; families ignore them). `names` and `imports` keep reporting the pair.
 
 ## Tuning
 

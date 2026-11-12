@@ -28,7 +28,9 @@ Candidates are generated across the whole repo, so copies of *unchanged* code ar
 
 ## 2. Read the groups
 
-Inspect detector statuses, counts, and `truncated` before selected groups;
+Inspect detector statuses, counts (`filePairs`, `helperGroups`), and `truncated`
+(file pairs or helper groups cut by `--top`) before selected groups; `helpers`
+lists small helpers the change copies N ways, with `changed` on its copies;
 avoid dumping the full JSON into context. Report failed detectors as gaps.
 If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
 `--top` or state the coverage limit; do not claim a complete clean result from a subset.

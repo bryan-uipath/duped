@@ -9,6 +9,7 @@ mod report;
 mod rules;
 mod walk;
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -552,12 +553,6 @@ fn report(
         let found = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
         Ok(report::bodies(&records, &found))
     });
-    let helpers = report::attempt(|| {
-        let options = helper_options(&defaults());
-        let judge = judge("functions", &|r| matches!(r, record::Record::Function(_)));
-        let found = analysis::helpers::find_helpers(&records, &options, &judge);
-        Ok(report::helpers(&records, &found, &judge))
-    });
     let identical = report::attempt(|| {
         // Unreadable files were counted above; an empty source never matches.
         let sources: Vec<Vec<u8>> = files
@@ -568,6 +563,23 @@ fn report(
         let judge = judge::FileJudge::new(&graph, base, paths.iter().copied());
         let found = analysis::files::find_identical_files(&sources, analysis::files::MIN_LINES);
         Ok(report::files(&paths, &found, &judge))
+    });
+    let helpers = report::attempt(|| {
+        let options = helper_options(&defaults());
+        let judge = judge("functions", &|r| matches!(r, record::Record::Function(_)));
+        let found = analysis::helpers::find_helpers(&records, &options, &judge);
+        // A copy in a non-first identical file is counted with that file, not again here.
+        let copies: HashSet<String> = identical
+            .iter()
+            .flatten()
+            .map(|f| f.b.file.clone())
+            .collect();
+        Ok(analysis::helpers::without_files(
+            &records,
+            found.groups,
+            &copies,
+            &judge,
+        ))
     });
     let imports = report::attempt(|| {
         // Unreadable files were counted above.

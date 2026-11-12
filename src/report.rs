@@ -12,12 +12,12 @@ use serde::Serialize;
 
 use crate::analysis::bodies::{BodyReport, file_shared, function_at};
 use crate::analysis::files::IdenticalFiles;
-use crate::analysis::helpers::{HelperReport, line_count, removable_lines as copies_removable};
+use crate::analysis::helpers::{HelperGroup, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
 use crate::analysis::types::TypeReport;
 use crate::analysis::{Judge, pair_notes};
-use crate::modules::{self, Home, Tag};
+use crate::modules::{self, Tag};
 use crate::record::{Record, qualified};
 
 /// Everything `report` prints; the JSON keys are the skills' contract.
@@ -40,30 +40,8 @@ pub struct Report {
     pub removable_lines: usize,
     pub truncated: bool,
     pub groups: Vec<Group>,
-    pub helpers: Vec<Helpers>,
-}
-
-/// Identical small helpers from `helpers`: one finding over any number of files, so ranked
-/// apart from file pairs.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Helpers {
-    pub copies: Vec<HelperCopy>,
-    /// Every copy's lines but the longest one's.
-    pub removable_lines: usize,
-    pub home: Option<Home>,
-}
-
-#[derive(Serialize)]
-pub struct HelperCopy {
-    pub file: String,
-    pub line: usize,
-    pub name: String,
-    pub lines: usize,
-    pub module: Option<String>,
-    /// With `--base`: the file changed.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub changed: bool,
+    /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
+    pub helpers: Vec<HelperGroup>,
 }
 
 #[derive(Serialize)]
@@ -146,7 +124,7 @@ impl Report {
         base: Option<&str>,
         changed: Option<HashSet<String>>,
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
-        helpers: Result<Vec<Helpers>, String>,
+        helpers: Result<Vec<HelperGroup>, String>,
         top: usize,
     ) -> Self {
         // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
@@ -188,22 +166,12 @@ impl Report {
         let mut kept_helpers = Vec::new();
         let status = match helpers {
             Ok(found) => {
-                // A copy in an identical file is counted with that file, not again here.
-                let found: Vec<Helpers> = found
-                    .into_iter()
-                    .filter_map(|mut h| {
-                        h.copies.retain(|c| !first_of.contains_key(&c.file));
-                        let lines: Vec<usize> = h.copies.iter().map(|c| c.lines).collect();
-                        h.removable_lines = copies_removable(&lines);
-                        (h.copies.len() >= 2).then_some(h)
-                    })
-                    .collect();
                 let total = found.len();
                 for mut h in found {
-                    for c in &mut h.copies {
-                        c.changed = changed.as_ref().is_some_and(|f| f.contains(&c.file));
+                    for m in &mut h.members {
+                        m.changed = changed.as_ref().is_some_and(|f| f.contains(&m.file));
                     }
-                    if changed.is_none() || h.copies.iter().any(|c| c.changed) {
+                    if changed.is_none() || h.members.iter().any(|m| m.changed) {
                         kept_helpers.push(h);
                     }
                 }
@@ -215,7 +183,6 @@ impl Report {
             Err(error) => Status::Failed { error },
         };
         detectors.insert("helpers", status);
-        kept_helpers.sort_by_key(|h| std::cmp::Reverse(h.removable_lines));
 
         let mut groups = group_by_file_pair(kept, changed.as_ref());
         let file_pairs = groups.len();
@@ -402,29 +369,6 @@ pub fn files(paths: &[&str], groups: &[IdenticalFiles], judge: &dyn Judge) -> Ve
                 rank: g.lines as f64,
                 span: Span::Whole(g.lines),
             })
-        })
-        .collect()
-}
-
-pub fn helpers(records: &[Record], report: &HelperReport, judge: &dyn Judge) -> Vec<Helpers> {
-    report
-        .groups
-        .iter()
-        .map(|g| Helpers {
-            copies: g
-                .members
-                .iter()
-                .map(|&m| HelperCopy {
-                    file: records[m].location().file.clone(),
-                    line: records[m].location().start_line,
-                    name: records[m].name().to_string(),
-                    lines: line_count(&records[m]),
-                    module: judge.module(m).map(str::to_string),
-                    changed: false,
-                })
-                .collect(),
-            removable_lines: g.removable_lines,
-            home: g.home.clone(),
         })
         .collect()
 }
@@ -742,47 +686,6 @@ pub fn render_text(report: &Report) -> String {
         )
         .ok();
     }
-    if !report.helpers.is_empty() {
-        writeln!(out, "\nIdentical helpers:").ok();
-    }
-    for (rank, h) in report.helpers.iter().enumerate() {
-        let mut names: Vec<&str> = h.copies.iter().map(|c| c.name.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        writeln!(
-            out,
-            "\n{}. ~{} removable lines, {} copies: {}",
-            rank + 1,
-            h.removable_lines,
-            h.copies.len(),
-            names.join(", ")
-        )
-        .ok();
-        let modules: HashSet<&Option<String>> = h.copies.iter().map(|c| &c.module).collect();
-        match &h.home {
-            Some(home) => writeln!(out, "   {}", home.describe()).ok(),
-            None if modules.len() > 1 => {
-                writeln!(out, "   home: none (no module they all depend on)").ok()
-            }
-            None => None,
-        };
-        for c in &h.copies {
-            let module = c
-                .module
-                .as_ref()
-                .map(|m| format!("[{m}] "))
-                .unwrap_or_default();
-            let changed = if c.changed { " (changed)" } else { "" };
-            writeln!(out, "   {module}{}  {}:{}{changed}", c.name, c.file, c.line).ok();
-        }
-    }
-    if report.helper_groups > report.helpers.len() {
-        writeln!(
-            out,
-            "\n… {} more helper groups; raise --top to see them.",
-            report.helper_groups - report.helpers.len()
-        )
-        .ok();
-    }
+    out.push_str(&render_groups(&report.helpers, report.helper_groups));
     out
 }
