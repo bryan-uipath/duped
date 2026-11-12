@@ -5,7 +5,7 @@ Read the relevant section for installation, detector selection, dependency tags,
 ## Install
 
 ```bash
-duped report --help >/dev/null 2>&1 || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs a build with `report`
+[ "$(duped --version 2>/dev/null)" = "duped 0.2.0" ] || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # skills and binary ship together
 ```
 
 ## Commands
