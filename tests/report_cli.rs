@@ -420,6 +420,42 @@ fn lists_helper_families_whose_copies_drifted() {
 }
 
 #[test]
+fn rolls_file_pairs_up_by_directory() {
+    let root = temp("directories");
+    write(&root, "a/list.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "b/rows.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "a/http.ts", &RETRY.replace("NAME", "fetchJson"));
+    write(&root, "b/load.ts", &RETRY.replace("NAME", "loadJson"));
+    // One pair between `a` and the root: not a roll-up.
+    write(&root, "totals.ts", &TOTALS.replace("NAME", "sumLines"));
+    write(
+        &root,
+        "a/totals.ts",
+        &TOTALS.replace("NAME", "invoiceTotals"),
+    );
+
+    let report = json(&root, &[]);
+    assert_eq!(report["filePairs"], 3);
+    let lines: u64 = groups(&report)
+        .iter()
+        .filter(|g| g["b"].as_str().unwrap().starts_with("b/"))
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        report["directories"],
+        serde_json::json!([{ "a": "a", "b": "b", "filePairs": 2, "removableLines": lines }])
+    );
+    let text = text(&root);
+    assert!(
+        text.contains(&format!(
+            "\nDirectories sharing several file pairs:\n   ~{lines} removable lines, 2 file pairs: a ~ b\n\n1. "
+        )),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");
