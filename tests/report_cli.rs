@@ -248,7 +248,7 @@ fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let text = text(&root);
     assert!(
         text.starts_with(
-            "4 file pairs, ~46 removable lines (bodies 4; files 1; imports 0; names 1; types 1).\n"
+            "4 file pairs and 0 helper groups, ~46 removable lines (bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
         ),
         "{text}"
     );
@@ -264,6 +264,71 @@ fn groups_rank_by_removable_lines_then_agreeing_analyses() {
         "{text}"
     );
     assert!(text.contains("(uniqueItems:1 ~ dedupeRows:1)"), "{text}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn helper_groups_rank_apart_and_skip_copies_in_identical_files() {
+    let root = temp("helpers");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/core/package.json",
+        r#"{"name":"@demo/core"}"#,
+    );
+    write(
+        &root,
+        "packages/web/package.json",
+        r#"{"name":"@demo/web","dependencies":{"@demo/core":"workspace:*"}}"#,
+    );
+    let guard = "export function NAME(value: unknown): value is Record<string, unknown> {\n  return typeof value === 'object' && value !== null && !Array.isArray(value);\n}\n";
+    write(
+        &root,
+        "packages/core/a.ts",
+        &guard.replace("NAME", "isRecord"),
+    );
+    // `web/p.ts` is an identical copy of `core/p.ts`: its helper is counted with the file,
+    // so the group is left in one module, with no cross-module home.
+    let padded = format!(
+        "{}{}",
+        guard.replace("NAME", "isPlain"),
+        (0..10)
+            .map(|i| format!("export const N{i} = {i};\n"))
+            .collect::<String>()
+    );
+    write(&root, "packages/core/p.ts", &padded);
+    write(&root, "packages/web/p.ts", &padded);
+
+    let report = json(&root, &[]);
+    assert_eq!(report["helperGroups"], 1);
+    assert_eq!(report["detectors"]["helpers"]["total"], 1);
+    let group = &report["helpers"][0];
+    let files: Vec<&str> = group["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec!["packages/core/a.ts", "packages/core/p.ts"]);
+    assert_eq!(group["removableLines"], 3);
+    assert_eq!(group["modules"], serde_json::json!(["@demo/core"]));
+    assert_eq!(group["home"], Value::Null);
+    // The identical file's 13 lines, plus 1 of 2 helper copies.
+    assert_eq!(report["removableLines"], 16);
+
+    let text = text(&root);
+    assert!(
+        text.contains("1 file pairs and 1 helper groups, ~16 removable lines"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nIdentical helpers:\n\n1. 2 copies in @demo/core, ~3 removable lines: isPlain, isRecord\n   [@demo/core] isRecord  packages/core/a.ts:1\n"),
+        "{text}"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 

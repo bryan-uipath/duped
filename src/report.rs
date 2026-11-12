@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use crate::analysis::bodies::{BodyReport, file_shared, function_at, kind_text};
 use crate::analysis::files::IdenticalFiles;
+use crate::analysis::helpers::{HelperGroup, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
 use crate::analysis::types::TypeReport;
@@ -33,10 +34,14 @@ pub struct Report {
     pub detectors: BTreeMap<&'static str, Status>,
     /// Groups before `--top`.
     pub file_pairs: usize,
-    /// Sum of the groups' `removable_lines`, before `--top`.
+    /// Helper groups before `--top`.
+    pub helper_groups: usize,
+    /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
     pub removable_lines: usize,
     pub truncated: bool,
     pub groups: Vec<Group>,
+    /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
+    pub helpers: Vec<HelperGroup>,
 }
 
 #[derive(Serialize)]
@@ -123,6 +128,7 @@ impl Report {
         base: Option<&str>,
         changed: Option<HashSet<String>>,
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
+        helpers: Result<Vec<HelperGroup>, String>,
         top: usize,
     ) -> Self {
         // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
@@ -161,10 +167,37 @@ impl Report {
             };
             detectors.insert(name, status);
         }
+        let mut kept_helpers = Vec::new();
+        let status = match helpers {
+            Ok(found) => {
+                let total = found.len();
+                for mut h in found {
+                    for m in &mut h.members {
+                        m.changed = changed.as_ref().is_some_and(|f| f.contains(&m.file));
+                    }
+                    if changed.is_none() || h.members.iter().any(|m| m.changed) {
+                        kept_helpers.push(h);
+                    }
+                }
+                Status::Ok {
+                    total,
+                    kept: kept_helpers.len(),
+                }
+            }
+            Err(error) => Status::Failed { error },
+        };
+        detectors.insert("helpers", status);
+
         let mut groups = group_by_file_pair(kept, changed.as_ref());
         let file_pairs = groups.len();
-        let removable_lines = groups.iter().map(|g| g.removable_lines).sum();
+        let helper_groups = kept_helpers.len();
+        let removable_lines = groups.iter().map(|g| g.removable_lines).sum::<usize>()
+            + kept_helpers
+                .iter()
+                .map(|h| h.removable_lines)
+                .sum::<usize>();
         groups.truncate(top);
+        kept_helpers.truncate(top);
         Report {
             directory,
             mode: if changed.is_some() { "diff" } else { "all" },
@@ -172,15 +205,17 @@ impl Report {
             changed_files: changed.as_ref().map(HashSet::len),
             detectors,
             file_pairs,
+            helper_groups,
             removable_lines,
-            truncated: file_pairs > top,
+            truncated: file_pairs > top || helper_groups > top,
             groups,
+            helpers: kept_helpers,
         }
     }
 }
 
 /// Runs one analysis; an error or panic fails only it, as a crashed subprocess would.
-pub fn attempt(run: impl FnOnce() -> Result<Vec<Finding>>) -> Result<Vec<Finding>, String> {
+pub fn attempt<T>(run: impl FnOnce() -> Result<T>) -> Result<T, String> {
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(result) => result.map_err(|err| format!("{err:#}")),
         Err(panic) => Err(panic
@@ -610,15 +645,17 @@ pub fn render_text(report: &Report) -> String {
     match (&report.base, report.changed_files) {
         (Some(base), Some(changed)) => writeln!(
             out,
-            "{} file pairs, ~{} removable lines, touching {changed} files changed since {base} ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines, touching {changed} files changed since {base} ({}).",
             report.file_pairs,
+            report.helper_groups,
             report.removable_lines,
             counts.join("; ")
         ),
         _ => writeln!(
             out,
-            "{} file pairs, ~{} removable lines ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines ({}).",
             report.file_pairs,
+            report.helper_groups,
             report.removable_lines,
             counts.join("; ")
         ),
@@ -666,7 +703,7 @@ pub fn render_text(report: &Report) -> String {
             .ok();
         }
     }
-    if report.truncated {
+    if report.file_pairs > report.groups.len() {
         writeln!(
             out,
             "\n… {} more file pairs; raise --top to see them.",
@@ -674,5 +711,6 @@ pub fn render_text(report: &Report) -> String {
         )
         .ok();
     }
+    out.push_str(&render_groups(&report.helpers, report.helper_groups));
     out
 }

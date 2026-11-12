@@ -178,7 +178,7 @@ pub fn body_tokens(
         if leaf && !text.trim().is_empty() {
             let token = match class {
                 Some(TokenClass::Skip) => None,
-                Some(TokenClass::Identifier) => Some(Token::Identifier),
+                Some(TokenClass::Identifier) => Some(Token::Identifier(token_hash(text))),
                 Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
             };
             if let Some(token) = token {

@@ -988,7 +988,7 @@ mod tests {
             functions(&records)[0].body,
             vec![
                 text("{"),
-                Token::Identifier,
+                Token::Identifier(token_hash("user")),
                 text("."),
                 text("name"),
                 text("+"),

@@ -19,6 +19,7 @@ duped extract [DIR] [--out records.jsonl]   # every top-level function and type,
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
 duped types [DIR]                           # types that share most of their properties
 duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript, Rust)
+duped helpers [DIR]                         # small helpers copied with identical bodies, and drifted same-name ones
 duped imports [DIR]                         # TS/JS files that import the same rare things
 duped names [DIR]                           # file pairs that declare the same names
 duped report [DIR] [--base REF]             # every analysis, grouped by file pair
@@ -139,6 +140,24 @@ Candidate pairs come from MinHash signatures with LSH banding, tuned to find a p
 
 `--json` prints every pair and file pair; each pair has `kind` and `region: { a: [start, end], b: [start, end] }` (`null` for `similar`).
 
+### Finding copied helpers
+
+`duped bodies` skips bodies under 50 tokens, so a one-line `isRecord` copied into 30 files is invisible there. `duped helpers` groups top-level functions of 8–49 body tokens whose bodies are identical after normalising, N copies at a time. TypeScript, JavaScript and Rust.
+
+- **Normalising:** plain parameters become their position, so `isRec(v)` and `isRecord(value)` match; a destructured parameter keeps its keys by name, since callers pass those names. Every other identifier keeps its name too, so two `<XContext.Provider>` wrappers don't. Text naming a parameter, such as shorthand `{ x }`, also records which parameter, so `{ x }` from the first parameter doesn't match `{ x }` from the second. `{ return x; }` counts as `x`, like an arrow function's expression body. Literals and property names are kept. Methods are skipped.
+- **removableLines:** every copy's lines but the longest one's. Groups rank by it.
+- **home:** where the one kept copy could live, chosen as for a `types` cluster; `none` when no module is reachable from all of them.
+- **Same name, different bodies:** a name with 3 or more small definitions, at least 2 bodies and one body copied at least twice: a helper whose copies drifted. Names whose definitions all differ (`run`, `parse`) are conventions and are left out.
+- A copy acknowledged against its group's first member is hidden from groups (there is no flag to show it); families ignore acknowledgements.
+- **Gap:** the 49-token limit applies to the raw body, but matching uses the normalised one, so `function f(x) { return E; }` with 50–53 raw tokens isn't a helper, while its arrow twin `x => E` is, and `bodies` skips the arrow. Such a pair falls between the two.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--min-tokens` | `8` | skip smaller (normalised) bodies; tiny ones like `x.id` match everywhere |
+| `--top` | `40` | groups and families to show |
+
+`--json` prints `{ summary, groups, families }`; each group has `members` (`name`, `module`, `file`, `line`, `lines`, `tokens`), `removableLines`, `modules` and `home`, each family `name`, `definitions` and `variants` (members per body, largest first).
+
 ### Finding ported files by their imports
 
 A file copied into another package keeps importing the same unusual things, even when every declaration in it was renamed. `duped imports` compares the `import` statements of TypeScript and JavaScript files.
@@ -181,13 +200,13 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 ### Running every analysis at once
 
-`duped report` runs `bodies`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files` ignores acknowledgements. The header totals it across all file pairs, so code copied into three or more files (other than whole identical files) counts once per pair. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
+`duped report` runs `bodies`, `helpers`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files` ignores acknowledgements. The header totals it across all file pairs and helper groups, so code copied into three or more files (other than whole identical files or helpers) counts once per pair. `helpers` groups span any number of files, so they are listed after the file pairs, ranked by their own `removableLines`; a copy inside a non-first identical file is dropped, since the file already counts, and `bodies` only compares larger functions, so no line counts twice. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
 
 - `--base <ref>` keeps only file pairs with a side added, modified or renamed since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`. It needs git; without it, git isn't used.
-- `--top` (default `40`) limits the file pairs shown, in `--json` too; `filePairs` and `truncated` say how many there were.
+- `--top` (default `40`) limits the file pairs and helper groups shown, in `--json` too; `filePairs`, `helperGroups` and `truncated` say how many there were.
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
-`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, removableLines, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`; a `contained` or `block` side also has `region: [start, end]`.
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, removableLines, truncated, groups, helpers }`. `helpers` are groups as `duped helpers --json` prints them, each member also `changed` with `--base`; with `--base` a group is kept when a member changed. `truncated` is true when either file pairs or helper groups exceed `--top`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`; a `contained` or `block` side also has `region: [start, end]`.
 
 ### Finding duplicate functions
 

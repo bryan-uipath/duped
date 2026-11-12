@@ -60,6 +60,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 - **fns:** Jaccard similarity of parameter names, weighted by how rare each name is, plus a stricter score that also compares parameter and return types. Conventions (a shared name set on many functions), implementations of one base, and wrappers are filtered.
 - **names:** file pairs that declare several of the same top-level names, scored by name rarity, export and matching signature, with each name's shape or signature marked as matching or diverging.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules. Jaccard misses a small body inside a large one and a block pasted into two large functions, so an inverted index also pairs bodies sharing rare shingles (each in ≤10 bodies, so boilerplate doesn't link), and also yields `similar` pairs LSH missed. Their best in-order chain of shared runs, if mostly shared, becomes a `contained` or `block` pair with line ranges; `report` counts only those lines.
+- **helpers:** small top-level functions (below `bodies`' token floor) grouped N-way by identical normalised bodies: parameters renamed by position, other names kept, `{ return x; }` read as `x`. Abstracting every identifier, as `bodies` does, groups unrelated functions of one shape (context providers, listener subscriptions); at this size names are most of the signal. Same-name helpers with several bodies, one copied, are reported as drift.
 - **files:** identical files (line endings and trailing whitespace ignored), `report` only. Whole-file copies are the most actionable finding, and the other analyses see them only as several unrelated pairs.
 - **imports:** files whose imports overlap on rare items (IDF-weighted Jaccard over `specifier#name`), for ported copies whose declarations were all renamed. It reads import statements itself rather than adding a record kind: imports aren't declarations, and no other analysis needs them. TypeScript/JavaScript only.
 - **coupling:** not duplication, but its cause: imports resolved to files and scored by how many boundaries (directories with an entry file, a manifest, or named `internal`) they enter past an entry. Headline `bypassRate` over cross-boundary imported symbols, plus unused entry surface, hiding and a per-boundary score. `--base` matches symbols by (importer, name), so a fix only counts when the import got shallower or the symbol moved, not when it was copied or inlined. TypeScript/JavaScript, Python and Rust; C# `using` maps to namespaces rather than files and is left for later.
@@ -86,8 +87,9 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped fns [PATH]` | function pairs by signature similarity |
 | `duped names [PATH]` | same-name collisions, including ones with divergent shapes |
 | `duped bodies [PATH]` | functions with near-copy bodies, and files that share several |
+| `duped helpers [PATH]` | small helpers copied with identical bodies, and drifted same-name helpers |
 | `duped imports [PATH]` | file pairs that import the same rare things |
-| `duped report [PATH]` | `bodies`, `files`, `imports`, `names` and `types` pairs grouped by file pair, ranked by estimated removable lines |
+| `duped report [PATH]` | `bodies`, `files`, `imports`, `names` and `types` pairs grouped by file pair, ranked by estimated removable lines; `helpers` groups ranked apart |
 | `duped coupling [PATH]` | imports that bypass entry files, by depth; surface, hiding and leaks per boundary |
 
 All but `fns` are implemented. Every analysis supports `--json`. `report --base <ref>` keeps only file pairs with a side the diff since the merge base touches; `coupling --base <ref>` compares with a scan of the merge base, and `coupling --rev <ref>` scans a commit. The other commands don't take `--base`.
@@ -128,3 +130,4 @@ Each step ships on its own.
 11. `imports` (prototype): rare-import fingerprints for TypeScript/JavaScript files.
 12. `report`: every analysis grouped by file pair, diff-filtered with `--base`.
 13. `coupling`: API-bypass depth, surface, hiding and leaks per boundary, with edge-matched `--base` deltas and `--rev` for history. Next: C# `using` → namespace directories, tsconfig `paths`.
+14. `helpers`: N-way groups of small copied helpers and drifted same-name families (TypeScript/JavaScript, Rust).
