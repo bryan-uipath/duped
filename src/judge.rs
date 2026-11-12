@@ -53,10 +53,12 @@ impl Packages {
         }
     }
 
-    /// Everything `files` (relative to `base`) import, sorted.
-    fn of(&self, files: &[&str]) -> Vec<String> {
+    /// Packages `sides` (files relative to `base`, with their modules) import that their own
+    /// module declares, sorted. An undeclared import, like Node's `events`, is a built-in or
+    /// a hoisted package, so a home needn't declare it either.
+    fn of(&self, graph: &ModuleGraph, sides: &[(&str, Option<usize>)]) -> Vec<String> {
         let mut all: Vec<String> = Vec::new();
-        for &file in files {
+        for &(file, module) in sides {
             let mut cache = self.cache.borrow_mut();
             let packages = cache.entry(file.to_string()).or_insert_with(|| {
                 let path = self.base.join(file);
@@ -68,7 +70,12 @@ impl Packages {
                     })
                 })
             });
-            all.extend(packages.iter().cloned());
+            all.extend(
+                packages
+                    .iter()
+                    .filter(|p| module.is_some_and(|m| graph.declares(m, p)))
+                    .cloned(),
+            );
         }
         all.sort_unstable();
         all.dedup();
@@ -217,8 +224,8 @@ impl Judge for ProjectJudge<'_> {
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
         self.tagging.then(|| {
-            let files = [a, b].map(|i| self.records[i].location().file.as_str());
-            let needs = self.packages.of(&files);
+            let sides = [a, b].map(|i| (self.records[i].location().file.as_str(), self.modules[i]));
+            let needs = self.packages.of(self.graph, &sides);
             self.graph.tag(self.modules[a], self.modules[b], &needs)
         })
     }
@@ -232,11 +239,12 @@ impl Judge for ProjectJudge<'_> {
             return None;
         }
         let modules: Vec<Option<usize>> = members.iter().map(|&m| self.modules[m]).collect();
-        let files: Vec<&str> = members
+        let sides: Vec<(&str, Option<usize>)> = members
             .iter()
-            .map(|&m| self.records[m].location().file.as_str())
+            .map(|&m| (self.records[m].location().file.as_str(), self.modules[m]))
             .collect();
-        self.graph.home(&modules, &self.packages.of(&files))
+        self.graph
+            .home(&modules, &self.packages.of(self.graph, &sides))
     }
 
     fn summary(&self) -> Option<String> {
@@ -297,7 +305,8 @@ impl Judge for FileJudge<'_> {
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
         self.tagging.then(|| {
-            let needs = self.packages.of(&[&self.files[a], &self.files[b]]);
+            let sides = [a, b].map(|i| (self.files[i].as_str(), self.modules[i]));
+            let needs = self.packages.of(self.graph, &sides);
             self.graph.tag(self.modules[a], self.modules[b], &needs)
         })
     }
@@ -581,6 +590,43 @@ mod tests {
         let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert_eq!(judge.module(0), None);
+    }
+
+    #[test]
+    fn homes_ignore_imports_the_files_own_module_does_not_declare() {
+        // `a` and `b` import Node's `events`; only `web` declares it (a polyfill).
+        let root = std::env::temp_dir().join(format!("duped-needs-{}", std::process::id()));
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(
+                root.join(dir).join("x.ts"),
+                "import { EventEmitter } from 'events';\n",
+            )
+            .unwrap();
+        }
+        let module = |name: &str, deps: Vec<usize>, external: Vec<String>| Module {
+            name: name.into(),
+            root: root.join(name),
+            deps,
+            aliases: Vec::new(),
+            external,
+        };
+        let g = ModuleGraph::new(vec![
+            module("base", vec![], vec![]),
+            module("web", vec![0], vec!["events".into()]),
+            module("a", vec![0, 1], vec![]),
+            module("b", vec![0, 1], vec![]),
+        ]);
+        let records = vec![ty("A", "a/x.ts", None), ty("B", "b/x.ts", None)];
+        let judge = ProjectJudge::new(&g, &records, root.clone(), &[], "types", is_type);
+        assert_eq!(
+            judge.tag(0, 1),
+            Some(Tag::MoveDown {
+                home: "base".into(),
+                missing: vec![]
+            })
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -128,6 +128,31 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
+fn same_file_type_pairs_count_one_side() {
+    // Two 6-line interfaces with the same fields in one file: one copy is removable, not both.
+    let root = temp("same-file");
+    let shape = |name: &str| {
+        format!(
+            "export interface {name} {{\n  id: string;\n  label: string;\n  owner: string;\n  status: string;\n}}\n"
+        )
+    };
+    write(
+        &root,
+        "a/types.ts",
+        &format!("{}{}", shape("Alpha"), shape("Beta")),
+    );
+    write(&root, "b/other.ts", "export const unrelated = 1;\n");
+    let report = json(&root, &[]);
+    let same: Vec<&Value> = groups(&report)
+        .iter()
+        .filter(|g| g["a"] == g["b"])
+        .collect();
+    assert_eq!(same.len(), 1, "{report}");
+    assert_eq!(same[0]["removableLines"], 6);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn identical_copies_count_once_each() {
     // Three identical files: two pairs with the first, not three, and not y ~ z from `bodies`.
     let root = temp("copies");
