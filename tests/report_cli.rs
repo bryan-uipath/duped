@@ -128,7 +128,56 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
-fn groups_rank_by_agreeing_analyses_then_finding_count() {
+fn same_file_type_pairs_count_one_side() {
+    // Two 6-line interfaces with the same fields in one file: one copy is removable, not both.
+    let root = temp("same-file");
+    let shape = |name: &str| {
+        format!(
+            "export interface {name} {{\n  id: string;\n  label: string;\n  owner: string;\n  status: string;\n}}\n"
+        )
+    };
+    write(
+        &root,
+        "a/types.ts",
+        &format!("{}{}", shape("Alpha"), shape("Beta")),
+    );
+    write(&root, "b/other.ts", "export const unrelated = 1;\n");
+    let report = json(&root, &[]);
+    let same: Vec<&Value> = groups(&report)
+        .iter()
+        .filter(|g| g["a"] == g["b"])
+        .collect();
+    assert_eq!(same.len(), 1, "{report}");
+    assert_eq!(same[0]["removableLines"], 6);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn identical_copies_count_once_each() {
+    // Three identical files: two pairs with the first, not three, and not y ~ z from `bodies`.
+    let root = temp("copies");
+    for dir in ["x", "y", "z"] {
+        write(
+            &root,
+            &format!("{dir}/list.ts"),
+            &LIST.replace("NAME", "uniqueItems"),
+        );
+    }
+    let report = json(&root, &[]);
+    let pairs: Vec<(&str, &str)> = groups(&report)
+        .iter()
+        .map(|g| (g["a"].as_str().unwrap(), g["b"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("x/list.ts", "y/list.ts"), ("x/list.ts", "z/list.ts")]
+    );
+    assert_eq!(report["removableLines"], 22);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let root = temp("rank");
     // `p/`: two functions copied under new names (bodies only: 2 pairs and the file pair).
     let p = |a, b| format!("{}{}", RETRY.replace("NAME", a), TOTALS.replace("NAME", b));
@@ -140,8 +189,20 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     // `r/`: one copied function (bodies, one finding).
     write(&root, "r/one.ts", &LIST.replace("NAME", "uniqueItems"));
     write(&root, "r/two.ts", &LIST.replace("NAME", "dedupeRows"));
+    // `s/`: an identical 12-line file, with CRLF line ends in one copy (files only).
+    let table: String = (0..12)
+        .map(|i| format!("export const LIMIT_{i} = {i};\n"))
+        .collect();
+    write(&root, "s/one.ts", &table);
+    write(&root, "s/two.ts", &table.replace('\n', "\r\n"));
 
     let report = json(&root, &[]);
+    let removable: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(removable, vec![22, 12, 11, 1]);
+    assert_eq!(report["removableLines"], 46);
     let summary: Vec<(&str, Vec<&str>, usize)> = groups(&report)
         .iter()
         .map(|g| {
@@ -156,20 +217,21 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     assert_eq!(
         summary,
         vec![
-            ("q/one.ts", vec!["names", "types"], 2),
             ("p/one.ts", vec!["bodies"], 3),
+            ("s/one.ts", vec!["files"], 1),
             ("r/one.ts", vec!["bodies"], 1),
+            ("q/one.ts", vec!["names", "types"], 2),
         ]
     );
     // Within a group, by each analysis's rank: the file pair sums its functions' shingles.
-    let kinds: Vec<&str> = report["groups"][1]["findings"]
+    let kinds: Vec<&str> = report["groups"][0]["findings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| f["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, vec!["file", "function", "function"]);
-    let order = &report["groups"][0]["findings"];
+    let order = &report["groups"][3]["findings"];
     assert_eq!(order[0]["detector"], "names");
     assert_eq!(
         order[0]["evidence"],
@@ -185,10 +247,18 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
 
     let text = text(&root);
     assert!(
-        text.starts_with("3 file pairs (bodies 4; imports 0; names 1; types 1).\n"),
+        text.starts_with(
+            "4 file pairs, ~46 removable lines (bodies 4; files 1; imports 0; names 1; types 1).\n"
+        ),
         "{text}"
     );
-    assert!(text.contains("\n1. names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"));
+    assert!(text.contains(
+        "\n4. ~1 removable lines, names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"
+    ));
+    assert!(
+        text.contains("   - files file: identical, 12 lines"),
+        "{text}"
+    );
     assert!(
         text.contains("   - bodies file: 2 function pairs"),
         "{text}"
