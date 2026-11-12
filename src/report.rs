@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::analysis::bodies::{BodyReport, file_shared, function_at, kind_text};
 use crate::analysis::files::IdenticalFiles;
-use crate::analysis::helpers::{HelperGroup, render_groups};
+use crate::analysis::helpers::{Family, HelperGroup, render_families, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
 use crate::analysis::types::TypeReport;
@@ -36,12 +36,16 @@ pub struct Report {
     pub file_pairs: usize,
     /// Helper groups before `--top`.
     pub helper_groups: usize,
+    /// Drifted helper families before `--top`.
+    pub helper_families: usize,
     /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
     pub removable_lines: usize,
     pub truncated: bool,
     pub groups: Vec<Group>,
     /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
     pub helpers: Vec<HelperGroup>,
+    /// Same-name helpers whose copies drifted, most definitions first.
+    pub families: Vec<Family>,
 }
 
 #[derive(Serialize)]
@@ -129,7 +133,7 @@ impl Report {
         base: Option<&str>,
         changed: Option<Changed>,
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
-        helpers: Result<Vec<HelperGroup>, String>,
+        helpers: Result<(Vec<HelperGroup>, Vec<Family>), String>,
         top: usize,
     ) -> Self {
         // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
@@ -175,8 +179,21 @@ impl Report {
             detectors.insert(name, status);
         }
         let mut kept_helpers = Vec::new();
+        let mut kept_families = Vec::new();
         let status = match helpers {
-            Ok(found) => {
+            Ok((found, families)) => {
+                for mut f in families {
+                    let mut any = false;
+                    for m in f.variants.iter_mut().flatten() {
+                        m.changed = changed
+                            .as_ref()
+                            .is_some_and(|c| c.lines(&m.file, (m.line, m.line + m.lines - 1)));
+                        any |= m.changed;
+                    }
+                    if changed.is_none() || any {
+                        kept_families.push(f);
+                    }
+                }
                 let total = found.len();
                 for mut h in found {
                     for m in &mut h.members {
@@ -205,8 +222,10 @@ impl Report {
                 .iter()
                 .map(|h| h.removable_lines)
                 .sum::<usize>();
+        let helper_families = kept_families.len();
         groups.truncate(top);
         kept_helpers.truncate(top);
+        kept_families.truncate(top);
         Report {
             directory,
             mode: if changed.is_some() { "diff" } else { "all" },
@@ -215,10 +234,12 @@ impl Report {
             detectors,
             file_pairs,
             helper_groups,
+            helper_families,
             removable_lines,
-            truncated: file_pairs > top || helper_groups > top,
+            truncated: file_pairs > top || helper_groups > top || helper_families > top,
             groups,
             helpers: kept_helpers,
+            families: kept_families,
         }
     }
 }
@@ -822,6 +843,7 @@ pub fn render_text(report: &Report) -> String {
         .ok();
     }
     out.push_str(&render_groups(&report.helpers, report.helper_groups));
+    out.push_str(&render_families(&report.families, report.helper_families));
     out
 }
 

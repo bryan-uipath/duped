@@ -31,6 +31,8 @@ Candidates are generated across the whole repo, so copies of *unchanged* code ar
 Inspect detector statuses, counts (`filePairs`, `helperGroups`), and `truncated`
 (file pairs or helper groups cut by `--top`) before selected groups; `helpers`
 lists small helpers the change copies N ways, with `changed` on its copies;
+`families` lists same-name helpers whose bodies differ: a `changed` copy in a
+minority variant is a helper the change wrote differently from the rest;
 avoid dumping the full JSON into context. Report failed detectors as gaps.
 If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
 `--top` or state the coverage limit; do not claim a complete clean result from a subset.

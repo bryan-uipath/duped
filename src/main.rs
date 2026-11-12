@@ -574,12 +574,9 @@ fn report(
             .flatten()
             .map(|f| f.b.file.clone())
             .collect();
-        Ok(analysis::helpers::without_files(
-            &records,
-            found.groups,
-            &copies,
-            &judge,
-        ))
+        let families = analysis::helpers::families(&records, &found.families, &judge);
+        let groups = analysis::helpers::without_files(&records, found.groups, &copies, &judge);
+        Ok((groups, families))
     });
     let imports = report::attempt(|| {
         // Unreadable files were counted above.

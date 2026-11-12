@@ -371,6 +371,36 @@ fn helper_groups_rank_apart_and_skip_copies_in_identical_files() {
 }
 
 #[test]
+fn lists_helper_families_whose_copies_drifted() {
+    let root = temp("families");
+    let guard = "export const isRecord = (v: unknown) => typeof v === 'object' && v !== null && !Array.isArray(v);\n";
+    write(&root, "x.ts", guard);
+    write(&root, "y.ts", guard);
+    write(&root, "z.ts", &guard.replace(" && !Array.isArray(v)", ""));
+
+    let report = json(&root, &[]);
+    assert_eq!(report["helperFamilies"], 1);
+    let family = &report["families"][0];
+    assert_eq!(family["name"], "isRecord");
+    assert_eq!(family["definitions"], 3);
+    let variants: Vec<usize> = family["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_array().unwrap().len())
+        .collect();
+    assert_eq!(variants, vec![2, 1]);
+    assert_eq!(family["variants"][1][0]["file"], "z.ts");
+
+    let text = text(&root);
+    assert!(
+        text.contains("\nSame name, different bodies:\n\n1. isRecord: 3 definitions, 2 bodies\n   2× isRecord  x.ts:1\n   1× isRecord  z.ts:1\n"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");

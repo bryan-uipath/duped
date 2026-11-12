@@ -32,6 +32,8 @@ The report combines bodies, files (identical copies), imports, names, and types,
 grouped by file pair and ranked by `removableLines`, an estimate of what merging
 the pair removes, then `helpers`: small helpers copied N ways (`isRecord` in 30
 files), ranked apart by their own `removableLines`. The header total covers both.
+Last, `families`: same-name helpers whose copies drifted (`isRecord`: 28
+definitions, 6 bodies), one list of copies per body.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
 `target`, …) and `.gitignore`d paths are skipped by default; checked-in
 generated code is not. Paths are relative to the scan root. Use a unique
@@ -39,7 +41,7 @@ temporary file per run and pass its literal path to later commands. Reuse a
 report only when the caller states it matches the current tree; else rerun.
 
 Inspect `detectors` statuses and counts (`kept` touches the change, `total` is
-repo-wide), `filePairs`, `helperGroups`, and `truncated` (either list cut by
+repo-wide), `filePairs`, `helperGroups`, `helperFamilies`, and `truncated` (any list cut by
 `--top`), then select relevant `groups` and `helpers`; avoid dumping the full JSON. Failed detectors are gaps,
 not clean results. `--top` defaults to 40 even for JSON. Expand it when needed
 for coverage or disclose that only the selected groups were reviewed.
@@ -47,8 +49,8 @@ for coverage or disclose that only the selected groups were reviewed.
 ## Reading a finding
 
 Scores prioritize inspection, not conclusions. Agreement between detectors
-is stronger evidence. Prioritize behavioral drift: `~` in `names`, or `bodies`
-similarity below ~0.95, means the copies already differ; diff them. With
+is stronger evidence. Prioritize behavioral drift: `~` in `names`, a `families`
+entry, or `bodies` similarity below ~0.95, means the copies already differ; diff them. With
 `--base`, `bodies`, `types` and `helpers` findings are kept only when the
 change touched their lines; `names` and `imports` are kept per changed file,
 so confirm those belong to the change. Respect dependency direction (`tag.copy` imports
