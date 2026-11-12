@@ -5,7 +5,7 @@ Read the relevant section for installation, detector selection, dependency tags,
 ## Install
 
 ```bash
-printf '%s\n' "duped 0.2.0" "$(duped --version 2>/dev/null)" | sort -V -C || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs 0.2.0 or newer
+printf '%s\n' "duped 0.3.0" "$(duped --version 2>/dev/null)" | sort -V -C || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs 0.3.0 or newer
 ```
 
 ## Commands
