@@ -1,7 +1,7 @@
 //! Modules (packages, crates, projects) found from manifests, their internal dependency
 //! graph, and what it says about a duplicate pair: can one side import the other?
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -26,6 +26,8 @@ pub struct Module {
     pub deps: Vec<usize>,
     /// Names of other manifests in the same directory, e.g. a crate beside a `package.json`.
     pub aliases: Vec<String>,
+    /// Manifest dependencies that aren't modules here, e.g. `react`.
+    pub external: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -33,6 +35,8 @@ pub struct ModuleGraph {
     pub modules: Vec<Module>,
     /// `reach[a][b]`: `a` depends on `b`, directly or transitively.
     reach: Vec<Vec<bool>>,
+    /// [`package_key`] → modules that are that package or list it as a direct dependency.
+    declarers: HashMap<String, Vec<usize>>,
 }
 
 /// What the dependency graph says about a duplicate pair.
@@ -46,7 +50,13 @@ pub enum Tag {
     /// `copy` reaches `owner` only through other modules; it needs a direct dependency first.
     ImportableIndirect { copy: String, owner: String },
     /// Neither depends on the other, but both depend on `home`, which could hold one copy.
-    MoveDown { home: String },
+    /// `missing`: packages the copies import that `home` doesn't declare; empty when the
+    /// lowest home declaring them all was found.
+    MoveDown {
+        home: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        missing: Vec<String>,
+    },
     /// No dependency path between the two.
     Boundary,
 }
@@ -57,8 +67,13 @@ pub enum Tag {
 pub enum Home {
     /// A member's module that every other member's module depends on.
     Owner { module: String },
-    /// No member's module works; this common dependency of all of them could.
-    MoveDown { module: String },
+    /// No member's module works; this common dependency of all of them could. `missing` as
+    /// for [`Tag::MoveDown`].
+    MoveDown {
+        module: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        missing: Vec<String>,
+    },
 }
 
 impl Tag {
@@ -80,7 +95,9 @@ impl Tag {
             Tag::ImportableIndirect { copy, owner } => {
                 format!("importable-indirect: {copy} reaches {owner} only transitively")
             }
-            Tag::MoveDown { home } => format!("move-down: both depend on {home}"),
+            Tag::MoveDown { home, missing } => {
+                format!("move-down: both depend on {home}{}", lacks(missing))
+            }
             Tag::Boundary => "boundary: no dependency path".to_string(),
         }
     }
@@ -90,9 +107,26 @@ impl Home {
     pub fn describe(&self) -> String {
         match self {
             Home::Owner { module } => format!("home: {module} (every member can import it)"),
-            Home::MoveDown { module } => format!("home: move down to {module}"),
+            Home::MoveDown { module, missing } => {
+                format!("home: move down to {module}{}", lacks(missing))
+            }
         }
     }
+}
+
+/// ` (lacks react, i18next)`, or nothing when `missing` is empty.
+fn lacks(missing: &[String]) -> String {
+    if missing.is_empty() {
+        String::new()
+    } else {
+        format!(" (lacks {})", missing.join(", "))
+    }
+}
+
+/// A package name as both manifests and imports spell it: Cargo's `serde-json` is imported
+/// as `serde_json`, so `-` and `_` compare equal.
+fn package_key(name: &str) -> String {
+    name.replace('-', "_")
 }
 
 impl ModuleGraph {
@@ -121,22 +155,27 @@ impl ModuleGraph {
                     root: f.root.clone(),
                     deps: Vec::new(),
                     aliases: Vec::new(),
+                    external: Vec::new(),
                 }),
             }
             module_of.push(modules.len() - 1);
         }
         for (i, f) in found.iter().enumerate() {
             let own = module_of[i];
-            let deps = &mut modules[own].deps;
-            deps.extend(
-                f.deps
-                    .iter()
-                    .filter_map(|dep| resolve(dep, &found))
-                    .map(|d| module_of[d])
-                    .filter(|&d| d != own),
-            );
-            deps.sort_unstable();
-            deps.dedup();
+            for dep in &f.deps {
+                match (resolve(dep, &found), dep) {
+                    (Some(d), _) if module_of[d] != own => modules[own].deps.push(module_of[d]),
+                    (None, Dep::Name(_, name) | Dep::Alias(name)) => {
+                        modules[own].external.push(name.clone())
+                    }
+                    _ => {}
+                }
+            }
+            let module = &mut modules[own];
+            module.deps.sort_unstable();
+            module.deps.dedup();
+            module.external.sort_unstable();
+            module.external.dedup();
         }
         apply_overrides(&mut modules, root, overrides)?;
         Ok(Self::new(modules))
@@ -158,7 +197,24 @@ impl ModuleGraph {
                 seen
             })
             .collect();
-        ModuleGraph { modules, reach }
+        let mut declarers: HashMap<String, Vec<usize>> = HashMap::new();
+        for (m, module) in modules.iter().enumerate() {
+            let names = |m: &'_ Module| std::iter::once(m.name.clone()).chain(m.aliases.clone());
+            let declared = names(module)
+                .chain(module.external.iter().cloned())
+                .chain(module.deps.iter().flat_map(|&d| names(&modules[d])));
+            for name in declared {
+                let entry = declarers.entry(package_key(&name)).or_default();
+                if entry.last() != Some(&m) {
+                    entry.push(m);
+                }
+            }
+        }
+        ModuleGraph {
+            modules,
+            reach,
+            declarers,
+        }
     }
 
     /// The module with the longest root containing `path`; `None` is [`ROOT_MODULE`].
@@ -175,7 +231,8 @@ impl ModuleGraph {
         module.map_or(ROOT_MODULE, |m| &self.modules[m].name)
     }
 
-    pub fn tag(&self, a: Option<usize>, b: Option<usize>) -> Tag {
+    /// `needs`: packages the pair's files import, which a move-down home must declare.
+    pub fn tag(&self, a: Option<usize>, b: Option<usize>, needs: &[String]) -> Tag {
         let name = |m: usize| self.modules[m].name.clone();
         // Files under no module carry no dependency information.
         if a == b && a.is_some() {
@@ -202,14 +259,17 @@ impl ModuleGraph {
                 };
             }
         }
-        match self.lowest(|m| self.reach[a][m] && self.reach[b][m]) {
-            Some(home) => Tag::MoveDown { home: name(home) },
+        match self.host(|m| self.reach[a][m] && self.reach[b][m], needs, &[a, b]) {
+            Some((home, missing)) => Tag::MoveDown {
+                home: name(home),
+                missing,
+            },
             None => Tag::Boundary,
         }
     }
 
     /// Where a cluster spanning `members`' modules could keep one definition.
-    pub fn home(&self, members: &[Option<usize>]) -> Option<Home> {
+    pub fn home(&self, members: &[Option<usize>], needs: &[String]) -> Option<Home> {
         let mut set: Vec<usize> = members.iter().copied().collect::<Option<Vec<_>>>()?;
         set.sort_unstable();
         set.dedup();
@@ -223,20 +283,65 @@ impl ModuleGraph {
                 module: self.modules[owner].name.clone(),
             });
         }
-        self.lowest(|m| set.iter().all(|&o| self.reach[o][m]))
-            .map(|m| Home::MoveDown {
+        self.host(|m| set.iter().all(|&o| self.reach[o][m]), needs, &set)
+            .map(|(m, missing)| Home::MoveDown {
                 module: self.modules[m].name.clone(),
+                missing,
             })
+    }
+
+    /// The lowest matching module that declares every known package in `needs`, else the one
+    /// missing fewest, with what it misses. A need no module declares, such as `node:fs` or a
+    /// path alias, is ignored: nothing here can supply it. So is a need named by one of
+    /// `members`, such as a Python file's absolute `from svc_a.models import X`.
+    fn host(
+        &self,
+        matches: impl Fn(usize) -> bool,
+        needs: &[String],
+        members: &[usize],
+    ) -> Option<(usize, Vec<String>)> {
+        let known: Vec<(&String, &Vec<usize>)> = needs
+            .iter()
+            .filter_map(|n| Some((n, self.declarers.get(&package_key(n))?)))
+            .filter(|(n, _)| !members.iter().any(|&m| self.named(m, n)))
+            .collect();
+        let missing = |m: usize| -> Vec<String> {
+            known
+                .iter()
+                .filter(|(_, declarers)| !declarers.contains(&m))
+                .map(|(n, _)| n.to_string())
+                .collect()
+        };
+        let best = (0..self.modules.len())
+            .filter(|&m| matches(m))
+            .min_by_key(|&m| (missing(m).len(), self.depth(m), &self.modules[m].name))?;
+        Some((best, missing(best)))
+    }
+
+    /// `m` is `package` or lists it as a direct dependency.
+    pub fn declares(&self, m: usize, package: &str) -> bool {
+        self.declarers
+            .get(&package_key(package))
+            .is_some_and(|d| d.contains(&m))
+    }
+
+    /// `package` is `m`'s name or an alias.
+    fn named(&self, m: usize, package: &str) -> bool {
+        let key = package_key(package);
+        let module = &self.modules[m];
+        std::iter::once(&module.name)
+            .chain(&module.aliases)
+            .any(|n| package_key(n) == key)
+    }
+
+    /// How many modules `m` depends on: fewer is lower in the graph.
+    fn depth(&self, m: usize) -> usize {
+        self.reach[m].iter().filter(|&&r| r).count()
     }
 
     /// The matching module with the fewest dependencies of its own, then by name.
     fn lowest(&self, matches: impl Fn(usize) -> bool) -> Option<usize> {
-        (0..self.modules.len())
-            .filter(|&m| matches(m))
-            .min_by_key(|&m| {
-                let deps = self.reach[m].iter().filter(|&&r| r).count();
-                (deps, self.modules[m].name.clone())
-            })
+        self.host(matches, &[], &[]).map(|(m, _)| m)
     }
 }
 
@@ -259,6 +364,9 @@ enum Dep {
     Dir(PathBuf),
     /// A manifest file, e.g. a `ProjectReference`.
     Manifest(PathBuf),
+    /// The name code imports a renamed dependency by, e.g. Cargo's `json` for
+    /// `json = { package = "serde_json" }`; never resolves to a module.
+    Alias(String),
 }
 
 #[derive(Debug)]
@@ -509,6 +617,7 @@ fn resolve(dep: &Dep, found: &[Found]) -> Option<usize> {
         Dep::Name(ecosystem, name) => f.ecosystem == *ecosystem && f.name == *name,
         Dep::Dir(dir) => f.root == *dir,
         Dep::Manifest(path) => f.manifest == *path,
+        Dep::Alias(_) => false,
     })
 }
 
@@ -541,13 +650,16 @@ fn cargo_deps(
         } else {
             (spec, dir)
         };
+        let package = spec.get("package").and_then(|p| p.as_str()).unwrap_or(key);
+        if package != key {
+            deps.push(Dep::Alias(key.to_string()));
+        }
         if let Some(path) = spec.get("path").and_then(|p| p.as_str())
             && let Ok(path) = base.join(path).canonicalize()
         {
             deps.push(Dep::Dir(path));
             continue;
         }
-        let package = spec.get("package").and_then(|p| p.as_str()).unwrap_or(key);
         deps.push(Dep::Name(Ecosystem::Cargo, package.to_string()));
     }
     deps
@@ -720,6 +832,7 @@ fn apply_overrides(
                 root: module_path(root, name, path)?,
                 deps: Vec::new(),
                 aliases: Vec::new(),
+                external: Vec::new(),
             }),
             (Some(_), None) => {}
             (None, None) if change.ignore => {}
@@ -984,6 +1097,14 @@ mod tests {
                 ("util-lib", vec!["core"])
             ]
         );
+        // `u` is how app's code imports `util-lib`, so homes must declare it by that name.
+        let g = graph(&root);
+        let app = g
+            .modules
+            .iter()
+            .find(|m| m.name == "app")
+            .map(|m| &m.external);
+        assert_eq!(app, Some(&vec!["u".to_string()]));
     }
 
     #[test]
@@ -1058,6 +1179,7 @@ mod tests {
             root: PathBuf::from(format!("/{name}")),
             deps: deps.to_vec(),
             aliases: Vec::new(),
+            external: Vec::new(),
         };
         ModuleGraph::new(vec![
             module("base", &[]),
@@ -1073,26 +1195,32 @@ mod tests {
         let g = layered();
         let s = String::from;
         assert_eq!(
-            g.tag(Some(1), Some(1)),
+            g.tag(Some(1), Some(1), &[]),
             Tag::SameModule { module: s("core") }
         );
         assert_eq!(
-            g.tag(Some(0), Some(1)),
+            g.tag(Some(0), Some(1), &[]),
             Tag::Importable {
                 copy: s("core"),
                 owner: s("base")
             }
         );
         assert_eq!(
-            g.tag(Some(2), Some(0)),
+            g.tag(Some(2), Some(0), &[]),
             Tag::ImportableIndirect {
                 copy: s("app"),
                 owner: s("base")
             }
         );
-        assert_eq!(g.tag(Some(2), Some(3)), Tag::MoveDown { home: s("base") });
-        assert_eq!(g.tag(Some(4), Some(0)), Tag::Boundary);
-        assert_eq!(g.tag(None, Some(0)), Tag::Boundary);
+        assert_eq!(
+            g.tag(Some(2), Some(3), &[]),
+            Tag::MoveDown {
+                home: s("base"),
+                missing: vec![]
+            }
+        );
+        assert_eq!(g.tag(Some(4), Some(0), &[]), Tag::Boundary);
+        assert_eq!(g.tag(None, Some(0), &[]), Tag::Boundary);
         assert!(
             Tag::Importable {
                 copy: s("a"),
@@ -1104,20 +1232,73 @@ mod tests {
     }
 
     #[test]
+    fn move_down_picks_the_lowest_home_declaring_the_imports() {
+        // `web` and `desk` both depend on `ui → base`; only `ui` declares `react` and `serde-json`.
+        let module = |name: &str, deps: &[usize], external: &[&str]| Module {
+            name: name.into(),
+            root: PathBuf::from(format!("/{name}")),
+            deps: deps.to_vec(),
+            aliases: Vec::new(),
+            external: external.iter().map(|e| e.to_string()).collect(),
+        };
+        let g = ModuleGraph::new(vec![
+            module("base", &[], &[]),
+            module("ui", &[0], &["react", "serde-json"]),
+            module("web", &[1], &[]),
+            module("desk", &[1], &[]),
+            module("lone", &[], &["vue"]),
+        ]);
+        let tag = |needs: &[&str]| {
+            let needs: Vec<String> = needs.iter().map(|n| n.to_string()).collect();
+            g.tag(Some(2), Some(3), &needs)
+        };
+        let down = |home: &str, missing: &[&str]| Tag::MoveDown {
+            home: home.into(),
+            missing: missing.iter().map(|m| m.to_string()).collect(),
+        };
+        assert_eq!(tag(&[]), down("base", &[]));
+        assert_eq!(tag(&["react"]), down("ui", &[]));
+        // Rust imports `serde-json` as `serde_json`.
+        assert_eq!(tag(&["serde_json"]), down("ui", &[]));
+        // Importing `base` itself is declared by `ui`, which depends on it.
+        assert_eq!(tag(&["base", "react"]), down("ui", &[]));
+        // No module declares `node:fs`, so it can't constrain the home.
+        assert_eq!(tag(&["node:fs"]), down("base", &[]));
+        // Nothing both depend on declares `vue`: the lowest, with what it lacks.
+        assert_eq!(tag(&["vue"]), down("base", &["vue"]));
+        // The copies importing their own packages, e.g. `from web.models import X`, isn't a need.
+        assert_eq!(tag(&["web", "desk", "react"]), down("ui", &[]));
+        assert_eq!(
+            tag(&["vue"]).describe(),
+            "move-down: both depend on base (lacks vue)"
+        );
+        assert_eq!(
+            g.home(&[Some(2), Some(3)], &["react".to_string()]),
+            Some(Home::MoveDown {
+                module: "ui".into(),
+                missing: vec![]
+            })
+        );
+    }
+
+    #[test]
     fn cluster_home_prefers_a_member_then_a_common_base() {
         let g = layered();
         let s = String::from;
         assert_eq!(
-            g.home(&[Some(2), Some(1), Some(0)]),
+            g.home(&[Some(2), Some(1), Some(0)], &[]),
             Some(Home::Owner { module: s("base") })
         );
         assert_eq!(
-            g.home(&[Some(2), Some(3)]),
-            Some(Home::MoveDown { module: s("base") })
+            g.home(&[Some(2), Some(3)], &[]),
+            Some(Home::MoveDown {
+                module: s("base"),
+                missing: vec![]
+            })
         );
-        assert_eq!(g.home(&[Some(4), Some(1)]), None);
-        assert_eq!(g.home(&[Some(1), Some(1)]), None);
-        assert_eq!(g.home(&[None, Some(1)]), None);
+        assert_eq!(g.home(&[Some(4), Some(1)], &[]), None);
+        assert_eq!(g.home(&[Some(1), Some(1)], &[]), None);
+        assert_eq!(g.home(&[None, Some(1)], &[]), None);
     }
 
     #[test]
@@ -1262,7 +1443,7 @@ mod tests {
 
     #[test]
     fn files_under_no_module_are_a_boundary_not_one_module() {
-        assert_eq!(layered().tag(None, None), Tag::Boundary);
+        assert_eq!(layered().tag(None, None, &[]), Tag::Boundary);
     }
 
     #[test]

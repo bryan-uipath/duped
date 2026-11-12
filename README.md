@@ -263,11 +263,11 @@ done
 | --- | --- |
 | `importable` | one side's module already depends on the other's: `vsix can import @x/core` |
 | `importable-indirect` | it depends on it only through other modules; add a direct dependency first |
-| `move-down` | neither depends on the other, but both depend on a lower module that could hold one copy |
+| `move-down` | neither depends on the other, but both depend on `home`: the lowest common dependency that declares every package the copies' files import (a package no module declares, such as `node:fs` or a path alias, doesn't count); when none does, the one missing fewest, with `missing` listing the rest |
 | `boundary` | no dependency path either way, or both sides are under no module; often deliberate |
 | `same-module` | both in one module; hidden unless `--include-same-module` |
 
-Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else the lowest module they all depend on.
+Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else a module they all depend on, chosen as for `move-down`.
 
 Modules come from manifests under the project root:
 
