@@ -523,8 +523,8 @@ fn removable_lines(group: &Group) -> usize {
 
 // ----- changed files -----
 
-/// Files a change touched, each with the line ranges it added or rewrote; `None` is the whole
-/// file: untracked, or its path is one git quotes.
+/// Files a change touched, each with the line ranges it changed; `None` is the whole file:
+/// untracked, or one whose patch names no path (a quoted path, a mode change).
 pub struct Changed(HashMap<String, Option<Vec<(usize, usize)>>>);
 
 impl Changed {
@@ -549,9 +549,9 @@ impl Changed {
     }
 }
 
-/// Added line ranges per file of a `git diff -U0` patch; a file with only deletions, or only
-/// renamed, has none.
-fn added_lines(patch: &str) -> HashMap<String, Vec<(usize, usize)>> {
+/// Changed line ranges per file of a `git diff -U0` patch: added lines, or the two lines around
+/// a deletion, which can itself make two bodies match. A file only renamed has none.
+fn changed_lines(patch: &str) -> HashMap<String, Vec<(usize, usize)>> {
     let mut files: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut current: Option<String> = None;
     // Hunk body lines left to skip, so content like `+++ b/x` isn't read as a header.
@@ -559,6 +559,11 @@ fn added_lines(patch: &str) -> HashMap<String, Vec<(usize, usize)>> {
     for line in patch.lines() {
         if body > 0 {
             body -= usize::from(!line.starts_with('\\'));
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            // A quoted path (`+++ "b/we\\"ird.ts"`) must not add to the file before it.
+            current = None;
             continue;
         }
         let path = line
@@ -579,11 +584,14 @@ fn added_lines(patch: &str) -> HashMap<String, Vec<(usize, usize)>> {
             let (_, removed) = count(sides.next().unwrap_or(""));
             let (start, added) = count(sides.next().unwrap_or("").trim_start_matches('+'));
             body = removed + added;
-            if let Some(file) = current.as_ref().filter(|_| added > 0) {
-                files
-                    .entry(file.clone())
-                    .or_default()
-                    .push((start, start + added - 1));
+            if let Some(file) = &current {
+                // `+9,0`: lines were deleted after line 9.
+                let end = if added > 0 {
+                    start + added - 1
+                } else {
+                    start + 1
+                };
+                files.entry(file.clone()).or_default().push((start, end));
             }
         }
     }
@@ -623,6 +631,8 @@ pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<Changed> 
             "-U0",
             "--no-color",
             "--no-ext-diff",
+            "--no-textconv",
+            "--inter-hunk-context=0",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             "--diff-filter=AMR",
@@ -631,7 +641,7 @@ pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<Changed> 
         ],
         &top,
     )?;
-    let mut added = added_lines(&patch);
+    let mut added = changed_lines(&patch);
     let untracked = git(&["ls-files", "-z", "--others", "--exclude-standard"], &top)?;
     let tracked = diff.split('\0').map(|f| (f, added.remove(f)));
     let untracked = untracked.split('\0').map(|f| (f, None));
@@ -817,10 +827,10 @@ pub fn render_text(report: &Report) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::added_lines;
+    use super::changed_lines;
 
     #[test]
-    fn added_lines_reads_hunks_renames_and_skips_bodies() {
+    fn changed_lines_reads_hunks_renames_and_skips_bodies() {
         let patch = "\
 diff --git a/src/a.ts b/src/a.ts
 --- a/src/a.ts
@@ -829,7 +839,7 @@ diff --git a/src/a.ts b/src/a.ts
 -old
 +new
 ++++ b/not/a/header.ts
-@@ -10,2 +10,0 @@
+@@ -10,2 +9,0 @@
 -gone
 -gone
 @@ -20,0 +19 @@
@@ -843,9 +853,19 @@ diff --git a/x.ts b/my file.ts
 --- a/x.ts
 +++ b/my file.ts\t
 @@ -0,0 +1,4 @@
++1
++2
++3
++4
+diff --git \"a/we\\\"ird.ts\" \"b/we\\\"ird.ts\"
+--- \"a/we\\\"ird.ts\"
++++ \"b/we\\\"ird.ts\"
+@@ -1 +1 @@
+-x
++y
 ";
-        let found = added_lines(patch);
-        assert_eq!(found["src/a.ts"], vec![(3, 4), (19, 19)]);
+        let found = changed_lines(patch);
+        assert_eq!(found["src/a.ts"], vec![(3, 4), (9, 10), (19, 19)]);
         assert_eq!(found["new name.ts"], vec![]);
         assert_eq!(found["my file.ts"], vec![(1, 4)]);
         assert_eq!(found.len(), 3);

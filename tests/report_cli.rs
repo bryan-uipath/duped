@@ -134,6 +134,12 @@ fn diff_mode_keeps_only_findings_on_changed_lines() {
     assert_eq!(pairs, vec![("a.ts", "retry.ts")]);
     assert_eq!(report["detectors"]["bodies"]["total"], 2);
     assert_eq!(report["detectors"]["bodies"]["kept"], 1);
+
+    // A deletion alone counts: it can be what makes two bodies match.
+    write(&root, "a.ts", &both.replace("seen.add(item.id);\n", ""));
+    let report = json(&root, &["--base", "main"]);
+    assert_eq!(groups(&report).len(), 1);
+    assert_eq!(report["groups"][0]["b"], "list.ts");
     std::fs::remove_dir_all(&root).unwrap();
 }
 

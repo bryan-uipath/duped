@@ -24,7 +24,7 @@ REPORT=$(mktemp /tmp/duped-review.XXXXXX)
 duped report <repo root> --base "$BASE" --json > "$REPORT"; echo "$REPORT"
 ```
 
-Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only findings whose lines the change added or rewrote since the merge base (committed, uncommitted or untracked). `names` and `imports` findings have no lines and are kept per changed file: confirm those belong to the change before reporting.
+Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only findings whose lines the change added or rewrote since the merge base (committed, uncommitted or untracked). `names`, `imports` and identical `files` findings have no lines and are kept per changed file: confirm those belong to the change before reporting.
 
 ## 2. Read the groups
 
