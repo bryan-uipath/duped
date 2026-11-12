@@ -1,5 +1,7 @@
 //! Functions whose bodies are near-copies, whatever they are called: Jaccard similarity of
-//! normalised token shingles, with MinHash + LSH banding to find candidate pairs.
+//! normalised token shingles, with MinHash + LSH banding to find candidate pairs. Pairs that
+//! share rare shingles are also checked for a smaller body inside a larger one, or a long
+//! block pasted into both.
 //!
 //! Local names are abstracted, so renamed copies match; syntax, property names and literals
 //! are kept, so `switch` lookup tables with different labels don't.
@@ -8,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use rayon::prelude::*;
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::names::family;
@@ -35,17 +38,41 @@ pub struct BodyPair {
     /// Indices into the analysed records; `a` comes first in file order.
     pub a: usize,
     pub b: usize,
+    pub kind: PairKind,
     /// Jaccard similarity of the two shingle sets.
     pub similarity: f64,
-    /// Shingles both bodies have: roughly how many tokens are duplicated.
+    /// Shingles both bodies have (in `region`, when there is one): roughly how many tokens
+    /// are duplicated.
     pub shared: usize,
+    /// Each side's shared lines, inclusive, for `contained` and `block` pairs.
+    pub region: Option<Region>,
     /// Module relationship; `None` when modules aren't tracked.
     pub tag: Option<Tag>,
     /// Why the pair is deliberate, when it is.
     pub acknowledged: Option<String>,
 }
 
-/// Two files linked by reported pairs between at least two functions on each side:
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PairKind {
+    /// Jaccard similarity at the threshold: near-copies.
+    Similar,
+    /// Most of the smaller body is in the larger one, e.g. a wrapper or an inlined helper.
+    Contained,
+    /// A long run of tokens is in both, e.g. a block pasted into two larger functions.
+    Block,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Region {
+    /// First and last lines, 1-based, inclusive.
+    pub a: (usize, usize),
+    pub b: (usize, usize),
+    /// Shared windows over the longer side's region windows; gaps make it less than 1.
+    pub density: f64,
+}
+
+/// Two files linked by reported `similar` pairs between at least two functions on each side:
 /// likely a copied module rather than one copied helper.
 #[derive(Debug)]
 pub struct FilePair {
@@ -75,10 +102,36 @@ const HASHES: usize = 128;
 /// Every identifier becomes this placeholder; other tokens keep their text hash.
 const IDENTIFIER: u32 = 1;
 
+/// Shingles in more bodies than this are idioms or boilerplate, e.g. fetch scaffolding, and
+/// don't link a pair for `contained` or `block`.
+const MAX_SPREAD: usize = 10;
+
+/// Rare shingles a pair must share to be checked for `contained` or `block`.
+const MIN_LINKS: usize = 20;
+
+/// A `contained` pair's region spans at least this fraction of one body's shingles.
+const CONTAINED: f64 = 0.8;
+
+/// A `block` pair's region has at least this many shared shingles, about 15 lines.
+const BLOCK: usize = 100;
+
+/// A region's shared windows over its span on the longer side; sparser chains are coincidence.
+const MIN_DENSITY: f64 = 0.6;
+
+/// Runs of equal shingles shorter than this don't start or extend a region.
+const MIN_RUN: usize = 3;
+
+/// A region bridges up to this many unshared shingles on each side, e.g. one edited line.
+const GAP: usize = 10;
+
 struct Candidate {
     record: usize,
-    /// Sorted, distinct shingle hashes.
+    /// Sorted, distinct shingle hashes, repeats numbered.
     shingles: Vec<u64>,
+    /// Each window's shingle hash, in body order, repeats not numbered.
+    windows: Vec<u64>,
+    /// Positions in `windows`, sorted by window.
+    sorted: Vec<u32>,
 }
 
 pub fn find_duplicate_bodies(
@@ -90,35 +143,50 @@ pub fn find_duplicate_bodies(
         .iter()
         .enumerate()
         .filter_map(|(record, r)| match r {
-            Record::Function(f) if is_candidate(r, options) => Some(Candidate {
-                record,
-                shingles: shingles(&f.body, options.shingle),
-            }),
+            Record::Function(f) if is_candidate(r, options) => {
+                let windows = windows(&f.body, options.shingle);
+                let mut sorted: Vec<u32> = (0..windows.len() as u32).collect();
+                sorted.sort_unstable_by_key(|&p| (windows[p as usize], p));
+                Some(Candidate {
+                    record,
+                    shingles: numbered(&windows),
+                    windows,
+                    sorted,
+                })
+            }
             _ => None,
         })
         .collect();
 
-    let mut scored: Vec<(usize, usize, usize, f64)> =
-        candidate_pairs(&candidates, options.threshold)
-            .into_par_iter()
-            .filter_map(|(i, j)| {
-                let (a, b) = (&candidates[i], &candidates[j]);
-                // Off by default: a Rust body is rarely a copy of a TypeScript one, however similar.
-                let language = |c: &Candidate| family(function_at(records, c.record).language);
-                if !options.cross_language && language(a) != language(b) {
-                    return None;
-                }
-                let shared = shared(&a.shingles, &b.shingles);
-                let similarity = jaccard(a.shingles.len(), b.shingles.len(), shared);
-                (similarity >= options.threshold)
-                    .then_some((a.record, b.record, shared, similarity))
-            })
-            .collect();
-    scored.sort_unstable_by_key(|&(a, b, ..)| (a, b));
+    // Linked pairs are checked for every kind; LSH pairs only for `similar`.
+    let linked = linked_pairs(&candidates);
+    let mut checked = candidate_pairs(&candidates, options.threshold);
+    checked.extend(&linked);
+    let mut scored: Vec<Scored> = checked
+        .into_par_iter()
+        .filter_map(|(i, j)| {
+            let (a, b) = (&candidates[i], &candidates[j]);
+            // Off by default: a Rust body is rarely a copy of a TypeScript one, however similar.
+            let language = |c: &Candidate| family(function_at(records, c.record).language);
+            if !options.cross_language && language(a) != language(b) {
+                return None;
+            }
+            score(records, a, b, options, linked.contains(&(i, j)))
+        })
+        .collect();
+    scored.sort_unstable_by_key(|s| (s.a, s.b));
 
     let mut pairs = Vec::new();
     let (mut hidden_same_file, mut hidden_acknowledged) = (0, 0);
-    for (a, b, shared, similarity) in scored {
+    for Scored {
+        a,
+        b,
+        kind,
+        shared,
+        similarity,
+        region,
+    } in scored
+    {
         let same_file = records[a].location().file == records[b].location().file;
         if same_file && !options.include_same_file {
             hidden_same_file += 1;
@@ -132,8 +200,10 @@ pub fn find_duplicate_bodies(
         pairs.push(BodyPair {
             a,
             b,
+            kind,
             similarity,
             shared,
+            region,
             tag: verdict.tag,
             acknowledged: verdict.acknowledged,
         });
@@ -161,9 +231,88 @@ pub fn is_candidate(record: &Record, options: &BodyOptions) -> bool {
     matches!(record, Record::Function(f) if f.body.len() >= options.min_tokens.max(1))
 }
 
-/// Hashes of each `k` consecutive normalised tokens; a body shorter than `k` is one shingle.
-/// Repeats are numbered, so a ten-case `switch` doesn't collapse into a three-case one.
-fn shingles(body: &[Token], k: usize) -> Vec<u64> {
+/// A pair worth reporting, before same-file and acknowledged pairs are hidden.
+struct Scored {
+    a: usize,
+    b: usize,
+    kind: PairKind,
+    shared: usize,
+    similarity: f64,
+    region: Option<Region>,
+}
+
+/// `similar` at the threshold; else, when `linked`, `contained` or `block` if a shared region
+/// qualifies.
+fn score(
+    records: &[Record],
+    a: &Candidate,
+    b: &Candidate,
+    options: &BodyOptions,
+    linked: bool,
+) -> Option<Scored> {
+    let shared = shared(&a.shingles, &b.shingles);
+    let similarity = jaccard(a.shingles.len(), b.shingles.len(), shared);
+    let scored = |kind, shared, region| Scored {
+        a: a.record,
+        b: b.record,
+        kind,
+        shared,
+        similarity,
+        region,
+    };
+    if similarity >= options.threshold {
+        return Some(scored(PairKind::Similar, shared, None));
+    }
+    if !linked {
+        return None;
+    }
+    let (start, end, matched) = region(a, b)?;
+    let density = matched as f64 / ((end.0 - start.0).max(end.1 - start.1) + 1) as f64;
+    // The region's span over its body, not set overlap: a huge body has most shingles of any
+    // small one. Span, so windows skipped as too repetitive still count.
+    let containment = f64::max(
+        (end.0 - start.0 + 1) as f64 / a.windows.len() as f64,
+        (end.1 - start.1 + 1) as f64 / b.windows.len() as f64,
+    );
+    let kind = if containment >= CONTAINED {
+        PairKind::Contained
+    } else if matched >= BLOCK {
+        PairKind::Block
+    } else {
+        return None;
+    };
+    // Window `w` covers tokens `w..w + k`. Lines the region only starts or ends in are left
+    // out, e.g. the `) ;` ending the line before a pasted block.
+    let lines = |record: usize, from: usize, to: usize| {
+        let lines = &function_at(records, record).body_lines;
+        let to = (to + options.shingle - 1).min(lines.len() - 1);
+        let first = if from > 0 && lines[from - 1] == lines[from] {
+            (from..=to).find(|&t| lines[t] != lines[from])
+        } else {
+            Some(from)
+        };
+        let last = if to + 1 < lines.len() && lines[to + 1] == lines[to] {
+            (from..=to).rev().find(|&t| lines[t] != lines[to])
+        } else {
+            Some(to)
+        };
+        let (first, last) = match (first, last) {
+            (Some(first), Some(last)) if first <= last => (first, last),
+            _ => (from, to),
+        };
+        (lines[first] as usize, lines[last] as usize)
+    };
+    let region = Region {
+        a: lines(a.record, start.0, end.0),
+        b: lines(b.record, start.1, end.1),
+        density,
+    };
+    Some(scored(kind, matched, Some(region)))
+}
+
+/// Hashes of each `k` consecutive normalised tokens, in body order; a body shorter than `k`
+/// is one shingle.
+fn windows(body: &[Token], k: usize) -> Vec<u64> {
     let normalised: Vec<u32> = body
         .iter()
         .map(|&t| match t {
@@ -171,7 +320,7 @@ fn shingles(body: &[Token], k: usize) -> Vec<u64> {
             Token::Text(h) => h,
         })
         .collect();
-    let mut out: Vec<u64> = normalised
+    normalised
         .windows(k.clamp(1, normalised.len()))
         .map(|window| {
             let h = window.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &v| {
@@ -179,7 +328,13 @@ fn shingles(body: &[Token], k: usize) -> Vec<u64> {
             });
             mix(h)
         })
-        .collect();
+        .collect()
+}
+
+/// The distinct shingles of `windows`. Repeats are numbered, so a ten-case `switch` doesn't
+/// collapse into a three-case one.
+fn numbered(windows: &[u64]) -> Vec<u64> {
+    let mut out = windows.to_vec();
     out.sort_unstable();
     let (mut previous, mut repeat) = (None, 0u64);
     for shingle in &mut out {
@@ -197,7 +352,7 @@ fn shingles(body: &[Token], k: usize) -> Vec<u64> {
 }
 
 /// Index pairs `i < j` that share at least one LSH band of their MinHash signatures.
-fn candidate_pairs(candidates: &[Candidate], threshold: f64) -> Vec<(usize, usize)> {
+fn candidate_pairs(candidates: &[Candidate], threshold: f64) -> HashSet<(usize, usize)> {
     let coefficients: Vec<(u64, u64)> = (0..HASHES as u64)
         .map(|i| (mix(i * 2 + 1) | 1, mix(i * 2 + 2)))
         .collect();
@@ -233,7 +388,128 @@ fn candidate_pairs(candidates: &[Candidate], threshold: f64) -> Vec<(usize, usiz
             }
         }
     }
-    pairs.into_iter().collect()
+    pairs
+}
+
+/// Index pairs `i < j` sharing at least [`MIN_LINKS`] distinct shingles that are each in at
+/// most [`MAX_SPREAD`] bodies: an inverted index, so it doesn't depend on similarity.
+fn linked_pairs(candidates: &[Candidate]) -> HashSet<(usize, usize)> {
+    let mut postings: Vec<(u64, u32)> = candidates
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, c)| {
+            let i = i as u32;
+            let mut distinct: Vec<u64> = c.sorted.iter().map(|&p| c.windows[p as usize]).collect();
+            distinct.dedup();
+            distinct.into_iter().map(move |h| (h, i))
+        })
+        .collect();
+    postings.par_sort_unstable();
+    let mut links: Vec<(u32, u32)> = postings
+        .chunk_by(|x, y| x.0 == y.0)
+        .filter(|list| list.len() > 1 && list.len() <= MAX_SPREAD)
+        .flat_map(|list| {
+            list.iter()
+                .enumerate()
+                .flat_map(move |(x, &(_, i))| list[x + 1..].iter().map(move |&(_, j)| (i, j)))
+        })
+        .collect();
+    links.par_sort_unstable();
+    links
+        .chunk_by(|x, y| x == y)
+        .filter(|same| same.len() >= MIN_LINKS)
+        .map(|same| (same[0].0 as usize, same[0].1 as usize))
+        .collect()
+}
+
+/// First and last windows on each side, and shared windows.
+type Chain = ((usize, usize), (usize, usize), usize);
+
+/// The best chain of shared runs, in order on both sides with gaps of at most [`GAP`]
+/// windows: its first and last windows on each side, and its shared windows. A run is a
+/// maximal stretch of equal windows on one diagonal, at least [`MIN_RUN`] long.
+fn region(a: &Candidate, b: &Candidate) -> Option<Chain> {
+    let (a_order, b_order) = (&a.windows, &b.windows);
+    let a: Vec<(u64, u32)> = a.sorted.iter().map(|&p| (a_order[p as usize], p)).collect();
+    let b: Vec<(u64, u32)> = b.sorted.iter().map(|&p| (b_order[p as usize], p)).collect();
+    // Matches as (diagonal, a position), from a merge of the sorted windows.
+    let mut matches: Vec<(i64, u32)> = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].0.cmp(&b[j].0) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                let h = a[i].0;
+                let a_end = i + a[i..].iter().take_while(|w| w.0 == h).count();
+                let b_end = j + b[j..].iter().take_while(|w| w.0 == h).count();
+                // A window repeated all over both bodies, like `) ; } ) ;`, only adds noise.
+                if (a_end - i) * (b_end - j) <= 64 {
+                    for &(_, x) in &a[i..a_end] {
+                        for &(_, y) in &b[j..b_end] {
+                            matches.push((i64::from(y) - i64::from(x), x));
+                        }
+                    }
+                }
+                (i, j) = (a_end, b_end);
+            }
+        }
+    }
+    matches.sort_unstable();
+    // Runs as (a start, b start, length), in a order, extended over the skipped repeats.
+    let mut runs: Vec<(usize, usize, usize)> = matches
+        .chunk_by(|x, y| x.0 == y.0 && x.1 + 1 == y.1)
+        .filter(|run| run.len() >= MIN_RUN)
+        .map(|run| {
+            let (diagonal, x) = run[0];
+            let (mut x, mut y, mut len) =
+                (x as usize, (i64::from(x) + diagonal) as usize, run.len());
+            while x > 0 && y > 0 && a_order[x - 1] == b_order[y - 1] {
+                (x, y, len) = (x - 1, y - 1, len + 1);
+            }
+            while x + len < a_order.len()
+                && y + len < b_order.len()
+                && a_order[x + len] == b_order[y + len]
+            {
+                len += 1;
+            }
+            (x, y, len)
+        })
+        .collect();
+    runs.sort_unstable();
+    runs.dedup();
+    // Best chain ending at each run: (shared windows, previous run, first run).
+    let mut best: Vec<(usize, Option<usize>, usize)> = Vec::with_capacity(runs.len());
+    for (r, &(x, y, len)) in runs.iter().enumerate() {
+        let previous = (0..r)
+            .filter(|&q| {
+                let (px, py, plen) = runs[q];
+                let (ex, ey) = (px + plen, py + plen);
+                ex <= x && ey <= y && x - ex <= GAP && y - ey <= GAP
+            })
+            .max_by_key(|&q| best[q].0);
+        let first = previous.map_or(r, |q| best[q].2);
+        best.push((len + previous.map_or(0, |q| best[q].0), previous, first));
+    }
+    // Gaps can chain short coincidental runs across a whole body; a copy is mostly shared.
+    // Each run alone is a candidate too, so a sparse chain can't hide a dense block in it.
+    let dense = |(start, end, matched): Chain| {
+        let span = (end.0 - start.0).max(end.1 - start.1) + 1;
+        (matched as f64 / span as f64 >= MIN_DENSITY).then_some((start, end, matched))
+    };
+    let chain = |first: usize, last: usize, matched: usize| {
+        let (x, y, len) = runs[last];
+        (
+            (runs[first].0, runs[first].1),
+            (x + len - 1, y + len - 1),
+            matched,
+        )
+    };
+    best.iter()
+        .enumerate()
+        .flat_map(|(r, &(matched, _, first))| [chain(first, r, matched), chain(r, r, runs[r].2)])
+        .filter_map(dense)
+        .max_by_key(|&(.., matched)| matched)
 }
 
 /// Most rows per band (so fewest false candidates) that still finds a pair at `threshold`
@@ -265,10 +541,13 @@ fn shared(a: &[u64], b: &[u64]) -> usize {
     shared
 }
 
-/// File pairs whose reported pairs link at least two distinct functions on each side.
+/// File pairs whose `similar` pairs link at least two distinct functions on each side.
 fn file_pairs(records: &[Record], pairs: &[BodyPair]) -> Vec<FilePair> {
     let mut groups: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
     for (i, p) in pairs.iter().enumerate() {
+        if p.kind != PairKind::Similar {
+            continue;
+        }
         let (fa, fb) = (&records[p.a].location().file, &records[p.b].location().file);
         if fa != fb {
             groups.entry((fa, fb)).or_default().push(i);
@@ -393,16 +672,17 @@ pub fn render_text(
     for (rank, pair) in report.pairs.iter().take(top).enumerate() {
         writeln!(
             out,
-            "\n{}. {:.2} similar, {} shared: {}{}",
+            "\n{}. {}, {} shared: {}{}",
             rank + 1,
-            pair.similarity,
+            kind_text(pair),
             pair.shared,
             relation_text(records, pair),
             pair_notes(&pair.tag, &pair.acknowledged)
         )
         .ok();
-        for index in [pair.a, pair.b] {
-            writeln!(out, "   {}", member_line(records, index, judge)).ok();
+        let region = pair.region.map(|r| (r.a, r.b));
+        for (index, lines) in [(pair.a, region.map(|r| r.0)), (pair.b, region.map(|r| r.1))] {
+            writeln!(out, "   {}", member_line(records, index, lines, judge)).ok();
         }
     }
     if report.pairs.len() > top {
@@ -425,8 +705,10 @@ pub fn to_json(records: &[Record], report: &BodyReport, judge: &dyn Judge) -> Va
             json!({
                 "a": member_json(records, p.a, judge),
                 "b": member_json(records, p.b, judge),
+                "kind": p.kind,
                 "similarity": p.similarity,
                 "shared": p.shared,
+                "region": p.region.map(|r| json!({ "a": [r.a.0, r.a.1], "b": [r.b.0, r.b.1] })),
                 "tag": p.tag,
                 "acknowledged": p.acknowledged,
             })
@@ -476,17 +758,35 @@ fn module_prefix(judge: &dyn Judge, index: usize) -> String {
         .unwrap_or_default()
 }
 
-/// e.g. `Api.load (120 tokens)  [@x/core] src/api.ts:12`
-fn member_line(records: &[Record], index: usize, judge: &dyn Judge) -> String {
+/// e.g. `Api.load (120 tokens)  [@x/core] src/api.ts:12`, or `src/api.ts:30-48` for a
+/// shared region.
+fn member_line(
+    records: &[Record],
+    index: usize,
+    region: Option<(usize, usize)>,
+    judge: &dyn Judge,
+) -> String {
     let f = function_at(records, index);
+    let at = match region {
+        Some((start, end)) => format!("{start}-{end}"),
+        None => f.location.start_line.to_string(),
+    };
     format!(
-        "{} ({} tokens)  {}{}:{}",
+        "{} ({} tokens)  {}{}:{at}",
         display_name(f),
         f.body.len(),
         module_prefix(judge, index),
         f.location.file,
-        f.location.start_line
     )
+}
+
+/// `0.62 similar`, `contained` or `block`.
+pub fn kind_text(pair: &BodyPair) -> String {
+    match pair.kind {
+        PairKind::Similar => format!("{:.2} similar", pair.similarity),
+        PairKind::Contained => "contained".to_string(),
+        PairKind::Block => "block".to_string(),
+    }
 }
 
 fn relation_text(records: &[Record], pair: &BodyPair) -> String {
@@ -714,5 +1014,119 @@ mod tests {
         let json = to_json(&records, &report, &NoJudge);
         assert_eq!(json["pairs"][0]["b"]["name"], "readUser");
         assert_eq!(json["summary"]["files"], 0);
+    }
+    /// `n` one-line statements unique to `tag`, so they match nothing elsewhere.
+    fn filler(tag: &str, n: usize) -> String {
+        (0..n)
+            .map(|i| format!("console.log('{tag}-{i}');\n"))
+            .collect()
+    }
+
+    /// Twelve distinct lines, about 200 tokens.
+    fn block() -> String {
+        (0..12)
+            .map(|i| format!("result.field{i} = source.read('key{i}', {i}).trim();\n"))
+            .collect()
+    }
+
+    /// `function name() {` on line 1, `before` filler lines, the block, then `after` lines.
+    fn host(name: &str, before: usize, after: usize) -> String {
+        format!(
+            "export function {name}(result, source) {{\n{}{}{}}}\n",
+            filler(&format!("{name}-before"), before),
+            block(),
+            filler(&format!("{name}-after"), after)
+        )
+    }
+
+    #[test]
+    fn finds_a_block_pasted_into_two_large_functions() {
+        let records = extract(&[("a.ts", &host("a", 20, 20)), ("b.ts", &host("b", 30, 10))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        let [pair] = &report.pairs[..] else {
+            panic!("{:?}", report.pairs)
+        };
+        assert_eq!(pair.kind, PairKind::Block);
+        assert!(pair.similarity < 0.5, "{pair:?}");
+        // Only the block's lines, not the whole functions.
+        let region = pair.region.expect("a block has a region");
+        assert_eq!((region.a, region.b), ((22, 33), (32, 43)));
+        let text = render_text(&records, &report, 40, &options(), &NoJudge);
+        assert!(text.contains("1. block, "), "{text}");
+        assert!(
+            text.contains("a.ts:22-33") && text.contains("b.ts:32-43"),
+            "{text}"
+        );
+        let json = to_json(&records, &report, &NoJudge);
+        assert_eq!(json["pairs"][0]["kind"], "block");
+        assert_eq!(json["pairs"][0]["region"]["b"], json!([32, 43]));
+    }
+
+    #[test]
+    fn finds_a_wrapper_inside_a_larger_function() {
+        let wrapper = format!("export function wrap(result, source) {{\n{}}}\n", block());
+        let records = extract(&[("a.ts", &wrapper), ("b.ts", &host("big", 40, 40))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        let [pair] = &report.pairs[..] else {
+            panic!("{:?}", report.pairs)
+        };
+        assert_eq!(pair.kind, PairKind::Contained);
+        assert!(pair.similarity < 0.5, "{pair:?}");
+        let region = pair.region.expect("contained has a region");
+        assert_eq!((region.a, region.b), ((2, 13), (42, 53)));
+    }
+
+    #[test]
+    fn sparse_chains_are_not_contained() {
+        // Same shape, different literal on every line: 7 of each 12 windows shared, chained
+        // across the whole body by gaps, but under MIN_DENSITY.
+        let shape = |tag: &str| {
+            let lines: String = (0..30)
+                .map(|i| format!("result.field{i} = source.read('{tag}-{i}');\n"))
+                .collect();
+            format!("export function {tag}(result, source) {{\n{lines}}}\n")
+        };
+        let records = extract(&[("a.ts", &shape("a")), ("b.ts", &shape("b"))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        assert!(report.pairs.is_empty(), "{:?}", report.pairs);
+    }
+
+    #[test]
+    fn a_dense_block_survives_a_sparse_chain_after_it() {
+        // 12 identical lines, then a long same-shape tail whose sparse chain is larger.
+        let body = |tag: &str| {
+            let block: String = (0..12)
+                .map(|i| format!("result.field{i} = source.read('key{i}', {i}).trim();\n"))
+                .collect();
+            let gap: String = (0..20)
+                .map(|i| format!("console.log('{tag}-sep-{i}');\n"))
+                .collect();
+            let tail: String = (0..100)
+                .map(|i| format!("result.other{i} = source.read('{tag}-{i}');\n"))
+                .collect();
+            format!("export function {tag}(result, source) {{\n{block}{gap}{tail}}}\n")
+        };
+        let records = extract(&[("a.ts", &body("a")), ("b.ts", &body("b"))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        let pair = report.pairs.first().expect("the block is reported");
+        assert_eq!(pair.kind, PairKind::Block, "{pair:?}");
+        let region = pair.region.expect("block has a region");
+        assert_eq!(region.a, region.b);
+        // The signature matches too (names are abstracted); the tail is left out.
+        assert_eq!(region.a, (1, 13), "{region:?}");
+    }
+
+    #[test]
+    fn boilerplate_in_many_functions_links_none() {
+        // Each block shingle is in more than MAX_SPREAD bodies.
+        let files: Vec<(String, String)> = (0..=MAX_SPREAD)
+            .map(|i| (format!("f{i}.ts"), host(&format!("f{i}"), 30, 10)))
+            .collect();
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(f, s)| (f.as_str(), s.as_str()))
+            .collect();
+        let report = find_duplicate_bodies(&extract(&files), &options(), &NoJudge);
+        assert!(report.pairs.is_empty(), "{:?}", report.pairs);
     }
 }

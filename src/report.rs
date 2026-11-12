@@ -10,7 +10,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::analysis::bodies::{BodyReport, file_shared, function_at};
+use crate::analysis::bodies::{BodyReport, file_shared, function_at, kind_text};
 use crate::analysis::files::IdenticalFiles;
 use crate::analysis::helpers::{HelperGroup, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
@@ -98,7 +98,8 @@ enum Span {
     None,
     /// Identical files of this many lines.
     Whole(usize),
-    /// Each side's declaration line range, inclusive, scaled by similarity.
+    /// Each side's line range, inclusive, and its weight: a declaration scaled by similarity,
+    /// or a body region by its density.
     Lines {
         a: (usize, usize),
         b: (usize, usize),
@@ -114,6 +115,9 @@ pub struct Side {
     pub line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The shared region's first and last lines, for `contained` and `block` bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<(usize, usize)>,
 }
 
 impl Report {
@@ -228,21 +232,34 @@ pub fn attempt<T>(run: impl FnOnce() -> Result<T>) -> Result<T, String> {
 pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
     let pairs = report.pairs.iter().map(|p| {
         let tokens = |i| function_at(records, i).body.len();
+        let (mut a, mut b) = (side(&records[p.a]), side(&records[p.b]));
+        // Only the shared region would be removed.
+        let span = match p.region {
+            Some(r) => {
+                (a.region, b.region) = (Some(r.a), Some(r.b));
+                Span::Lines {
+                    a: r.a,
+                    b: r.b,
+                    weight: r.density,
+                }
+            }
+            None => lines(&records[p.a], &records[p.b], p.similarity),
+        };
         Finding {
             detector: "bodies",
             kind: "function",
             tag: p.tag.clone(),
-            a: side(&records[p.a]),
-            b: side(&records[p.b]),
+            a,
+            b,
             evidence: format!(
-                "{} similar, {} shared shingles ({}/{} tokens)",
-                round(p.similarity),
+                "{}, {} shared shingles ({}/{} tokens)",
+                kind_text(p),
                 p.shared,
                 tokens(p.a),
                 tokens(p.b)
             ),
             rank: p.shared as f64,
-            span: lines(&records[p.a], &records[p.b], p.similarity),
+            span,
         }
     });
     let files = report.files.iter().map(|f| {
@@ -387,6 +404,7 @@ fn side(record: &Record) -> Side {
         file: record.location().file.clone(),
         line: Some(record.location().start_line),
         name: Some(qualified(record.scope(), record.name())),
+        region: None,
     }
 }
 
@@ -395,6 +413,7 @@ fn file_side(file: &str) -> Side {
         file: file.to_string(),
         line: None,
         name: None,
+        region: None,
     }
 }
 
@@ -662,14 +681,18 @@ pub fn render_text(report: &Report) -> String {
             writeln!(out, "   {file}{changed}").ok();
         }
         for f in &group.findings {
-            // Sides in the group's order, e.g. ` (loadUser:12 ~ fetchUser:30)`.
+            // Sides in the group's order, e.g. ` (loadUser:12 ~ fetchUser:30-48)`.
             let (a, b) = if f.a.file == group.a {
                 (&f.a, &f.b)
             } else {
                 (&f.b, &f.a)
             };
-            let members = match (&a.name, a.line, &b.name, b.line) {
-                (Some(an), Some(al), Some(bn), Some(bl)) => format!(" ({an}:{al} ~ {bn}:{bl})"),
+            let at = |s: &Side| match s.region {
+                Some((start, end)) => format!("{start}-{end}"),
+                None => s.line.map(|l| l.to_string()).unwrap_or_default(),
+            };
+            let members = match (&a.name, &b.name) {
+                (Some(an), Some(bn)) => format!(" ({an}:{} ~ {bn}:{})", at(a), at(b)),
                 _ => String::new(),
             };
             writeln!(

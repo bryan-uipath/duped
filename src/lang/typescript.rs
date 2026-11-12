@@ -320,6 +320,10 @@ impl<'a> Extractor<'a> {
         let doc = self
             .doc(decl.anchor)
             .or_else(|| self.overload_docs.remove(&qualified(scope, &name)));
+        let (body, body_lines) = node
+            .child_by_field_name("body")
+            .map(|b| body_tokens(b, self.source, token_class))
+            .unwrap_or_default();
         let record = FunctionRecord {
             language: self.language,
             name,
@@ -329,10 +333,8 @@ impl<'a> Extractor<'a> {
             exported: decl.exported,
             location: self.location(decl.anchor, node),
             doc,
-            body: node
-                .child_by_field_name("body")
-                .map(|b| body_tokens(b, self.source, token_class))
-                .unwrap_or_default(),
+            body,
+            body_lines,
         };
         self.records.push(Record::Function(record));
     }

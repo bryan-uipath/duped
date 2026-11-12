@@ -216,6 +216,7 @@ impl Extractor<'_> {
             location: self.location(member),
             doc: self.doc(member),
             body: Vec::new(),
+            body_lines: Vec::new(),
         }));
     }
 

@@ -14,7 +14,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 
 | Command | Finds | Languages |
 |---|---|---|
-| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS, Rust |
+| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept), `kind` `similar`; a body mostly inside another (`contained`) or a ≥15-line block in both (`block`), with `region` line ranges to extract; files linked through ≥2 `similar` functions | TS/JS, Rust |
 | `duped helpers` | small top-level helpers (8–49 tokens, below `bodies`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 6 bodies). Plain parameters renamed by position, other names (and destructured keys) kept | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
@@ -67,7 +67,7 @@ Acknowledgements apply to `bodies` and `types`, where `--include-acknowledged` s
 Other `duped.toml` sections: `[scan] exclude = [...]`, `[types]` and `[names]` thresholds, `[modules."<name>"]` (`ignore`, `path`, `deps`), `[rules.<language>]` test patterns. Flags win over the file. Common adjustments:
 
 - Noise from directories meant to repeat themselves (examples, demos, generated code): `--exclude '**/examples'`, or `[scan] exclude`.
-- `bodies` too strict or too loose: `--threshold` (default 0.5), `--min-tokens` (default 50).
+- `bodies` too strict or too loose: `--threshold` (default 0.5, `similar` only), `--min-tokens` (default 50).
 - `helpers` too noisy: raise `--min-tokens` (default 8; a lone `return x;` counts as `x`).
 - `imports` missing small files: `--min-shared 2` (default 3).
 - `names` noisy: raise `--min-score` (default 2.5).

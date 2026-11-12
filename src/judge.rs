@@ -555,6 +555,7 @@ mod tests {
                 },
                 doc: None,
                 body: Vec::new(),
+                body_lines: Vec::new(),
             })
         };
         let g = graph();

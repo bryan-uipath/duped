@@ -161,10 +161,14 @@ pub enum TokenClass {
     Identifier,
 }
 
-/// Leaves of `node` in source order as body tokens, classed by `class`; whitespace-only
-/// leaves (such as JSX text between tags) are dropped.
-pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClass>) -> Vec<Token> {
-    let mut tokens = Vec::new();
+/// Leaves of `node` in source order as body tokens, classed by `class`, with each one's
+/// 1-based line; whitespace-only leaves (such as JSX text between tags) are dropped.
+pub fn body_tokens(
+    node: Node,
+    source: &str,
+    class: fn(Node) -> Option<TokenClass>,
+) -> (Vec<Token>, Vec<u32>) {
+    let (mut tokens, mut lines) = (Vec::new(), Vec::new());
     let mut cursor = node.walk();
     'walk: loop {
         let node = cursor.node();
@@ -172,11 +176,15 @@ pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClas
         let class = class(node);
         let leaf = class.is_some() || node.child_count() == 0;
         if leaf && !text.trim().is_empty() {
-            tokens.extend(match class {
+            let token = match class {
                 Some(TokenClass::Skip) => None,
                 Some(TokenClass::Identifier) => Some(Token::Identifier(token_hash(text))),
                 Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
-            });
+            };
+            if let Some(token) = token {
+                tokens.push(token);
+                lines.push(node.start_position().row as u32 + 1);
+            }
         }
         if !leaf && cursor.goto_first_child() {
             continue;
@@ -187,7 +195,7 @@ pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClas
             }
         }
     }
-    tokens
+    (tokens, lines)
 }
 
 pub fn has_token(node: Node, token: &str) -> bool {
