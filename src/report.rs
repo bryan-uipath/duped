@@ -122,11 +122,12 @@ pub struct Side {
 
 impl Report {
     /// Groups each analysis's findings, or records why it failed; `changed` keeps only pairs
-    /// with a side in it.
+    /// with a side whose matched lines it touched, or whose file it touched when the finding
+    /// has no lines (`names`, `imports`).
     pub fn new(
         directory: String,
         base: Option<&str>,
-        changed: Option<HashSet<String>>,
+        changed: Option<Changed>,
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
         helpers: Result<Vec<HelperGroup>, String>,
         top: usize,
@@ -151,13 +152,19 @@ impl Report {
                 Ok(found) => {
                     let found: Vec<Finding> = found.into_iter().filter(|f| !copies(f)).collect();
                     let total = found.len();
-                    let touches = |f: &Finding| {
-                        changed
-                            .as_ref()
-                            .is_none_or(|c| c.contains(&f.a.file) || c.contains(&f.b.file))
-                    };
+                    let touches = |f: &Finding| changed.as_ref().is_none_or(|c| c.touches(f));
+                    let mut found: Vec<Finding> = found.into_iter().filter(touches).collect();
+                    // A file rollup stands on its function pairs, e.g. `7 function pairs`.
+                    let pairs: HashSet<(String, String)> = found
+                        .iter()
+                        .filter(|f| f.kind == "function")
+                        .map(file_pair)
+                        .collect();
+                    found.retain(|f| {
+                        f.detector != "bodies" || f.kind != "file" || pairs.contains(&file_pair(f))
+                    });
                     let before = kept.len();
-                    kept.extend(found.into_iter().filter(touches));
+                    kept.extend(found);
                     Status::Ok {
                         total,
                         kept: kept.len() - before,
@@ -173,7 +180,9 @@ impl Report {
                 let total = found.len();
                 for mut h in found {
                     for m in &mut h.members {
-                        m.changed = changed.as_ref().is_some_and(|f| f.contains(&m.file));
+                        m.changed = changed
+                            .as_ref()
+                            .is_some_and(|c| c.lines(&m.file, (m.line, m.line + m.lines - 1)));
                     }
                     if changed.is_none() || h.members.iter().any(|m| m.changed) {
                         kept_helpers.push(h);
@@ -202,7 +211,7 @@ impl Report {
             directory,
             mode: if changed.is_some() { "diff" } else { "all" },
             base: base.map(str::to_string),
-            changed_files: changed.as_ref().map(HashSet::len),
+            changed_files: changed.as_ref().map(|c| c.0.len()),
             detectors,
             file_pairs,
             helper_groups,
@@ -424,20 +433,15 @@ fn round(n: f64) -> f64 {
 
 /// More analyses agreeing on one file pair is the strongest signal of a ported module, so
 /// groups sort by that, then by finding count; ties keep the analyses' order.
-fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>) -> Vec<Group> {
+fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&Changed>) -> Vec<Group> {
     let mut index: HashMap<(String, String), usize> = HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
     for f in findings {
-        let (a, b) = if f.a.file <= f.b.file {
-            (&f.a.file, &f.b.file)
-        } else {
-            (&f.b.file, &f.a.file)
-        };
-        let key = (a.clone(), b.clone());
-        let at = *index.entry(key).or_insert_with(|| {
+        let (a, b) = file_pair(&f);
+        let at = *index.entry((a.clone(), b.clone())).or_insert_with(|| {
             groups.push(Group {
-                a: a.clone(),
-                b: b.clone(),
+                a,
+                b,
                 changed: None,
                 detectors: Vec::new(),
                 tag: None,
@@ -462,7 +466,7 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
         g.changed = changed.map(|c| {
             [&g.a, &g.b]
                 .into_iter()
-                .filter(|f| c.contains(*f))
+                .filter(|f| c.file(f))
                 .cloned()
                 .collect()
         });
@@ -474,6 +478,15 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
             .then(y.findings.len().cmp(&x.findings.len()))
     });
     groups
+}
+
+/// A finding's files, in path order.
+fn file_pair(f: &Finding) -> (String, String) {
+    if f.a.file <= f.b.file {
+        (f.a.file.clone(), f.b.file.clone())
+    } else {
+        (f.b.file.clone(), f.a.file.clone())
+    }
 }
 
 /// The whole file when identical; else the smaller side's matched lines, each line counted
@@ -510,10 +523,77 @@ fn removable_lines(group: &Group) -> usize {
 
 // ----- changed files -----
 
+/// Files a change touched, each with the line ranges it added or rewrote; `None` is the whole
+/// file: untracked, or its path is one git quotes.
+pub struct Changed(HashMap<String, Option<Vec<(usize, usize)>>>);
+
+impl Changed {
+    fn file(&self, file: &str) -> bool {
+        self.0.contains_key(file)
+    }
+
+    /// Whether the change touched lines `start..=end` of `file`.
+    fn lines(&self, file: &str, (start, end): (usize, usize)) -> bool {
+        match self.0.get(file) {
+            Some(Some(ranges)) => ranges.iter().any(|&(s, e)| s <= end && e >= start),
+            Some(None) => true,
+            None => false,
+        }
+    }
+
+    fn touches(&self, f: &Finding) -> bool {
+        match f.span {
+            Span::Lines { a, b, .. } => self.lines(&f.a.file, a) || self.lines(&f.b.file, b),
+            _ => self.file(&f.a.file) || self.file(&f.b.file),
+        }
+    }
+}
+
+/// Added line ranges per file of a `git diff -U0` patch; a file with only deletions, or only
+/// renamed, has none.
+fn added_lines(patch: &str) -> HashMap<String, Vec<(usize, usize)>> {
+    let mut files: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut current: Option<String> = None;
+    // Hunk body lines left to skip, so content like `+++ b/x` isn't read as a header.
+    let mut body = 0;
+    for line in patch.lines() {
+        if body > 0 {
+            body -= usize::from(!line.starts_with('\\'));
+            continue;
+        }
+        let path = line
+            .strip_prefix("+++ b/")
+            // git ends a name containing spaces with a tab.
+            .map(|p| p.trim_end_matches('\t'))
+            .or_else(|| line.strip_prefix("rename to "));
+        if let Some(path) = path {
+            files.entry(path.to_string()).or_default();
+            current = Some(path.to_string());
+        } else if let Some(hunk) = line.strip_prefix("@@ -") {
+            // `@@ -12,3 +14,2 @@`: a count defaults to 1.
+            let mut sides = hunk.split(' ');
+            let count = |side: &str| -> (usize, usize) {
+                let (start, count) = side.split_once(',').unwrap_or((side, "1"));
+                (start.parse().unwrap_or(0), count.parse().unwrap_or(0))
+            };
+            let (_, removed) = count(sides.next().unwrap_or(""));
+            let (start, added) = count(sides.next().unwrap_or("").trim_start_matches('+'));
+            body = removed + added;
+            if let Some(file) = current.as_ref().filter(|_| added > 0) {
+                files
+                    .entry(file.clone())
+                    .or_default()
+                    .push((start, start + added - 1));
+            }
+        }
+    }
+    files
+}
+
 /// Files added, modified or renamed since the merge base with `base`, committed or not, plus
 /// untracked ones, under the canonical `scanned` path (a directory or one file), relative to
 /// `dir`, the directory findings' paths are relative to.
-pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<HashSet<String>> {
+pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<Changed> {
     if base.starts_with('-') {
         bail!("--base `{base}` is not a ref");
     }
@@ -535,15 +615,35 @@ pub fn changed_files(scanned: &Path, dir: &Path, base: &str) -> Result<HashSet<S
         ],
         &top,
     )?;
+    let patch = git(
+        &[
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--diff-filter=AMR",
+            merge_base.trim(),
+            "--",
+        ],
+        &top,
+    )?;
+    let mut added = added_lines(&patch);
     let untracked = git(&["ls-files", "-z", "--others", "--exclude-standard"], &top)?;
-    Ok(diff
-        .split('\0')
-        .chain(untracked.split('\0'))
-        .filter(|f| !f.is_empty())
-        .map(|f| top.join(f))
-        .filter(|path| path.starts_with(scanned))
-        .map(|path| modules::relative(dir, &path))
-        .collect())
+    let tracked = diff.split('\0').map(|f| (f, added.remove(f)));
+    let untracked = untracked.split('\0').map(|f| (f, None));
+    Ok(Changed(
+        tracked
+            .chain(untracked)
+            .filter(|(f, _)| !f.is_empty())
+            .map(|(f, lines)| (top.join(f), lines))
+            .filter(|(path, _)| path.starts_with(scanned))
+            .map(|(path, lines)| (modules::relative(dir, &path), lines))
+            .collect(),
+    ))
 }
 
 /// A detached checkout of one commit in a temporary directory, removed on drop.
@@ -713,4 +813,41 @@ pub fn render_text(report: &Report) -> String {
     }
     out.push_str(&render_groups(&report.helpers, report.helper_groups));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::added_lines;
+
+    #[test]
+    fn added_lines_reads_hunks_renames_and_skips_bodies() {
+        let patch = "\
+diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -3 +3,2 @@ function a() {
+-old
++new
+++++ b/not/a/header.ts
+@@ -10,2 +10,0 @@
+-gone
+-gone
+@@ -20,0 +19 @@
++one
+\\ No newline at end of file
+diff --git a/old name.ts b/new name.ts
+similarity index 100%
+rename from old name.ts
+rename to new name.ts
+diff --git a/x.ts b/my file.ts
+--- a/x.ts
++++ b/my file.ts\t
+@@ -0,0 +1,4 @@
+";
+        let found = added_lines(patch);
+        assert_eq!(found["src/a.ts"], vec![(3, 4), (19, 19)]);
+        assert_eq!(found["new name.ts"], vec![]);
+        assert_eq!(found["my file.ts"], vec![(1, 4)]);
+        assert_eq!(found.len(), 3);
+    }
 }

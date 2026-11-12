@@ -106,6 +106,38 @@ fn diff_mode_keeps_pairs_touching_changed_files_under_the_scanned_path() {
 }
 
 #[test]
+fn diff_mode_keeps_only_findings_on_changed_lines() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("lines");
+    let both = format!(
+        "{}{}",
+        LIST.replace("NAME", "uniqueItems"),
+        RETRY.replace("NAME", "fetchJson")
+    );
+    write(&root, "a.ts", &both);
+    write(&root, "list.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "retry.ts", &RETRY.replace("NAME", "loadJson"));
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    // Only `fetchJson` changes; `uniqueItems`, in the same file, was copied before.
+    write(&root, "a.ts", &both.replace("retries exhausted", "gave up"));
+
+    let report = json(&root, &["--base", "main"]);
+    assert_eq!(report["changedFiles"], 1);
+    let pairs: Vec<(&str, &str)> = groups(&report)
+        .iter()
+        .map(|g| (g["a"].as_str().unwrap(), g["b"].as_str().unwrap()))
+        .collect();
+    assert_eq!(pairs, vec![("a.ts", "retry.ts")]);
+    assert_eq!(report["detectors"]["bodies"]["total"], 2);
+    assert_eq!(report["detectors"]["bodies"]["kept"], 1);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn all_mode_needs_no_git_and_truncates_to_top() {
     let root = temp("all");
     for (file, name) in [("a.ts", "one"), ("b.ts", "two"), ("c.ts", "three")] {
