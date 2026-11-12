@@ -40,6 +40,8 @@ enum Command {
     Types(TypesArgs),
     /// Find functions whose bodies are near-copies, whatever they are called.
     Bodies(BodiesArgs),
+    /// Find small top-level helpers copied with identical bodies, and same-name helpers that drifted.
+    Helpers(HelpersArgs),
     /// Find TypeScript/JavaScript files that import the same rare things, often ported copies.
     Imports(ImportsArgs),
     /// Find file pairs that declare the same names, e.g. a ported copy of a module.
@@ -139,7 +141,7 @@ struct BodiesArgs {
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u16).range(1..))]
     shingle: u16,
     /// Skip bodies with fewer tokens.
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = BODY_MIN_TOKENS)]
     min_tokens: usize,
     /// Also report pairs whose two functions are in the same file.
     #[arg(long)]
@@ -154,6 +156,24 @@ struct BodiesArgs {
     #[arg(long, default_value_t = 40)]
     top: usize,
     /// Emit every pair and file pair as JSON (ignores `--top`).
+    #[arg(long)]
+    json: bool,
+}
+
+/// `bodies` compares bodies from this size; `helpers` groups smaller ones.
+const BODY_MIN_TOKENS: usize = 50;
+
+#[derive(Args)]
+struct HelpersArgs {
+    #[command(flatten)]
+    scan: Scan,
+    /// Skip bodies with fewer tokens (a lone `return` counts as its expression); tiny ones match everywhere.
+    #[arg(long, default_value_t = 8)]
+    min_tokens: usize,
+    /// How many groups and families to show.
+    #[arg(long, default_value_t = 40)]
+    top: usize,
+    /// Emit every group and family as JSON (ignores `--top`).
     #[arg(long)]
     json: bool,
 }
@@ -284,6 +304,7 @@ fn run(cli: Cli) -> Result<()> {
     | Command::Index(scan)
     | Command::Types(TypesArgs { scan, .. })
     | Command::Bodies(BodiesArgs { scan, .. })
+    | Command::Helpers(HelpersArgs { scan, .. })
     | Command::Imports(ImportsArgs { scan, .. })
     | Command::Names(NamesArgs { scan, .. })
     | Command::Report(ReportArgs { scan, .. })
@@ -310,9 +331,11 @@ fn run(cli: Cli) -> Result<()> {
         _ => None,
     };
     let graph = match &cli.command {
-        Command::Types(_) | Command::Bodies(_) | Command::Names(_) | Command::Fns(_) => {
-            Some(modules::ModuleGraph::discover(&root, &config.modules)?)
-        }
+        Command::Types(_)
+        | Command::Bodies(_)
+        | Command::Helpers(_)
+        | Command::Names(_)
+        | Command::Fns(_) => Some(modules::ModuleGraph::discover(&root, &config.modules)?),
         _ => None,
     };
     let records = scan_records(scan, &config, rules, &root, &base)?;
@@ -364,6 +387,27 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let text =
                     analysis::bodies::render_text(&records, &report, args.top, &options, &judge);
+                out.write_all(text.as_bytes())?;
+            }
+        }
+        (Command::Helpers(args), _, Some(graph)) => {
+            let options = helper_options(args);
+            let judge = judge::ProjectJudge::new(
+                &graph,
+                &records,
+                base,
+                &config.acknowledged,
+                "functions",
+                |r| matches!(r, record::Record::Function(_)),
+            );
+            let report = analysis::helpers::find_helpers(&records, &options, &judge);
+            if args.json {
+                let json = analysis::helpers::to_json(&records, &report, &judge);
+                serde_json::to_writer(&mut out, &json)?;
+                out.write_all(b"\n")?;
+            } else {
+                let text =
+                    analysis::helpers::render_text(&records, &report, args.top, &options, &judge);
                 out.write_all(text.as_bytes())?;
             }
         }
@@ -508,6 +552,12 @@ fn report(
         let found = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
         Ok(report::bodies(&records, &found))
     });
+    let helpers = report::attempt(|| {
+        let options = helper_options(&defaults());
+        let judge = judge("functions", &|r| matches!(r, record::Record::Function(_)));
+        let found = analysis::helpers::find_helpers(&records, &options, &judge);
+        Ok(report::helpers(&records, &found, &judge))
+    });
     let identical = report::attempt(|| {
         // Unreadable files were counted above; an empty source never matches.
         let sources: Vec<Vec<u8>> = files
@@ -554,6 +604,7 @@ fn report(
             ("names", names),
             ("types", types),
         ],
+        helpers,
         args.top,
     );
     let mut out = output(&args.scan)?;
@@ -655,6 +706,13 @@ fn body_options(args: &BodiesArgs) -> analysis::bodies::BodyOptions {
         include_same_file: args.include_same_file,
         cross_language: args.cross_language,
         include_acknowledged: args.include_acknowledged,
+    }
+}
+
+fn helper_options(args: &HelpersArgs) -> analysis::helpers::HelperOptions {
+    analysis::helpers::HelperOptions {
+        min_tokens: args.min_tokens,
+        max_tokens: BODY_MIN_TOKENS - 1,
     }
 }
 

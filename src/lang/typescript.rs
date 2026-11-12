@@ -1294,7 +1294,7 @@ mod tests {
             vec![
                 text("{"),
                 text("return"),
-                Token::Identifier,
+                Token::Identifier(token_hash("user")),
                 text("."),
                 text("name"),
                 text("+"),
@@ -1309,7 +1309,9 @@ mod tests {
         let records = run("function g() { return { id, label: `${user.name}!` }; }");
         let body = &functions(&records)[0].body;
         assert!(body.contains(&text("id")) && body.contains(&text("name")));
-        assert!(!body.contains(&text("user")) && body.contains(&Token::Identifier));
+        assert!(
+            !body.contains(&text("user")) && body.contains(&Token::Identifier(token_hash("user")))
+        );
         let arrow = run("const g = (a) => a.b;\ndeclare function h(): void;");
         assert_eq!(functions(&arrow)[0].body.len(), 3);
         assert!(functions(&arrow)[1].body.is_empty());

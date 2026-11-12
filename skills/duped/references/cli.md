@@ -15,10 +15,11 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | Command | Finds | Languages |
 |---|---|---|
 | `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS, Rust |
+| `duped helpers` | small top-level helpers (8–49 tokens, below `bodies`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 6 bodies). Parameters renamed by position, other names kept | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
-| `duped report` | every analysis plus identical files, grouped by file pair and ranked by `removableLines` (see SKILL.md) | all |
+| `duped report` | every analysis plus identical files, grouped by file pair and ranked by `removableLines`, then `helpers` groups ranked apart (see SKILL.md) | all |
 | `duped coupling` | imports that bypass a directory's entry file, by depth; surface, hiding, leaks and a 0–1 score per boundary | TS/JS, Python, Rust |
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
@@ -59,7 +60,7 @@ b = "@x/cli:formatBytes"
 reason = "cli is published standalone and can't depend on web"
 ```
 
-Acknowledgements apply to `bodies` and `types` only; `names` and `imports` keep reporting the pair. `--include-acknowledged` shows hidden pairs.
+Acknowledgements apply to `bodies`, `types` and `helpers` (a copy acknowledged against its group's first member is dropped); `names` and `imports` keep reporting the pair. `--include-acknowledged` shows hidden pairs.
 
 ## Tuning
 
@@ -67,5 +68,6 @@ Other `duped.toml` sections: `[scan] exclude = [...]`, `[types]` and `[names]` t
 
 - Noise from directories meant to repeat themselves (examples, demos, generated code): `--exclude '**/examples'`, or `[scan] exclude`.
 - `bodies` too strict or too loose: `--threshold` (default 0.5), `--min-tokens` (default 50).
+- `helpers` too noisy: raise `--min-tokens` (default 8; a lone `return x;` counts as `x`).
 - `imports` missing small files: `--min-shared 2` (default 3).
 - `names` noisy: raise `--min-score` (default 2.5).

@@ -174,7 +174,7 @@ pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClas
         if leaf && !text.trim().is_empty() {
             tokens.extend(match class {
                 Some(TokenClass::Skip) => None,
-                Some(TokenClass::Identifier) => Some(Token::Identifier),
+                Some(TokenClass::Identifier) => Some(Token::Identifier(token_hash(text))),
                 Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
             });
         }

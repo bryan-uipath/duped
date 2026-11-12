@@ -167,7 +167,7 @@ fn shingles(body: &[Token], k: usize) -> Vec<u64> {
     let normalised: Vec<u32> = body
         .iter()
         .map(|&t| match t {
-            Token::Identifier => IDENTIFIER,
+            Token::Identifier(_) => IDENTIFIER,
             Token::Text(h) => h,
         })
         .collect();
