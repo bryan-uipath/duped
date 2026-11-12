@@ -114,7 +114,15 @@ fn flags_reach_the_analysis() {
     };
     assert_eq!(count(&[]), 3);
     assert_eq!(count(&["--include-same-file"]), 4);
-    assert_eq!(count(&["--threshold", "0.99"]), 0);
+    // `--threshold` gates only `similar`; the ported functions are still mostly in their originals.
+    let strict = bodies_json(&root, &["--threshold", "0.99"]);
+    let kinds: Vec<&str> = strict["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["contained", "contained"], "{strict}");
     assert_eq!(count(&["--min-tokens", "100000"]), 0);
     assert!(count(&["--shingle", "2"]) >= 3);
 
@@ -152,6 +160,63 @@ fn flags_reach_the_analysis() {
         .output()
         .unwrap();
     assert!(!rejected.status.success());
+
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn reports_a_block_pasted_into_two_large_functions() {
+    let root = workspace("block");
+    // A 12-line block inside two otherwise unrelated 60-line functions.
+    let block: String = (0..12)
+        .map(|i| format!("  result.field{i} = source.read('key{i}', {i}).trim();\n"))
+        .collect();
+    let host = |name: &str| {
+        let filler = |part: &str| -> String {
+            (0..24)
+                .map(|i| format!("  console.log('{name}-{part}-{i}');\n"))
+                .collect()
+        };
+        format!(
+            "export function {name}(result, source) {{\n{}{block}{}}}\n",
+            filler("before"),
+            filler("after")
+        )
+    };
+    for (path, name) in [
+        ("packages/web/src/load.ts", "loadWeb"),
+        ("packages/ext/src/load.ts", "loadExt"),
+    ] {
+        std::fs::write(root.join(path), host(name)).unwrap();
+    }
+    let json = bodies_json(&root, &[]);
+    let block = json["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["kind"] == "block")
+        .unwrap_or_else(|| panic!("{json}"));
+    assert_eq!(block["region"]["a"], serde_json::json!([26, 37]), "{block}");
+
+    let text = duped(&["bodies", root.to_str().unwrap()]);
+    assert!(text.contains("block, "), "{text}");
+    assert!(text.contains("packages/ext/src/load.ts:26-37"), "{text}");
+
+    // `report` counts the block's lines, not the 62-line functions.
+    let report: Value =
+        serde_json::from_str(&duped(&["report", root.to_str().unwrap(), "--json"])).unwrap();
+    let group = report["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["a"] == "packages/ext/src/load.ts")
+        .unwrap_or_else(|| panic!("{report}"));
+    let removable = group["removableLines"].as_u64().unwrap();
+    assert!((12..=14).contains(&removable), "{group}");
+    assert_eq!(
+        group["findings"][0]["a"]["region"],
+        serde_json::json!([26, 37])
+    );
 
     std::fs::remove_dir_all(&root).unwrap();
 }

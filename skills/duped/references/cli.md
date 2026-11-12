@@ -14,7 +14,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 
 | Command | Finds | Languages |
 |---|---|---|
-| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept); files linked through ≥2 such functions | TS/JS, Rust |
+| `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept), `kind` `similar`; a body mostly inside another (`contained`) or a ≥15-line block in both (`block`), with `region` line ranges to extract; files linked through ≥2 `similar` functions | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
@@ -66,6 +66,6 @@ Acknowledgements apply to `bodies` and `types` only; `names` and `imports` keep 
 Other `duped.toml` sections: `[scan] exclude = [...]`, `[types]` and `[names]` thresholds, `[modules."<name>"]` (`ignore`, `path`, `deps`), `[rules.<language>]` test patterns. Flags win over the file. Common adjustments:
 
 - Noise from directories meant to repeat themselves (examples, demos, generated code): `--exclude '**/examples'`, or `[scan] exclude`.
-- `bodies` too strict or too loose: `--threshold` (default 0.5), `--min-tokens` (default 50).
+- `bodies` too strict or too loose: `--threshold` (default 0.5, `similar` only), `--min-tokens` (default 50).
 - `imports` missing small files: `--min-shared 2` (default 3).
 - `names` noisy: raise `--min-score` (default 2.5).

@@ -29,6 +29,9 @@ pub struct FunctionRecord {
     /// Body tokens in source order, comments dropped; empty for languages without a tokenizer.
     #[serde(skip)]
     pub body: Vec<Token>,
+    /// Each body token's 1-based line.
+    #[serde(skip)]
+    pub body_lines: Vec<u32>,
 }
 
 /// One body token: identifiers are abstracted, everything else is kept by text.
