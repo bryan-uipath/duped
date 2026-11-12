@@ -267,11 +267,7 @@ fn score(
         return None;
     }
     let (start, end, matched) = region(a, b)?;
-    // Gaps can chain short coincidental runs across a whole body; a copy is mostly shared.
     let density = matched as f64 / ((end.0 - start.0).max(end.1 - start.1) + 1) as f64;
-    if density < MIN_DENSITY {
-        return None;
-    }
     // The region's span over its body, not set overlap: a huge body has most shingles of any
     // small one. Span, so windows skipped as too repetitive still count.
     let containment = f64::max(
@@ -482,8 +478,8 @@ fn region(a: &Candidate, b: &Candidate) -> Option<Chain> {
         .collect();
     runs.sort_unstable();
     runs.dedup();
-    // Best chain ending at each run: (shared windows, previous run).
-    let mut best: Vec<(usize, Option<usize>)> = Vec::with_capacity(runs.len());
+    // Best chain ending at each run: (shared windows, previous run, first run).
+    let mut best: Vec<(usize, Option<usize>, usize)> = Vec::with_capacity(runs.len());
     for (r, &(x, y, len)) in runs.iter().enumerate() {
         let previous = (0..r)
             .filter(|&q| {
@@ -492,15 +488,28 @@ fn region(a: &Candidate, b: &Candidate) -> Option<Chain> {
                 ex <= x && ey <= y && x - ex <= GAP && y - ey <= GAP
             })
             .max_by_key(|&q| best[q].0);
-        best.push((len + previous.map_or(0, |q| best[q].0), previous));
+        let first = previous.map_or(r, |q| best[q].2);
+        best.push((len + previous.map_or(0, |q| best[q].0), previous, first));
     }
-    let (mut first, &(matched, _)) = best.iter().enumerate().max_by_key(|(_, b)| b.0)?;
-    let (x, y, len) = runs[first];
-    let end = (x + len - 1, y + len - 1);
-    while let Some(previous) = best[first].1 {
-        first = previous;
-    }
-    Some(((runs[first].0, runs[first].1), end, matched))
+    // Gaps can chain short coincidental runs across a whole body; a copy is mostly shared.
+    // Each run alone is a candidate too, so a sparse chain can't hide a dense block in it.
+    let dense = |(start, end, matched): Chain| {
+        let span = (end.0 - start.0).max(end.1 - start.1) + 1;
+        (matched as f64 / span as f64 >= MIN_DENSITY).then_some((start, end, matched))
+    };
+    let chain = |first: usize, last: usize, matched: usize| {
+        let (x, y, len) = runs[last];
+        (
+            (runs[first].0, runs[first].1),
+            (x + len - 1, y + len - 1),
+            matched,
+        )
+    };
+    best.iter()
+        .enumerate()
+        .flat_map(|(r, &(matched, _, first))| [chain(first, r, matched), chain(r, r, runs[r].2)])
+        .filter_map(dense)
+        .max_by_key(|&(.., matched)| matched)
 }
 
 /// Most rows per band (so fewest false candidates) that still finds a pair at `threshold`
@@ -1080,6 +1089,31 @@ mod tests {
         let records = extract(&[("a.ts", &shape("a")), ("b.ts", &shape("b"))]);
         let report = find_duplicate_bodies(&records, &options(), &NoJudge);
         assert!(report.pairs.is_empty(), "{:?}", report.pairs);
+    }
+
+    #[test]
+    fn a_dense_block_survives_a_sparse_chain_after_it() {
+        // 12 identical lines, then a long same-shape tail whose sparse chain is larger.
+        let body = |tag: &str| {
+            let block: String = (0..12)
+                .map(|i| format!("result.field{i} = source.read('key{i}', {i}).trim();\n"))
+                .collect();
+            let gap: String = (0..20)
+                .map(|i| format!("console.log('{tag}-sep-{i}');\n"))
+                .collect();
+            let tail: String = (0..100)
+                .map(|i| format!("result.other{i} = source.read('{tag}-{i}');\n"))
+                .collect();
+            format!("export function {tag}(result, source) {{\n{block}{gap}{tail}}}\n")
+        };
+        let records = extract(&[("a.ts", &body("a")), ("b.ts", &body("b"))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        let pair = report.pairs.first().expect("the block is reported");
+        assert_eq!(pair.kind, PairKind::Block, "{pair:?}");
+        let region = pair.region.expect("block has a region");
+        assert_eq!(region.a, region.b);
+        // The signature matches too (names are abstracted); the tail is left out.
+        assert_eq!(region.a, (1, 13), "{region:?}");
     }
 
     #[test]
