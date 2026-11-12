@@ -28,8 +28,8 @@ Candidates are generated across the whole repo, so copies of *unchanged* code ar
 
 ## 2. Read the groups
 
-Inspect detector statuses, counts (`filePairs`, `helperGroups`), and `truncated`
-(file pairs or helper groups cut by `--top`) before selected groups; `helpers`
+Inspect detector statuses, counts (`filePairs`, `helperGroups`, `helperFamilies`), and `truncated`
+(file pairs, helper groups or families cut by `--top`) before selected groups; `helpers`
 lists small helpers the change copies N ways, with `changed` on its copies;
 `families` lists same-name helpers whose bodies differ: a `changed` copy in a
 minority variant is a helper the change wrote differently from the rest;

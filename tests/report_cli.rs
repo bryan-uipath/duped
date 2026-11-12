@@ -397,6 +397,25 @@ fn lists_helper_families_whose_copies_drifted() {
         text.contains("\nSame name, different bodies:\n\n1. isRecord: 3 definitions, 2 bodies\n   2× isRecord  x.ts:1\n   1× isRecord  z.ts:1\n"),
         "{text}"
     );
+
+    // With `--base`, the family is kept for its changed copy, which stands for its variant.
+    if has_git() {
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        assert_eq!(json(&root, &["--base", "main"])["helperFamilies"], 0);
+        write(&root, "y.ts", &guard.replace("isRecord =", "isRecord  ="));
+        let report = json(&root, &["--base", "main"]);
+        assert_eq!(report["helperFamilies"], 1);
+        let copies = &report["families"][0]["variants"][0];
+        assert_eq!(copies[0].get("changed"), None);
+        assert_eq!(copies[1]["changed"], true);
+        let text = String::from_utf8(duped(&root, &["--base", "main"]).stdout).unwrap();
+        assert!(
+            text.contains("   2× isRecord  y.ts:1 (changed)\n"),
+            "{text}"
+        );
+    }
     std::fs::remove_dir_all(&root).unwrap();
 }
 

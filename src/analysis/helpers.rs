@@ -363,7 +363,7 @@ pub fn families(records: &[Record], families: &[HelperFamily], judge: &dyn Judge
 /// The `shown` families ranked, of `total`; shared with `report`.
 pub fn render_families(shown: &[Family], total: usize) -> String {
     let mut out = String::new();
-    if !shown.is_empty() {
+    if total > 0 {
         writeln!(out, "\nSame name, different bodies:").ok();
     }
     for (rank, f) in shown.iter().enumerate() {
@@ -377,18 +377,16 @@ pub fn render_families(shown: &[Family], total: usize) -> String {
         )
         .ok();
         for v in &f.variants {
-            let changed = if v.iter().any(|m| m.changed) {
-                " (changed)"
-            } else {
-                ""
-            };
+            // A changed copy stands for its variant, so `(changed)` names the right file.
+            let shown = v.iter().find(|m| m.changed).unwrap_or(&v[0]);
+            let changed = if shown.changed { " (changed)" } else { "" };
             writeln!(
                 out,
                 "   {}× {}  {}:{}{changed}",
                 v.len(),
-                v[0].name,
-                v[0].file,
-                v[0].line
+                shown.name,
+                shown.file,
+                shown.line
             )
             .ok();
         }

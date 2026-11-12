@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::analysis::bodies::{BodyReport, file_shared, function_at, kind_text};
 use crate::analysis::files::IdenticalFiles;
-use crate::analysis::helpers::{Family, HelperGroup, render_families, render_groups};
+use crate::analysis::helpers::{Family, HelperGroup, Member, render_families, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
 use crate::analysis::types::TypeReport;
@@ -185,9 +185,7 @@ impl Report {
                 for mut f in families {
                     let mut any = false;
                     for m in f.variants.iter_mut().flatten() {
-                        m.changed = changed
-                            .as_ref()
-                            .is_some_and(|c| c.lines(&m.file, (m.line, m.line + m.lines - 1)));
+                        m.changed = changed.as_ref().is_some_and(|c| c.member(m));
                         any |= m.changed;
                     }
                     if changed.is_none() || any {
@@ -197,9 +195,7 @@ impl Report {
                 let total = found.len();
                 for mut h in found {
                     for m in &mut h.members {
-                        m.changed = changed
-                            .as_ref()
-                            .is_some_and(|c| c.lines(&m.file, (m.line, m.line + m.lines - 1)));
+                        m.changed = changed.as_ref().is_some_and(|c| c.member(m));
                     }
                     if changed.is_none() || h.members.iter().any(|m| m.changed) {
                         kept_helpers.push(h);
@@ -560,6 +556,10 @@ impl Changed {
             Some(None) => true,
             None => false,
         }
+    }
+
+    fn member(&self, m: &Member) -> bool {
+        self.lines(&m.file, (m.line, m.line + m.lines - 1))
     }
 
     fn touches(&self, f: &Finding) -> bool {
