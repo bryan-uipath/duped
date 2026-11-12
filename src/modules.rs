@@ -318,6 +318,13 @@ impl ModuleGraph {
         Some((best, missing(best)))
     }
 
+    /// `m` is `package` or lists it as a direct dependency.
+    pub fn declares(&self, m: usize, package: &str) -> bool {
+        self.declarers
+            .get(&package_key(package))
+            .is_some_and(|d| d.contains(&m))
+    }
+
     /// `package` is `m`'s name or an alias.
     fn named(&self, m: usize, package: &str) -> bool {
         let key = package_key(package);
