@@ -432,24 +432,26 @@ fn removable_lines(group: &Group) -> usize {
     if let Some(lines) = whole.max() {
         return lines;
     }
-    let mut best: HashMap<(&str, usize), f64> = HashMap::new();
+    // Keyed by group side (0 = `a`), not file, so a same-file pair keeps two sides.
+    let mut best: HashMap<(usize, usize), f64> = HashMap::new();
     for f in &group.findings {
         if let Span::Lines { a, b, weight } = f.span {
-            for (file, (start, end)) in [(&f.a.file, a), (&f.b.file, b)] {
+            let (a, b) = if f.a.file == group.a { (a, b) } else { (b, a) };
+            for (side, (start, end)) in [(0, a), (1, b)] {
                 for line in start..=end {
-                    let value = best.entry((file.as_str(), line)).or_default();
+                    let value = best.entry((side, line)).or_default();
                     *value = value.max(weight);
                 }
             }
         }
     }
-    let total = |file: &str| -> f64 {
+    let total = |side: usize| -> f64 {
         best.iter()
-            .filter(|((f, _), _)| *f == file)
+            .filter(|((s, _), _)| *s == side)
             .map(|(_, v)| v)
             .sum()
     };
-    total(&group.a).min(total(&group.b)).round() as usize
+    total(0).min(total(1)).round() as usize
 }
 
 // ----- changed files -----
