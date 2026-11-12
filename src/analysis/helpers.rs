@@ -228,15 +228,28 @@ fn sort_groups(groups: &mut [HelperGroup]) {
 /// its position, so `{ x }` from the first parameter never matches `{ x }` from the second.
 /// `{ return x; }` becomes `x`, as an arrow function's expression body would be.
 fn normalised(f: &FunctionRecord) -> Vec<u64> {
+    // Only a bare identifier is abstracted; a pattern (`{ user: u }`, `[a, b]`, `n = 10`) is
+    // part of the signature callers see, so its text joins the key.
+    let plain = |name: &str| {
+        let name = name.trim_start_matches("...");
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
     let params: Vec<Option<u32>> = f
         .params
         .iter()
         .map(|p| {
-            p.fields
-                .is_empty()
+            (p.fields.is_empty() && plain(&p.name))
                 .then(|| token_hash(p.name.trim_start_matches("...")))
         })
         .collect();
+    let patterns = f
+        .params
+        .iter()
+        .filter(|p| !(p.fields.is_empty() && plain(&p.name)))
+        .map(|p| 4 << 48 | u64::from(token_hash(&p.name)));
     let position = |h: u32| params.iter().position(|&p| p == Some(h));
     let tokens: Vec<u64> = f
         .body
@@ -259,14 +272,15 @@ fn normalised(f: &FunctionRecord) -> Vec<u64> {
         {
             inner.strip_suffix(&[text(";")]).unwrap_or(inner)
         }
-        _ => return tokens,
+        _ => return patterns.chain(tokens).collect(),
     };
     // Only a lone `return`: `{ return a; b(); }` is not an expression.
-    if inner.contains(&text(";")) {
-        tokens
+    let body = if inner.contains(&text(";")) {
+        tokens.clone()
     } else {
         inner.to_vec()
-    }
+    };
+    patterns.chain(body).collect()
 }
 
 fn line_count(record: &Record) -> usize {
@@ -528,6 +542,23 @@ mod tests {
         let report = find_helpers(&records, &options(), &NoJudge);
         assert_eq!(groups(&report), vec![vec!["B", "B"]]);
         assert_eq!(report.groups[0].members[1].file, "c.tsx");
+    }
+
+    #[test]
+    fn parameter_patterns_join_the_key() {
+        // Aliased keys and array patterns are what callers pass: `{ user: u }` ≠ `{ team: u }`.
+        let alias = |key: &str| {
+            format!("export const B = ({{ {key}: u }}) => <Badge label={{u.name}} size=\"sm\" />;")
+        };
+        let pair = |p: &str| format!("export const cmp = ({p}) => a.localeCompare(b, 'en');");
+        let records = extract(&[
+            ("a.tsx", &alias("user")),
+            ("b.tsx", &alias("team")),
+            ("c.ts", &pair("[a, b]")),
+            ("d.ts", &pair("[b, a]")),
+        ]);
+        let report = find_helpers(&records, &options(), &NoJudge);
+        assert!(groups(&report).is_empty(), "{:?}", groups(&report));
     }
 
     #[test]
