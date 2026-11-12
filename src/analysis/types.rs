@@ -164,6 +164,15 @@ pub fn find_duplicate_types(
         });
     }
 
+    // Field names per type name, for the members a common base accounts for.
+    let mut declared: HashMap<&str, Vec<&str>> = HashMap::new();
+    for record in records {
+        if let Record::Type(t) = record {
+            let fields = t.fields.iter().map(|f| f.name.as_str());
+            declared.entry(&t.name).or_default().extend(fields);
+        }
+    }
+
     let mut pairs = Vec::new();
     let (mut hidden_same_module, mut hidden_acknowledged) = (0, 0);
     let (mut hidden_implementations, mut hidden_ambient) = (0, 0);
@@ -179,7 +188,7 @@ pub fn find_duplicate_types(
                     return;
                 };
                 let (a, b) = (type_at(records, pair.a), type_at(records, pair.b));
-                if same_contract(a, b) {
+                if same_contract(a, b, &pair.shared, &declared, options.min_shared) {
                     hidden_implementations += 1;
                     return;
                 }
@@ -223,25 +232,46 @@ pub fn find_duplicate_types(
     }
 }
 
-/// One type extends or implements the other, or both are classes with a common base, e.g. two
-/// `implements StorageProvider`: the shared members are one contract, not a copy.
-fn same_contract<'r>(a: &'r TypeRecord, b: &'r TypeRecord) -> bool {
+/// One type extends or implements the other, or a scanned base of both declares all but fewer
+/// than `min_shared` of the `shared` members, e.g. two `implements StorageProvider`: one
+/// contract, not a copy. An unscanned base (`BaseModel`) accounts for nothing.
+fn same_contract<'r>(
+    a: &'r TypeRecord,
+    b: &'r TypeRecord,
+    shared: &[String],
+    declared: &HashMap<&str, Vec<&str>>,
+    min_shared: usize,
+) -> bool {
     let bases =
         |t: &'r TypeRecord| -> Vec<&'r str> { t.extends.iter().map(|e| base_name(e)).collect() };
     let (ba, bb) = (bases(a), bases(b));
-    ba.contains(&b.name.as_str())
-        || bb.contains(&a.name.as_str())
-        || (a.kind == TypeKind::Class
-            && b.kind == TypeKind::Class
-            && ba.iter().any(|x| bb.contains(x)))
+    if ba.contains(&b.name.as_str()) || bb.contains(&a.name.as_str()) {
+        return true;
+    }
+    let inherited: Vec<&str> = ba
+        .iter()
+        .filter(|x| bb.contains(x))
+        .filter_map(|x| declared.get(x))
+        .flatten()
+        .copied()
+        .collect();
+    let own = shared
+        .iter()
+        .filter(|f| !inherited.contains(&f.as_str()))
+        .count();
+    !inherited.is_empty() && own < min_shared
 }
 
-/// `t` sits in `declare module '<module>'` or `'<module>/sub'`: a typing of that module's own
-/// type, kept beside a consumer that can't compile its source.
+/// `t` sits in a `.d.ts` file's `declare module '<module>'` or `'<module>/sub'`: a typing of
+/// that module's own type, kept beside a consumer that can't compile its source.
 fn declares(t: &TypeRecord, module: Option<&str>) -> bool {
     let (Some(scope), Some(module)) = (t.scope.as_deref(), module) else {
         return false;
     };
+    if !t.location.file.ends_with(".d.ts") {
+        // A `namespace core` or Rust `mod core` is not a typing of package `core`.
+        return false;
+    }
     scope
         .strip_prefix(module)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -797,9 +827,9 @@ mod tests {
             with("Provider", TypeKind::Interface, &[], None),
             with("Noop", TypeKind::Class, &["Provider"], None),
             with("Console", TypeKind::Class, &["ns.Provider<T>"], None),
-            // Interfaces with a common base declare their own fields: still a pair.
-            with("A", TypeKind::Interface, &["Base"], None),
-            with("B", TypeKind::Interface, &["Base"], None),
+            // An unscanned base, like pydantic's `BaseModel`, accounts for no field.
+            with("A", TypeKind::Class, &["BaseModel"], None),
+            with("B", TypeKind::Class, &["BaseModel"], None),
         ];
         let report = find_duplicate_types(&records, &options(), &NoJudge);
         let kept: Vec<_> = report.pairs.iter().map(|p| names(&records, p)).collect();
@@ -814,11 +844,14 @@ mod tests {
             &[],
             Some("@x/core/telemetry"),
         );
-        let Record::Type(shim) = &shim else {
+        let Record::Type(mut shim) = shim else {
             unreachable!()
         };
-        assert!(declares(shim, Some("@x/core")));
-        assert!(!declares(shim, Some("@x/co")) && !declares(shim, None));
+        // A namespace or Rust `mod` of that name, outside a `.d.ts`, is not a typing.
+        assert!(!declares(&shim, Some("@x/core")));
+        shim.location.file = "types/core.d.ts".into();
+        assert!(declares(&shim, Some("@x/core")));
+        assert!(!declares(&shim, Some("@x/co")) && !declares(&shim, None));
     }
 
     #[test]
