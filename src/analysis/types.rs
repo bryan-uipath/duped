@@ -7,6 +7,7 @@ use globset::GlobSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use super::fns::base_name;
 use super::{Interner, Judge, components, jaccard, pair_notes, seed_pairs, tag_rank};
 use crate::modules::{Home, Tag};
 use crate::record::{Record, TypeKind, TypeRecord, qualified};
@@ -93,6 +94,11 @@ pub struct TypeReport {
     pub hidden_same_module: usize,
     /// Qualifying pairs left out because they are acknowledged.
     pub hidden_acknowledged: usize,
+    /// Qualifying pairs left out as one contract: a type and its implementer, or two classes
+    /// with a common base.
+    pub hidden_implementations: usize,
+    /// Qualifying pairs left out because one side is `declare module '<the other's module>'`.
+    pub hidden_ambient: usize,
 }
 
 /// Which kinds are comparable: object shapes with each other, enums and unions with each other.
@@ -160,6 +166,7 @@ pub fn find_duplicate_types(
 
     let mut pairs = Vec::new();
     let (mut hidden_same_module, mut hidden_acknowledged) = (0, 0);
+    let (mut hidden_implementations, mut hidden_ambient) = (0, 0);
     for group in [Group::Shape, Group::Members] {
         let members: Vec<&Candidate> = candidates.iter().filter(|c| c.group == group).collect();
         let sets: Vec<&[u32]> = members.iter().map(|c| c.names.as_slice()).collect();
@@ -171,6 +178,15 @@ pub fn find_duplicate_types(
                 let Some(mut pair) = score_pair(members[i], members[j], options) else {
                     return;
                 };
+                let (a, b) = (type_at(records, pair.a), type_at(records, pair.b));
+                if same_contract(a, b) {
+                    hidden_implementations += 1;
+                    return;
+                }
+                if declares(a, judge.module(pair.b)) || declares(b, judge.module(pair.a)) {
+                    hidden_ambient += 1;
+                    return;
+                }
                 let verdict = judge.verdict(pair.a, pair.b);
                 if matches!(verdict.tag, Some(Tag::SameModule { .. }))
                     && !options.include_same_module
@@ -202,7 +218,33 @@ pub fn find_duplicate_types(
         clusters,
         hidden_same_module,
         hidden_acknowledged,
+        hidden_implementations,
+        hidden_ambient,
     }
+}
+
+/// One type extends or implements the other, or both are classes with a common base, e.g. two
+/// `implements StorageProvider`: the shared members are one contract, not a copy.
+fn same_contract<'r>(a: &'r TypeRecord, b: &'r TypeRecord) -> bool {
+    let bases =
+        |t: &'r TypeRecord| -> Vec<&'r str> { t.extends.iter().map(|e| base_name(e)).collect() };
+    let (ba, bb) = (bases(a), bases(b));
+    ba.contains(&b.name.as_str())
+        || bb.contains(&a.name.as_str())
+        || (a.kind == TypeKind::Class
+            && b.kind == TypeKind::Class
+            && ba.iter().any(|x| bb.contains(x)))
+}
+
+/// `t` sits in `declare module '<module>'` or `'<module>/sub'`: a typing of that module's own
+/// type, kept beside a consumer that can't compile its source.
+fn declares(t: &TypeRecord, module: Option<&str>) -> bool {
+    let (Some(scope), Some(module)) = (t.scope.as_deref(), module) else {
+        return false;
+    };
+    scope
+        .strip_prefix(module)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 fn is_excluded(t: &TypeRecord, globs: &GlobSet) -> bool {
@@ -460,6 +502,18 @@ pub fn render_text(
             report.hidden_acknowledged
         ));
     }
+    if report.hidden_implementations > 0 {
+        hidden.push(format!(
+            "{} implementations of one contract",
+            report.hidden_implementations
+        ));
+    }
+    if report.hidden_ambient > 0 {
+        hidden.push(format!(
+            "{} ambient module declarations",
+            report.hidden_ambient
+        ));
+    }
     if !hidden.is_empty() {
         writeln!(out, "Hidden pairs: {}.", hidden.join(", ")).ok();
     }
@@ -575,7 +629,12 @@ pub fn to_json(records: &[Record], report: &TypeReport, judge: &dyn Judge) -> Va
             "pairs": report.pairs.len(),
             "clusters": report.clusters.len(),
             "modules": judge.summary(),
-            "hidden": { "same_module": report.hidden_same_module, "acknowledged": report.hidden_acknowledged },
+            "hidden": {
+                "same_module": report.hidden_same_module,
+                "acknowledged": report.hidden_acknowledged,
+                "implementations": report.hidden_implementations,
+                "ambient": report.hidden_ambient,
+            },
         },
         "pairs": pairs,
         "clusters": clusters,
@@ -716,6 +775,50 @@ mod tests {
             type_at(records, pair.a).name.as_str(),
             type_at(records, pair.b).name.as_str(),
         )
+    }
+
+    #[test]
+    fn hides_implementers_of_one_contract_and_ambient_typings() {
+        let fields = [
+            "name: string",
+            "track(): void",
+            "flush(): void",
+            "id: string",
+        ];
+        let with = |name: &str, kind, extends: &[&str], scope: Option<&str>| {
+            let Record::Type(mut t) = ty(name, kind, &fields) else {
+                unreachable!()
+            };
+            t.extends = extends.iter().map(|e| e.to_string()).collect();
+            t.scope = scope.map(str::to_string);
+            Record::Type(t)
+        };
+        let records = vec![
+            with("Provider", TypeKind::Interface, &[], None),
+            with("Noop", TypeKind::Class, &["Provider"], None),
+            with("Console", TypeKind::Class, &["ns.Provider<T>"], None),
+            // Interfaces with a common base declare their own fields: still a pair.
+            with("A", TypeKind::Interface, &["Base"], None),
+            with("B", TypeKind::Interface, &["Base"], None),
+        ];
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
+        let kept: Vec<_> = report.pairs.iter().map(|p| names(&records, p)).collect();
+        // Gone: Provider ~ Noop, Provider ~ Console, Noop ~ Console.
+        assert_eq!(report.hidden_implementations, 3);
+        assert!(kept.contains(&("A", "B")) && kept.contains(&("Provider", "A")));
+        assert!(!kept.iter().any(|&(a, b)| a == "Noop" && b == "Console"));
+
+        let shim = with(
+            "Provider",
+            TypeKind::Interface,
+            &[],
+            Some("@x/core/telemetry"),
+        );
+        let Record::Type(shim) = &shim else {
+            unreachable!()
+        };
+        assert!(declares(shim, Some("@x/core")));
+        assert!(!declares(shim, Some("@x/co")) && !declares(shim, None));
     }
 
     #[test]
