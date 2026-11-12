@@ -122,10 +122,10 @@ Every pair is evidence, not a verdict. Read both types before consolidating them
 - **Tokens:** each body's tokens, with comments dropped and every identifier (local or not) replaced by one placeholder, including those inside template `${…}`. Keywords, operators, property names (shorthand `{ id }` too) and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
 - **similarity:** Jaccard similarity of the two bodies' token shingles (runs of `--shingle` tokens). Repeated shingles count separately, so a ten-case `switch` doesn't match a three-case one.
 - **shared:** shingles both bodies have, roughly the number of duplicated tokens. Pairs are ranked by it, so a large near-copy outranks a small exact one.
-- **kind:** `similar` at the threshold; otherwise `contained` (one shared region spans at least 80% of one body, such as a wrapper or an inlined helper) or `block` (a shared region of at least 100 shingles, about 15 lines, such as a block pasted into two large functions). A region chains runs of equal shingles in order on both sides, bridging up to 10 unshared ones; each side's region lines are printed (`a.ts:120-150`) and are what `report` counts as removable.
+- **kind:** `similar` at the threshold; otherwise `contained` (one shared region spans at least 80% of one body, such as a wrapper or an inlined helper) or `block` (a shared region of at least 100 shingles, about 15 lines, such as a block pasted into two large functions). A region chains runs of equal shingles in order on both sides, bridging up to 10 unshared ones, and needs at least 60% of its span shared; each side's region lines are printed (`a.ts:120-150`) and are what `report` counts as removable.
 - **Files sharing several functions:** two files linked by `similar` pairs between at least two functions on each side, ranked by total shared. These are usually copied modules rather than one copied helper.
 
-Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time, and from an inverted index: pairs sharing at least 20 shingles that are each in at most 10 bodies. Only index pairs can be `contained` or `block`, so idioms and boilerplate repeated across many functions don't link them. Each candidate is then scored exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
+Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time, and from an inverted index: pairs sharing at least 20 shingles that are each in at most 10 bodies. Either source can give a `similar` pair, so it finds a few that LSH alone misses; only index pairs can be `contained` or `block`, so idioms and boilerplate repeated across many functions don't link them. Each candidate is then scored exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ Candidate pairs come from MinHash signatures with LSH banding, tuned to find a p
 | `--cross-language` | off | also pair functions in different languages (TypeScript and JavaScript count as one) |
 | `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
 
-`--json` prints every pair and file pair; each pair has `kind` and, unless `similar`, `region: { a: [start, end], b: [start, end] }`.
+`--json` prints every pair and file pair; each pair has `kind` and `region: { a: [start, end], b: [start, end] }` (`null` for `similar`).
 
 ### Finding ported files by their imports
 

@@ -115,6 +115,9 @@ const CONTAINED: f64 = 0.8;
 /// A `block` pair's region has at least this many shared shingles, about 15 lines.
 const BLOCK: usize = 100;
 
+/// A region's shared windows over its span on the longer side; sparser chains are coincidence.
+const MIN_DENSITY: f64 = 0.6;
+
 /// Runs of equal shingles shorter than this don't start or extend a region.
 const MIN_RUN: usize = 3;
 
@@ -264,6 +267,11 @@ fn score(
         return None;
     }
     let (start, end, matched) = region(a, b)?;
+    // Gaps can chain short coincidental runs across a whole body; a copy is mostly shared.
+    let density = matched as f64 / ((end.0 - start.0).max(end.1 - start.1) + 1) as f64;
+    if density < MIN_DENSITY {
+        return None;
+    }
     // The region's span over its body, not set overlap: a huge body has most shingles of any
     // small one. Span, so windows skipped as too repetitive still count.
     let containment = f64::max(
@@ -301,7 +309,7 @@ fn score(
     let region = Region {
         a: lines(a.record, start.0, end.0),
         b: lines(b.record, start.1, end.1),
-        density: matched as f64 / ((end.0 - start.0).max(end.1 - start.1) + 1) as f64,
+        density,
     };
     Some(scored(kind, matched, Some(region)))
 }
@@ -1057,6 +1065,21 @@ mod tests {
         assert!(pair.similarity < 0.5, "{pair:?}");
         let region = pair.region.expect("contained has a region");
         assert_eq!((region.a, region.b), ((2, 13), (42, 53)));
+    }
+
+    #[test]
+    fn sparse_chains_are_not_contained() {
+        // Same shape, different literal on every line: 7 of each 12 windows shared, chained
+        // across the whole body by gaps, but under MIN_DENSITY.
+        let shape = |tag: &str| {
+            let lines: String = (0..30)
+                .map(|i| format!("result.field{i} = source.read('{tag}-{i}');\n"))
+                .collect();
+            format!("export function {tag}(result, source) {{\n{lines}}}\n")
+        };
+        let records = extract(&[("a.ts", &shape("a")), ("b.ts", &shape("b"))]);
+        let report = find_duplicate_bodies(&records, &options(), &NoJudge);
+        assert!(report.pairs.is_empty(), "{:?}", report.pairs);
     }
 
     #[test]

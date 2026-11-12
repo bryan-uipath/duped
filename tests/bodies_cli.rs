@@ -101,6 +101,24 @@ fn finds_a_ported_module_and_its_functions() {
     );
     assert!(text.contains("ReportContent ~ ReportContent"), "{text}");
 
+    // `report` describes each pair as `bodies` does.
+    let report: Value =
+        serde_json::from_str(&duped(&["report", root.to_str().unwrap(), "--json"])).unwrap();
+    let evidence: Vec<&str> = report["groups"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "function")
+        .map(|f| f["evidence"].as_str().unwrap())
+        .collect();
+    let first = json["pairs"][0]["similarity"].as_f64().unwrap();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e.starts_with(&format!("{first:.2} similar, "))),
+        "{evidence:?}"
+    );
+
     std::fs::remove_dir_all(&root).unwrap();
 }
 

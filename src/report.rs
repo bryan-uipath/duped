@@ -93,7 +93,8 @@ enum Span {
     None,
     /// Identical files of this many lines.
     Whole(usize),
-    /// Each side's declaration line range, inclusive, scaled by similarity.
+    /// Each side's line range, inclusive, and its weight: a declaration scaled by similarity,
+    /// or a body region by its density.
     Lines {
         a: (usize, usize),
         b: (usize, usize),
@@ -217,10 +218,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
             b,
             evidence: format!(
                 "{}, {} shared shingles ({}/{} tokens)",
-                match p.region {
-                    Some(_) => kind_text(p),
-                    None => format!("{} similar", round(p.similarity)),
-                },
+                kind_text(p),
                 p.shared,
                 tokens(p.a),
                 tokens(p.b)
