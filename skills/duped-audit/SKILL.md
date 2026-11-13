@@ -47,8 +47,8 @@ top few, say which term drags them down and name the evidence:
 - low `1 − bypassRate`, many `leaks`: internal files others reach into.
   Group `edges` by target and `leaks` by symbol; the most-imported internals
   are the consolidation targets:
-  `jq --arg d <boundary dir> '[.edges[] | select(.target | startswith($d + "/"))] | group_by(.target) | map({target: .[0].target, importers: length}) | sort_by(-.importers)[:10]'`
-  and `jq --arg d <boundary dir> '[.leaks[] | select(.boundary == $d) | {symbol, file, importers: (.importers | length)}] | sort_by(-.importers)[:10]'`.
+  `jq --arg d <boundary dir> '[.edges[] | select((.target | startswith($d + "/")) and (.importer | startswith($d + "/") | not))] | group_by(.target) | map({target: .[0].target, importers: length}) | sort_by(-.importers)[:10]' <report path>.coupling`
+  and `jq --arg d <boundary dir> '[.leaks[] | select(.boundary == $d) | {symbol, file, importers: (.importers | length)}] | sort_by(-.importers)[:10]' <report path>.coupling`.
 - high `unusedSurface`: the entry exports more than anyone uses; often a
   barrel. List the unused names.
 - low `hiding`: most declarations are on the face or imported from outside.
