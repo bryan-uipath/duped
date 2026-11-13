@@ -28,7 +28,7 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 
 ## Coupling
 
-`duped coupling [PATH] [--base REF] [--rev REF] [--folder P] [--all-edges]` measures, never gates. A boundary is a directory with an entry file (`index.*`, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`), a manifest, or the name `internal`. `bypass` counts boundaries entered after the first, plus 1 when the target isn't the entry: `../foo` → `foo/index.ts` is 0, `../foo/bar.ts` 1, `../foo/internal/x.ts` 2.
+`duped coupling [PATH] [--base REF] [--rev REF] [--folder P] [--all-edges]` measures, never gates. A boundary is a directory with an entry file (`index.*`, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`), a manifest, or the name `internal`. A Rust module an entry declares `pub mod x;` is an entry too. `bypass` counts boundaries entered after the first, plus 1 when the target isn't the entry: `../foo` → `foo/index.ts` is 0, `../foo/bar.ts` 1, `../foo/internal/x.ts` 2.
 
 - Headline: `totals.score` (0–1, higher is better), the mean of `1 − bypassRate` (bypassing ÷ cross-boundary imported symbols), `1 − unusedSurface` (entry exports nobody outside imports, boundaries with consumers only) and `hiding` (declarations neither surfaced by an entry nor imported from outside). `bypassCost` and `meanBypassDepth` are diagnostics only.
 - `--base REF`: `diff.improved` (shallower, moved, or importer deleted), `diff.regressed` (`priorImporters`: files that already bypassed to that symbol at base), `diff.removedWithoutMove` (import gone, symbol still in place: likely copied or inlined; no credit), `diff.surface` (`newModule` marks boundaries absent at base), `diff.leaks`.

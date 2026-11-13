@@ -537,14 +537,14 @@ fn rust_resolves_crates_modules_and_globs() {
     write(
         &root,
         "crates/core/src/lib.rs",
-        "pub mod api;\npub mod internal;\npub use api::Client;\n",
+        "mod api;\nmod internal;\npub use api::Client;\n",
     );
     write(
         &root,
         "crates/core/src/api.rs",
         "pub struct Client;\npub(crate) fn hidden() {}\n",
     );
-    write(&root, "crates/core/src/internal/mod.rs", "pub mod deep;\n");
+    write(&root, "crates/core/src/internal/mod.rs", "mod deep;\n");
     write(
         &root,
         "crates/core/src/internal/deep.rs",
@@ -577,6 +577,74 @@ fn rust_resolves_crates_modules_and_globs() {
     let core = boundary(&report, "crates/core");
     assert_eq!(core["surface"], serde_json::json!(["Client"]));
     assert_eq!(leaks(&report).len(), 2);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn rust_pub_mod_chains_are_surface() {
+    let root = temp("rs-pub-mod");
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root,
+        "crates/core/Cargo.toml",
+        "[package]\nname = \"core-lib\"\n",
+    );
+    write(
+        &root,
+        "crates/core/src/lib.rs",
+        "pub mod api;\nmod private;\npub fn root() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api.rs",
+        "pub mod deep;\npub struct Client;\nfn helper() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api/deep.rs",
+        "pub fn deep() {}\npub fn spare() {}\n",
+    );
+    write(&root, "crates/core/src/private.rs", "pub fn secret() {}\n");
+    write(
+        &root,
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncore-lib = { path = \"../core\" }\n",
+    );
+    write(
+        &root,
+        "crates/app/src/main.rs",
+        "use core_lib::api;\nuse core_lib::api::deep::deep;\nuse core_lib::private::secret;\nfn main() {}\n",
+    );
+    let report = json(&root, &["--all-edges"]);
+    let main = "crates/app/src/main.rs";
+    assert_eq!(
+        edges(&report),
+        vec![
+            // Only the private module is past the entry.
+            e(main, "crates/core/src/private.rs", 1),
+            e(main, "crates/core/src/api.rs", 0),
+            e(main, "crates/core/src/api/deep.rs", 0),
+        ]
+    );
+    let core = boundary(&report, "crates/core");
+    assert_eq!(
+        core["surface"],
+        serde_json::json!(["api::Client", "api::deep::deep", "api::deep::spare", "root"])
+    );
+    assert_eq!(
+        core["unused"],
+        serde_json::json!(["api::deep::spare", "root"])
+    );
+    // `use core_lib::api;` doesn't reach the private `helper`.
+    assert_eq!((&core["declared"], &core["hidden"]), (&4.into(), &1.into()));
+    assert_eq!(leaks(&report), ["crates/core/src/private.rs#secret"]);
+    // The workspace root has no entry and no code: no row.
+    let rows = report["boundaries"].as_array().unwrap();
+    assert!(rows.iter().all(|b| b["dir"] != ""));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
