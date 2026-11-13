@@ -194,7 +194,8 @@ pub fn find_duplicate_bodies(
             hidden_same_file += 1;
             continue;
         }
-        let identical = kind == PairKind::Similar && similarity >= 1.0;
+        // Token for token: `similar` at 1.00 abstracts names, so a renamed callee would pass.
+        let identical = function_at(records, a).body == function_at(records, b).body;
         let verdict = judge.verdict(a, b).settle(identical);
         if verdict.acknowledged.is_some() && !options.include_acknowledged {
             hidden_acknowledged += 1;

@@ -309,7 +309,7 @@ The **project root** is found from `DIR`, without leaving its git checkout: the 
 
 A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
-A comment that declares a copy to maintain ("port of", "keep in step", "keep the two in step", "keep them in step") and names the other side anywhere in its sentence acknowledges the pair only while the two still match: identical bodies (`similar` at 1.00), the same field names, or one `helpers` group. A pair that no longer matches stays reported with `diverged` set to the phrase (`doc: port of`), shown as `(documented copy, diverged: doc: port of)`: a port that drifted from its source.
+A comment that declares a copy to maintain ("port of", "keep in step", "keep the two in step", "keep them in step") and names the other side anywhere in its sentence acknowledges the pair only while the two still match: bodies identical token for token (a renamed callee at `1.00 similar` is not), the same field names, or one `helpers` group. A pair that no longer matches stays reported with `diverged` set to the phrase (`doc: port of`), shown as `(documented copy, diverged: doc: port of)`: a port that drifted from its source.
 
 ### `duped.toml`
 
