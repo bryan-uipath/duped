@@ -56,11 +56,12 @@ base. `score` and `hiding` are better higher; `bypassRate` and
 `unusedSurface` better lower. Flag everything that got worse:
 
 - `diff.regressed`: an import now reaches past an entry file, or deeper than
-  before. Those with `crossPackage: true` reach into another package: flag
-  them first, each one. Recommend importing through the entry, or moving the symbol. A
-  `priorImporters` count of 5 or more means other files already reach the
-  same symbol the same way: an established convention, so note it in one
-  line instead of flagging each one.
+  before. Recommend importing through the entry, or moving the symbol. Those
+  with `crossPackage: true` reach into another package: flag them first,
+  each one, whatever `priorImporters` says. For the rest, a `priorImporters`
+  count of 5 or more means other files already reach the same symbol the
+  same way: an established convention, so note it in one line instead of
+  flagging each one.
 - `diff.removedWithoutMove`: an import vanished but the symbol stayed put:
   the code was likely copied or inlined (`grew: true` means the importer grew
   by at least the symbol's size). Cross-check against the duplication groups.

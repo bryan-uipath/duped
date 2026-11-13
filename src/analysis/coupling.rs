@@ -162,6 +162,14 @@ fn hiding_of(hidden: usize, declared: usize) -> f64 {
     }
 }
 
+/// File → its module's index in the module graph (names can repeat) and name.
+type Packages = HashMap<String, (Option<usize>, String)>;
+
+/// `a` and `b` sit in different packages.
+fn crosses(packages: &Packages, a: &str, b: &str) -> bool {
+    packages.get(a).map(|p| p.0) != packages.get(b).map(|p| p.0)
+}
+
 fn ratio(a: usize, b: usize) -> f64 {
     if b == 0 { 0.0 } else { a as f64 / b as f64 }
 }
@@ -173,8 +181,8 @@ pub struct Coupling {
     pub edges: Vec<Edge>,
     pub boundaries: Vec<Boundary>,
     pub leaks: Vec<Leak>,
-    /// Each scanned file's package: its module in the module graph.
-    packages: HashMap<String, String>,
+    /// Each scanned file's package: its module in the module graph, and that module's name.
+    packages: Packages,
     /// Line counts per scanned file, for `--base`.
     lines: HashMap<String, usize>,
     /// Top-level declarations per file, with their line spans.
@@ -262,11 +270,11 @@ pub fn analyze(
             Some((f.rel.clone(), newlines + last))
         })
         .collect();
-    let packages: HashMap<String, String> = files
+    let packages: Packages = files
         .iter()
         .map(|f| {
             let module = graph.module_of(&base.join(&f.rel));
-            (f.rel.clone(), graph.name(module).to_string())
+            (f.rel.clone(), (module, graph.name(module).to_string()))
         })
         .collect();
     let mut declared: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -356,9 +364,14 @@ pub fn analyze(
         BTreeMap::new();
     let mut used: HashSet<(String, String)> = HashSet::new();
     let mut used_all: HashSet<String> = HashSet::new();
+    // Files of `used_all` imported whole from their own crate, where `pub(crate)` is in reach.
+    let mut used_within: HashSet<String> = HashSet::new();
     let mut mark = |tree: &Tree, importer: &str, file: &str, name: &str| {
         if tree.innermost(file).is_some_and(|b| !within(importer, &b)) {
             if name == "*" || name.is_empty() {
+                if tree.crate_dir(importer) == tree.crate_dir(file) {
+                    used_within.insert(file.to_string());
+                }
                 used_all.insert(file.to_string());
             } else {
                 used.insert((file.to_string(), name.to_string()));
@@ -409,7 +422,7 @@ pub fn analyze(
     let mut edges = Vec::new();
     for ((importer, target), (via, names)) in merged {
         let (ups, downs, bypass, bypassed) = tree.score(&importer, &target);
-        let cross_package = packages.get(&importer) != packages.get(&target);
+        let cross_package = crosses(&packages, &importer, &target);
         let edge = Edge {
             importer,
             target,
@@ -470,11 +483,9 @@ pub fn analyze(
         edges.push(edge);
     }
     totals.edges = edges.len();
-    // Bypasses from another package first: the ones to act on.
-    let rank = |e: &Edge| (e.cross_package && e.bypass > 0, e.bypass, e.downs, e.ups);
     edges.sort_by(|a, b| {
-        rank(b)
-            .cmp(&rank(a))
+        (b.bypass, b.downs, b.ups)
+            .cmp(&(a.bypass, a.downs, a.ups))
             .then_with(|| (&a.importer, &a.target).cmp(&(&b.importer, &b.target)))
     });
     let leaks: Vec<Leak> = leaks
@@ -545,21 +556,25 @@ pub fn analyze(
                 surface.insert(shown);
             }
         }
-        // A name re-exported by two entries is used if either is; a public module's are its own.
+        // A name re-exported by two entries is used if either is; a public module's names
+        // (`x::Name`) and whole-module imports are its own.
         let shared = |e: &&String| !tree.public.contains_key(&(dir.clone(), (*e).clone()));
         let unused: Vec<String> = unused
             .into_iter()
-            .filter(|n| !entry_files.iter().filter(shared).any(|e| is_used(e, n)))
+            .filter(|n| {
+                n.contains("::") || !entry_files.iter().filter(shared).any(|e| is_used(e, n))
+            })
             .collect();
         let own = owned.get(dir).map(Vec::as_slice).unwrap_or_default();
         let (incoming, bypass_in, cross_package_in) =
             incoming.get(dir).copied().unwrap_or_default();
         let hidden = own
             .iter()
-            // Rust `use a::b;` (common) reaches only what module `b` exports.
+            // Rust `use other_crate::b;` (common) reaches only what module `b` exports.
             .filter(|(f, n)| {
                 let reached = lang(f) != Language::Rust
                     || exports(f, n)
+                    || used_within.contains(*f)
                     || used.contains(&(f.to_string(), n.to_string()));
                 !(is_used(f, n) && reached) && !surfaced.contains(&(*f, *n))
             })
@@ -753,7 +768,11 @@ impl<'a> Tree<'a> {
             let mut i = 0;
             while i < entries.len() {
                 let parent = self.public.get(&(dir.clone(), entries[i].clone())).cloned();
-                for (name, file) in modules.get(&entries[i]).into_iter().flatten() {
+                // Beside a `lib.rs`, `main.rs` is the binary's root: its modules export nothing.
+                let binary = name_of(&entries[i]) == "main.rs"
+                    && entries.contains(&join(dir_of(&entries[i]), "lib.rs"));
+                let children = modules.get(&entries[i]).filter(|_| !binary);
+                for (name, file) in children.into_iter().flatten() {
                     if !entries.contains(file) {
                         let path = match &parent {
                             Some(p) => format!("{p}::{name}"),
@@ -1583,7 +1602,7 @@ pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
     let cross_package = |key: &(&str, &str)| {
         let side = after.get(key).map(|s| (head, s));
         let side = side.or_else(|| before.get(key).map(|s| (base, s)));
-        side.is_some_and(|(c, (target, _))| c.packages.get(key.0) != c.packages.get(*target))
+        side.is_some_and(|(c, (target, _))| crosses(&c.packages, key.0, target))
     };
     let change = |key: &(&str, &str), reason, grew| Change {
         cross_package: cross_package(key),
@@ -1696,6 +1715,19 @@ pub struct Output<'a> {
     pub all_edges: bool,
 }
 
+/// The edges to show: bypasses from another package first, the ones to act on. Output
+/// only, so `--base` symbol matching doesn't depend on it.
+fn listed<'a>(o: &Output<'a>) -> Vec<&'a Edge> {
+    let mut edges: Vec<&Edge> = o
+        .coupling
+        .edges
+        .iter()
+        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
+        .collect();
+    edges.sort_by_key(|e| !(e.cross_package && e.bypass > 0));
+    edges
+}
+
 /// `.` for the scanned directory itself.
 fn shown(dir: &str) -> &str {
     if dir.is_empty() { "." } else { dir }
@@ -1786,11 +1818,7 @@ pub fn render_text(o: &Output) -> String {
             )
         },
     );
-    let edges: Vec<&Edge> = c
-        .edges
-        .iter()
-        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
-        .collect();
+    let edges = listed(o);
     let title = if o.all_edges {
         "Cross-boundary edges"
     } else {
@@ -1803,7 +1831,7 @@ pub fn render_text(o: &Output) -> String {
             .map(|v| format!(" (via {v})"))
             .unwrap_or_default();
         let packages = if e.cross_package {
-            let name = |f: &String| c.packages.get(f).map_or("", String::as_str);
+            let name = |f: &String| c.packages.get(f).map_or("", |p| p.1.as_str());
             format!("  [{} -> {}]", name(&e.importer), name(&e.target))
         } else {
             String::new()
@@ -1994,16 +2022,14 @@ pub fn to_json(o: &Output) -> Value {
             })
         })
         .collect();
-    let edges: Vec<Value> = c
-        .edges
-        .iter()
-        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
+    let edges: Vec<Value> = listed(o)
+        .into_iter()
         .map(|e| {
             json!({
                 "importer": e.importer,
                 "target": e.target,
-                "importerPackage": c.packages.get(&e.importer),
-                "targetPackage": c.packages.get(&e.target),
+                "importerPackage": c.packages.get(&e.importer).map(|p| &p.1),
+                "targetPackage": c.packages.get(&e.target).map(|p| &p.1),
                 "via": e.via,
                 "names": e.names,
                 "ups": e.ups,
