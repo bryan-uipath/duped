@@ -1,6 +1,7 @@
 //! Types that share most of their properties, whatever they are called.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt::Write;
 
 use globset::GlobSet;
@@ -164,12 +165,18 @@ pub fn find_duplicate_types(
         });
     }
 
-    // Field names per type name, for the members a common base accounts for.
+    // Field names per type name, for the members a common base accounts for. Bases match by
+    // name, so two `Client`s in different packages account only for the fields both declare.
     let mut declared: HashMap<&str, Vec<&str>> = HashMap::new();
     for record in records {
         if let Record::Type(t) = record {
-            let fields = t.fields.iter().map(|f| f.name.as_str());
-            declared.entry(&t.name).or_default().extend(fields);
+            let fields: Vec<&str> = t.fields.iter().map(|f| f.name.as_str()).collect();
+            match declared.entry(&t.name) {
+                Entry::Occupied(mut same) => same.get_mut().retain(|f| fields.contains(f)),
+                Entry::Vacant(first) => {
+                    first.insert(fields);
+                }
+            }
         }
     }
 
@@ -852,6 +859,33 @@ mod tests {
         shim.location.file = "types/core.d.ts".into();
         assert!(declares(&shim, Some("@x/core")));
         assert!(!declares(&shim, Some("@x/co")) && !declares(&shim, None));
+    }
+
+    #[test]
+    fn a_same_name_base_elsewhere_hides_no_copy() {
+        let members = [
+            "get: string",
+            "post: string",
+            "put: string",
+            "retry: number",
+        ];
+        let implements = |name: &str| {
+            let Record::Type(mut t) = ty(name, TypeKind::Class, &members) else {
+                unreachable!()
+            };
+            t.extends = vec!["Client".to_string()];
+            Record::Type(t)
+        };
+        // The second `Client` declares only `get`, so the copies keep three members of their own.
+        let records = vec![
+            ty("Client", TypeKind::Interface, &members),
+            ty("Client", TypeKind::Interface, &["get: string"]),
+            implements("HttpA"),
+            implements("HttpB"),
+        ];
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
+        let kept: Vec<_> = report.pairs.iter().map(|p| names(&records, p)).collect();
+        assert!(kept.contains(&("HttpA", "HttpB")), "{kept:?}");
     }
 
     #[test]
