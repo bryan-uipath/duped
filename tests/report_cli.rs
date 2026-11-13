@@ -465,13 +465,15 @@ fn a_documented_port_hides_identical_parts_and_marks_diverged_ones() {
     let source = [
         LIST.replace("NAME", "uniqueItems"),
         RETRY.replace("NAME", "fetchJson"),
+        TOTALS.replace("NAME", "sumLines"),
         ORDER.to_string(),
         customer.to_string(),
     ]
     .concat();
     write(&root, "vsix/src/deploy.ts", &source);
-    // The port lost a guard and gained a field; the rest is unchanged.
+    // The port lost a guard, rounds differently and gained a field; the rest is unchanged.
     let port = source
+        .replace("Math.round", "Math.floor")
         .replace(
             "if (res.status < 500) throw new Error(`request failed: ${res.status}`);\n",
             "",
@@ -485,7 +487,7 @@ fn a_documented_port_hides_identical_parts_and_marks_diverged_ones() {
     );
 
     let report = json(&root, &[]);
-    let findings: Vec<(&str, &str, Option<&str>)> = groups(&report)[0]["findings"]
+    let mut findings: Vec<(&str, &str, Option<&str>)> = groups(&report)[0]["findings"]
         .as_array()
         .unwrap()
         .iter()
@@ -498,10 +500,13 @@ fn a_documented_port_hides_identical_parts_and_marks_diverged_ones() {
             )
         })
         .collect();
+    findings.sort_unstable();
     assert_eq!(
         findings,
         vec![
             ("bodies", "fetchJson", Some("doc: port of")),
+            // 1.00 similar, since names are abstracted, yet not the same code.
+            ("bodies", "sumLines", Some("doc: port of")),
             ("types", "Order", Some("doc: port of")),
         ],
         "{report}"

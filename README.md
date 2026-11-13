@@ -311,7 +311,7 @@ A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `du
 
 A `duped.toml` side can also be a file glob, which stands for everything the matching files declare: one entry acknowledges a 30-type mirror, or, with a name on the other side, every copy of one type in a directory.
 
-A comment that declares a copy to maintain ("port of", "keep in step", "keep the two in step", "keep them in step") and names the other side anywhere in its sentence acknowledges the pair only while the two still match: identical bodies (`similar` at 1.00), the same field names, or one `helpers` group. A pair that no longer matches stays reported with `diverged` set to the phrase (`doc: port of`), shown as `(documented copy, diverged: doc: port of)`: a port that drifted from its source.
+A comment that declares a copy to maintain ("port of", "keep in step", "keep the two in step", "keep them in step") and names the other side anywhere in its sentence acknowledges the pair only while the two still match: bodies identical token for token (a renamed callee at `1.00 similar` is not), the same field names, or one `helpers` group. A pair that no longer matches stays reported with `diverged` set to the phrase (`doc: port of`), shown as `(documented copy, diverged: doc: port of)`: a port that drifted from its source.
 
 ### `duped.toml`
 
