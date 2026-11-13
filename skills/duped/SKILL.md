@@ -24,7 +24,7 @@ code search needs structural evidence.
 ## All analyses at once
 
 ```bash
-duped report <root> --base <ref> --json > <temporary-file>  # changed-file pairs
+duped report <root> --base <ref> --json > <temporary-file>  # findings on changed lines
 duped report <root> --json > <temporary-file>               # whole codebase
 ```
 
@@ -49,8 +49,9 @@ for coverage or disclose that only the selected groups were reviewed.
 Scores prioritize inspection, not conclusions. Agreement between detectors
 is stronger evidence. Prioritize behavioral drift: `~` in `names`, or `bodies`
 similarity below ~0.95, means the copies already differ; diff them. With
-`--base`, `changed` identifies changed files, not changed lines: confirm the
-duplicated code belongs to the change. Respect dependency direction (`tag.copy` imports
+`--base`, `bodies`, `types` and `helpers` findings are kept only when the
+change touched their lines; `names`, `imports` and `files` are kept per changed file,
+so confirm those belong to the change. Respect dependency direction (`tag.copy` imports
 `tag.owner`); consult the reference for other tag kinds.
 
 ## Verifying a finding

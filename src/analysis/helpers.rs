@@ -46,7 +46,7 @@ pub struct Member {
     pub line: usize,
     pub lines: usize,
     pub tokens: usize,
-    /// Set by `report --base` when the file changed.
+    /// Set by `report --base` when the change touched its lines.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub changed: bool,
 }
