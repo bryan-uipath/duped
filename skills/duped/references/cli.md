@@ -15,7 +15,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | Command | Finds | Languages |
 |---|---|---|
 | `duped bodies` | functions whose bodies are near-copies under any names (identifiers abstracted, literals kept), `kind` `similar`; a body mostly inside another (`contained`) or a ≥15-line block in both (`block`), with `region` line ranges to extract; files linked through ≥2 `similar` functions | TS/JS, Rust |
-| `duped helpers` | small top-level helpers (8–49 tokens, below `bodies`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 6 bodies). Plain parameters renamed by position, other names (and destructured keys) kept | TS/JS, Rust |
+| `duped helpers` | small helpers (8–49 tokens, below `bodies`; top-level functions and methods that never use `this`/`self`) copied with identical bodies, as N-way groups with a home; same-name helpers whose copies drifted (`isRecord`: 28 definitions, 4 bodies). Plain parameters renamed by position, pure tests (`typeof v === 'object' && v !== null`) matched in any order, other names (and destructured keys) kept | TS/JS, Rust |
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
