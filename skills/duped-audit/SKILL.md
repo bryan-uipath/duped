@@ -23,7 +23,7 @@ duped report <dir> --top 60 --exclude '**/examples' --json > /tmp/duped-audit.js
 
 ## 3. Verify
 
-Start with `directories`: a directory pair with several file pairs is one port, and one cleanup item. Then work through `groups` in order (most removable lines first), reading both sides of each, as in the `duped` skill. Diff every near-copy: copies that disagree are the most valuable findings.
+Start with `directories`: a directory pair with several file pairs is one port, and one cleanup item. Then work through `groups` in order (most removable lines first), reading both sides of each, as in the `duped` skill. Diff every near-copy: copies that disagree are the most valuable findings, above all a finding with `diverged`, a documented port that drifted from its source.
 
 ## 4. Coupling hotspots
 

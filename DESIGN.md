@@ -25,7 +25,7 @@ These come from a manual duplication audit of a large TypeScript monorepo.
 3. **Same name, different shape is its own finding.** Two examples: a redeclared status union drifted three members behind the original, and two functions with the same name produced different output for the same input. Count union and enum members as fields so subset and superset drift shows up.
 4. **The noise is predictable.** It comes from tests and fixtures, tiny shapes like `{ id, name }`, UI prop types, and pairs inside one module. Defaults should filter these, and a per-repo config should tune them. Path filters must be relative to the repo root.
 5. **Inherited and inline types matter.** Count `extends` and base-class fields (best-effort, matched by name). Extract inline object types (casts, anonymous parameter shapes) as anonymous shapes keyed by location.
-6. **Some duplicates are deliberate.** Comments like "mirrors X" or "structural twin of Y", and an allowlist in the repo config, should mark pairs as acknowledged so they stop being reported.
+6. **Some duplicates are deliberate.** Comments like "mirrors X" or "structural twin of Y", and an allowlist in the repo config, should mark pairs as acknowledged so they stop being reported. A comment that declares a copy to maintain ("port of X", "keep in step") is an obligation, not a twin: it hides the pair only while the two still match, and marks it as diverged after.
 7. **Every finding needs both sides read.** The skills enforce that verification step.
 
 ## Architecture

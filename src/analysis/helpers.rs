@@ -122,7 +122,8 @@ pub fn find_helpers(
         members.sort_unstable();
         let first = members[0];
         let before = members.len();
-        members.retain(|&m| m == first || judge.verdict(first, m).acknowledged.is_none());
+        members
+            .retain(|&m| m == first || judge.verdict(first, m).settle(true).acknowledged.is_none());
         hidden_acknowledged += before - members.len();
         if members.len() >= 2 {
             groups.push(group(records, members, judge));

@@ -22,6 +22,19 @@ pub struct Verdict {
     pub tag: Option<Tag>,
     /// Why the pair is deliberate, e.g. `doc: mirrors`.
     pub acknowledged: Option<String>,
+    /// The doc phrase declaring the pair a copy to maintain, e.g. `doc: port of`.
+    pub declared: Option<String>,
+}
+
+impl Verdict {
+    /// A declared copy is deliberate while `identical`; otherwise `declared` stays set: the
+    /// copy has diverged from what its doc says.
+    pub fn settle(mut self, identical: bool) -> Self {
+        if identical && self.acknowledged.is_none() {
+            self.acknowledged = self.declared.take();
+        }
+        self
+    }
 }
 
 /// Project context for analyses: module tags, acknowledgements, cluster homes.
@@ -145,14 +158,22 @@ pub fn tag_rank(tag: &Option<Tag>) -> u8 {
     tag.as_ref().map_or(0, Tag::rank)
 }
 
-/// ` — importable: a can import b (acknowledged: doc: mirrors)`
-pub fn pair_notes(tag: &Option<Tag>, acknowledged: &Option<String>) -> String {
+/// ` — importable: a can import b (acknowledged: doc: mirrors)`, or for a declared copy that
+/// drifted, ` (documented copy, diverged: doc: port of)`.
+pub fn pair_notes(
+    tag: &Option<Tag>,
+    acknowledged: &Option<String>,
+    diverged: &Option<String>,
+) -> String {
     let mut notes = String::new();
     if let Some(tag) = tag {
         notes.push_str(&format!(" — {}", tag.describe()));
     }
     if let Some(reason) = acknowledged {
         notes.push_str(&format!(" (acknowledged: {reason})"));
+    }
+    if let Some(phrase) = diverged {
+        notes.push_str(&format!(" (documented copy, diverged: {phrase})"));
     }
     notes
 }

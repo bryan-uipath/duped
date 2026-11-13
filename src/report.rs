@@ -103,6 +103,9 @@ pub struct Finding {
     pub a: Side,
     pub b: Side,
     pub evidence: String,
+    /// The doc phrase declaring the pair a copy to maintain, when it has since diverged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diverged: Option<String>,
     /// The analysis's own ranking score, e.g. shared shingles for `bodies`.
     #[serde(skip)]
     rank: f64,
@@ -299,6 +302,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
                 tokens(p.a),
                 tokens(p.b)
             ),
+            diverged: p.diverged.clone(),
             rank: p.shared as f64,
             span,
         }
@@ -312,6 +316,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
             a: file_side(&f.a),
             b: file_side(&f.b),
             evidence: format!("{} function pairs, {shared} shared shingles", f.pairs.len()),
+            diverged: None,
             rank: shared as f64,
             span: Span::None,
         }
@@ -337,6 +342,7 @@ pub fn imports(files: &[FileImports], report: &ImportReport) -> Vec<Finding> {
                     p.rare,
                     shown.join(", ")
                 ),
+                diverged: None,
                 rank: p.rare as f64,
                 span: Span::None,
             }
@@ -376,6 +382,7 @@ pub fn names(records: &[Record], report: &NameReport) -> Vec<Finding> {
                 a: file_side(&p.a),
                 b: file_side(&p.b),
                 evidence: shown.join(", "),
+                diverged: None,
                 rank: p.score,
                 span: Span::None,
             }
@@ -404,6 +411,7 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                     round(p.similarity),
                     shown.join(", ")
                 ),
+                diverged: p.diverged.clone(),
                 rank: p.similarity,
                 span: lines(&records[p.a], &records[p.b], p.similarity),
             }
@@ -424,6 +432,7 @@ pub fn files(paths: &[&str], groups: &[IdenticalFiles], judge: &dyn Judge) -> Ve
                 a: file_side(paths[first]),
                 b: file_side(paths[other]),
                 evidence: format!("identical, {} lines", g.lines),
+                diverged: None,
                 rank: g.lines as f64,
                 span: Span::Whole(g.lines),
             })
@@ -873,7 +882,7 @@ pub fn render_text(report: &Report) -> String {
             group.removable_lines,
             group.detectors.join(" + "),
             group.findings.len(),
-            pair_notes(&group.tag, &None)
+            pair_notes(&group.tag, &None, &None)
         )
         .ok();
         for file in [&group.a, &group.b] {
@@ -901,8 +910,11 @@ pub fn render_text(report: &Report) -> String {
             };
             writeln!(
                 out,
-                "   - {} {}: {}{members}",
-                f.detector, f.kind, f.evidence
+                "   - {} {}: {}{members}{}",
+                f.detector,
+                f.kind,
+                f.evidence,
+                pair_notes(&None, &None, &f.diverged)
             )
             .ok();
         }

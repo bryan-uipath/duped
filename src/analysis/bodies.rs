@@ -50,6 +50,8 @@ pub struct BodyPair {
     pub tag: Option<Tag>,
     /// Why the pair is deliberate, when it is.
     pub acknowledged: Option<String>,
+    /// The doc phrase declaring it a copy to maintain, when the bodies no longer match.
+    pub diverged: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -192,7 +194,9 @@ pub fn find_duplicate_bodies(
             hidden_same_file += 1;
             continue;
         }
-        let verdict = judge.verdict(a, b);
+        // Token for token: `similar` at 1.00 abstracts names, so a renamed callee would pass.
+        let identical = function_at(records, a).body == function_at(records, b).body;
+        let verdict = judge.verdict(a, b).settle(identical);
         if verdict.acknowledged.is_some() && !options.include_acknowledged {
             hidden_acknowledged += 1;
             continue;
@@ -206,6 +210,7 @@ pub fn find_duplicate_bodies(
             region,
             tag: verdict.tag,
             acknowledged: verdict.acknowledged,
+            diverged: verdict.declared,
         });
     }
     // Most duplicated code first, so a large near-copy outranks a small exact one.
@@ -639,7 +644,7 @@ pub fn render_text(
             file.pairs.len(),
             file_shared(file, &report.pairs),
             // Acknowledgements are per pair, so the file line shows only the tag.
-            pair_notes(&first.tag, &None)
+            pair_notes(&first.tag, &None, &None)
         )
         .ok();
         for (path, index) in [(&file.a, first.a), (&file.b, first.b)] {
@@ -677,7 +682,7 @@ pub fn render_text(
             kind_text(pair),
             pair.shared,
             relation_text(records, pair),
-            pair_notes(&pair.tag, &pair.acknowledged)
+            pair_notes(&pair.tag, &pair.acknowledged, &pair.diverged)
         )
         .ok();
         let region = pair.region.map(|r| (r.a, r.b));
@@ -711,6 +716,7 @@ pub fn to_json(records: &[Record], report: &BodyReport, judge: &dyn Judge) -> Va
                 "region": p.region.map(|r| json!({ "a": [r.a.0, r.a.1], "b": [r.b.0, r.b.1] })),
                 "tag": p.tag,
                 "acknowledged": p.acknowledged,
+                "diverged": p.diverged,
             })
         })
         .collect();
