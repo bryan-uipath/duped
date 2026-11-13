@@ -302,6 +302,11 @@ When the scanned types (for `names`, the scanned declarations) span fewer than t
 
 The **project root** is found from `DIR`, without leaving its git checkout: the nearest directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace, or a `.sln`), else the checkout. Outside a checkout it is `DIR`. `--root` sets it explicitly.
 
+`types` also hides two kinds of pair that share members by contract, counted in its `Hidden pairs` line (`summary.hidden.implementations`, `summary.hidden.ambient` in JSON):
+
+- a type and one that extends or implements it, or two types whose common base is in the scan and declares their shared members, leaving fewer than `--min-shared` of their own (two `implements StorageProvider`). Bases match by name: one declared more than once accounts only for the members every declaration has. A base outside the scan (`BaseModel`, `React.Component`) accounts for nothing; list its members under `conventional_members` if they are noise.
+- a type inside a `.d.ts` file's `declare module '<name>'` and a type in the module `<name>`: a typing of that module, not a second definition.
+
 A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
 ### `duped.toml`

@@ -51,6 +51,8 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 
 ## Deliberate copies
 
+`types` hides a type and its implementer, two types sharing only what a scanned common base declares, and a `.d.ts` `declare module '<m>'` typing of a type in module `<m>`.
+
 `bodies` and `types` hide a pair when a doc comment or file header says "mirrors", "mirror of", "structural twin", "kept in sync" or "copy of" and names the other side. Otherwise record it in `duped.toml` at the project root:
 
 ```toml

@@ -339,7 +339,7 @@ fn bases_of<'m>(
 }
 
 /// `Store<Item>` → `Store`; `ns.Base` → `Base`.
-fn base_name(written: &str) -> &str {
+pub(super) fn base_name(written: &str) -> &str {
     let name = written.split('<').next().unwrap_or(written).trim();
     name.rsplit('.').next().unwrap_or(name)
 }
