@@ -350,7 +350,7 @@ b = "DocumentAnnotationRow"
 reason = "canvas can't depend on evals"
 
 [[acknowledged]]
-a = "sdk/src/types.ts"                     # a side with a `/` and no `:` is a file glob, relative to the project root
+a = "sdk/src/types.ts"                     # a side with a `/` and no `:` is a file glob, relative to the project root (`./build.rs` for a file in it)
 b = "crates/core/src/*.rs"                 # `*` stays within a directory, `**` crosses them
 reason = "the SDK mirrors the wire types"
 

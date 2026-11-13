@@ -75,11 +75,16 @@ impl Acks {
         if !prefix.is_empty() {
             prefix.push('/');
         }
+        // A scan outside the root (via `--root`) has no root-relative paths for a glob to match.
+        let side = |pattern: &str| match base.starts_with(root) {
+            true => Side::new(pattern),
+            false => Side::Name(pattern.to_string()),
+        };
         let entries = entries
             .iter()
             .map(|e| {
                 let reason = e.reason.clone().unwrap_or_else(|| "duped.toml".to_string());
-                (Side::new(&e.a), Side::new(&e.b), reason)
+                (side(&e.a), side(&e.b), reason)
             })
             .collect();
         Acks { entries, prefix }
@@ -631,6 +636,10 @@ mod tests {
         assert!(mirror.files("sdk/src/types.ts", "crates/core/src/model.rs"));
         assert!(!mirror.files("sdk/src/types.ts", "sdk/src/types.ts"));
 
+        // `./` marks a file in the root, which has no other `/`.
+        let rooted = acks(&[("./sdk/src/types.ts", "./crates/app/main.rs", None)]);
+        assert!(rooted.files("crates/app/main.rs", "sdk/src/types.ts"));
+
         // A file on one side and a name on the other: no whole-file pair.
         let mixed = acks(&[("sdk/src/types.ts", "Pane", None)]);
         assert_eq!(reason(&mixed, 0, 2).as_deref(), Some("duped.toml"));
@@ -638,15 +647,18 @@ mod tests {
         assert!(!mixed.files("sdk/src/types.ts", "crates/core/src/model.rs"));
 
         // Globs are relative to the project root, scanned files to the scan directory.
-        let entry = Acknowledged {
+        let entry = [Acknowledged {
             a: "sdk/src/types.ts".into(),
             b: "crates/**".into(),
             reason: None,
-        };
-        let scanned = Acks::new(&[entry], Path::new("/repo"), Path::new("/repo/sdk"));
+        }];
+        let scanned = Acks::new(&entry, Path::new("/repo"), Path::new("/repo/sdk"));
         assert!(!scanned.files("sdk/src/types.ts", "crates/core/src/model.rs"));
         assert_eq!(scanned.prefix, "sdk/");
         assert!(scanned.entries[0].0.file(&scanned.prefix, "src/types.ts"));
+        // Another tree with the same layout, scanned with `--root /repo`, is not this project.
+        let outside = Acks::new(&entry, Path::new("/repo"), Path::new("/other"));
+        assert!(!outside.files("sdk/src/types.ts", "crates/core/src/model.rs"));
     }
 
     #[test]

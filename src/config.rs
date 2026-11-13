@@ -84,9 +84,11 @@ pub struct LanguageRulesConfig {
 }
 
 /// An `[[acknowledged]]` side with a `/` and no `:` is a file glob relative to the project
-/// root, e.g. `sdk/src/types.ts` or `crates/core/src/*.rs`; `*` stays within a directory.
+/// root, e.g. `sdk/src/types.ts`, `crates/core/src/*.rs` or `./build.rs`; `*` stays within a
+/// directory.
 pub fn file_glob(side: &str) -> Option<Result<GlobMatcher, globset::Error>> {
     (side.contains('/') && !side.contains(':')).then(|| {
+        let side = side.strip_prefix("./").unwrap_or(side);
         let glob = GlobBuilder::new(side).literal_separator(true).build()?;
         Ok(glob.compile_matcher())
     })
