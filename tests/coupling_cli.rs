@@ -648,6 +648,108 @@ fn rust_pub_mod_chains_are_surface() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// `b` reaches into `a` at depth 1; `a` reaches into its own `inner/internal/` at depth 2.
+#[test]
+fn cross_package_bypasses_are_named_counted_and_listed_first() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("cross-package");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/a/package.json",
+        r#"{"name":"@m/a","main":"src/index.ts"}"#,
+    );
+    write(&root, "packages/a/src/index.ts", "export function a() {}\n");
+    write(
+        &root,
+        "packages/a/src/other.ts",
+        "export function other() {}\n",
+    );
+    write(&root, "packages/a/src/inner/index.ts", "export {};\n");
+    write(
+        &root,
+        "packages/a/src/inner/internal/deeper.ts",
+        "export function deeper() {}\n",
+    );
+    write(
+        &root,
+        "packages/a/src/user.ts",
+        "import { deeper } from './inner/internal/deeper';\n",
+    );
+    write(&root, "packages/b/package.json", r#"{"name":"@m/b"}"#);
+    write(&root, "packages/b/src/main.ts", "export {};\n");
+    git(&root, &["init", "-q", "-b", "main"]);
+    commit(&root, "base");
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &root,
+        "packages/b/src/main.ts",
+        "import { other } from '@m/a/other';\n",
+    );
+    commit(&root, "feature");
+
+    let report = json(&root, &["--base", "main"]);
+    let (main, user) = ("packages/b/src/main.ts", "packages/a/src/user.ts");
+    assert_eq!(
+        edges(&report),
+        vec![
+            e(main, "packages/a/src/other.ts", 1),
+            e(user, "packages/a/src/inner/internal/deeper.ts", 2),
+        ]
+    );
+    let packages = |edge: &Value| {
+        (
+            edge["importerPackage"].clone(),
+            edge["targetPackage"].clone(),
+        )
+    };
+    assert_eq!(
+        packages(&report["edges"][0]),
+        ("@m/b".into(), "@m/a".into())
+    );
+    assert_eq!(
+        packages(&report["edges"][1]),
+        ("@m/a".into(), "@m/a".into())
+    );
+    assert_eq!(report["totals"]["bypassEdges"], 2);
+    assert_eq!(report["totals"]["crossPackageBypassEdges"], 1);
+    assert_eq!(report["totals"]["crossPackageBypassSymbols"], 1);
+    let a = boundary(&report, "packages/a");
+    assert_eq!(
+        (&a["bypassIn"], &a["crossPackageBypassIn"]),
+        (&1.into(), &1.into())
+    );
+    let inner = boundary(&report, "packages/a/src/inner");
+    assert_eq!(
+        (&inner["bypassIn"], &inner["crossPackageBypassIn"]),
+        (&1.into(), &0.into())
+    );
+    assert_eq!(report["diff"]["regressed"][0]["crossPackage"], true);
+
+    let listed = text(&root, &[]);
+    assert!(
+        listed.contains("2 bypass, 1 of them cross-package"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("bypass in 1 of 1 (1 cross-package)"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("packages/a/src/other.ts  ups=1 downs=1 bypass=1  [@m/b -> @m/a]"),
+        "{listed}"
+    );
+    let delta = text(&root, &["--base", "main"]);
+    assert!(delta.contains("bypass=1 (cross-package)"), "{delta}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// The `billing` / `orders` regression fixture, at `main`.
 fn billing(test: &str) -> PathBuf {
     let root = temp(test);

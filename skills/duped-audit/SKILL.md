@@ -32,9 +32,14 @@ duped coupling <dir> --top 20 --json > /tmp/duped-audit-coupling.json
 ```
 
 `totals.score` (0–1, higher is better) averages `1 − bypassRate`,
-`1 − unusedSurface` and `hiding`; report all four. `boundaries` is worst
-first. Skip `noConsumers` ones (nothing in the scan imports them). For the
-top few, say which term drags them down and name the evidence:
+`1 − unusedSurface` and `hiding`; report all four. Lead with cross-package
+reaches: `totals.crossPackageBypassEdges` and the `edges` whose
+`importerPackage` differs from `targetPackage` (listed first), grouped by
+target. Reaches inside one package are secondary. Rank `boundaries` by
+`crossPackageBypassIn`, then `bypassIn`; not by `score`, which puts tiny
+boundaries (5 imports) on top. Skip `noConsumers` ones (nothing in the scan
+imports them). For the top few, say which term drags them down and name the
+evidence:
 
 - low `1 − bypassRate`, many `leaks`: internal files others reach into.
   Group `edges` by target and `leaks` by symbol; the most-imported internals

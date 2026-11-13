@@ -15,15 +15,18 @@ Numbers are evidence; the score never gates anything.
 duped coupling <dir> --top 30 --json > <temporary-file>
 ```
 
-Read `totals` (`score`, `bypassRate`, `unusedSurface`) and `boundaries`
-(worst first). Skip `noConsumers` boundaries: nothing in the repo imports
-them, so their surface can't be judged. `--folder <path>` scores one
-subtree. For a trend, loop `--rev` over `git rev-list --first-parent`.
+Read `totals` (`score`, `bypassRate`, `unusedSurface`,
+`crossPackageBypassEdges`) and `boundaries`. Skip `noConsumers`
+boundaries: nothing in the repo imports them, so their surface can't be
+judged. `--folder <path>` scores one subtree. For a trend, loop `--rev` over `git rev-list --first-parent`.
 
 ## 2. Pick a target
 
-Take the boundary with the most incoming bypass edges plus leaks. Group its
-`edges` by target file and its `leaks` by symbol. Three fixes, in order of
+Take the boundary with the highest `crossPackageBypassIn` (reaches from
+another package, past its published entry); when none has any, the highest
+`bypassIn` plus `leaks`. Rank by these counts, not `score`, which puts tiny
+boundaries (5 imports) on top. Reaches between directories of one package
+are secondary. Group its `edges` by target file and its `leaks` by symbol. Three fixes, in order of
 preference:
 
 1. **Narrow the API.** The importer needs a capability, not the internal
