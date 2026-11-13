@@ -52,7 +52,9 @@ for coverage or disclose that only the selected groups were reviewed.
 
 Scores prioritize inspection, not conclusions. Agreement between detectors
 is stronger evidence. Prioritize behavioral drift: `~` in `names`, a `families`
-entry, or `bodies` similarity below ~0.95, means the copies already differ; diff them. With
+entry, or `bodies` similarity below ~0.95, means the copies already differ; diff them.
+A finding with `diverged` is a copy its own comment says to keep in step
+("port of X") that no longer matches: check which side lacks the other's fix. With
 `--base`, `bodies`, `types` and `helpers` findings are kept only when the
 change touched their lines; `names`, `imports` and `files` are kept per changed file,
 so confirm those belong to the change. Respect dependency direction (`tag.copy` imports

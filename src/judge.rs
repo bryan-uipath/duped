@@ -21,6 +21,15 @@ const DELIBERATE: &[&str] = &[
     "copy of",
 ];
 
+/// Doc phrases that declare a copy to maintain: deliberate only while the two still match, so
+/// a port that drifted stays reported.
+const DECLARED: &[&str] = &[
+    "port of",
+    "keep in step",
+    "keep the two in step",
+    "keep them in step",
+];
+
 pub struct ProjectJudge<'a> {
     graph: &'a ModuleGraph,
     records: &'a [Record],
@@ -139,6 +148,25 @@ impl<'a> ProjectJudge<'a> {
                 );
             }
         }
+        // The name must follow the phrase in the same sentence: "mirrors `X`", "twin of the
+        // evals `X`", not a phrase in one paragraph and a name in another.
+        self.doc_phrase(a, b, DELIBERATE, clause_after)
+    }
+
+    /// `doc: <phrase>` for the first of `phrases` in either side's doc or file header that
+    /// names the other side within `scope` of it.
+    fn doc_phrase(
+        &self,
+        a: usize,
+        b: usize,
+        phrases: &[&str],
+        scope: fn(&str, usize) -> &str,
+    ) -> Option<String> {
+        let (ta, tb) = (&self.records[a], &self.records[b]);
+        let (ma, mb) = (
+            self.graph.name(self.modules[a]),
+            self.graph.name(self.modules[b]),
+        );
         // A deliberate-copy phrase only counts when it names the other side: the other type
         // as a whole word (not this type's own name), or the other module by full name, last
         // name segment or directory, the latter two as whole words.
@@ -161,12 +189,17 @@ impl<'a> ProjectJudge<'a> {
                             .any(|word| package_words(clause).any(|w| w == word)));
                 names_type || names_module
             };
-            // The name must follow the phrase in the same sentence: "mirrors `X`", "twin of the
-            // evals `X`", not a phrase in one paragraph and a name in another.
-            for phrase in DELIBERATE {
+            // A phrase is a whole word from its start: `port of`, not `support of`.
+            let starts_word = |at: usize| {
+                !text[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_alphanumeric)
+            };
+            for phrase in phrases {
                 if text
                     .match_indices(phrase)
-                    .any(|(at, _)| names_other(clause_after(&text, at)))
+                    .any(|(at, _)| starts_word(at) && names_other(scope(&text, at)))
                 {
                     return Some(format!("doc: {phrase}"));
                 }
@@ -216,9 +249,16 @@ impl<'a> ProjectJudge<'a> {
 
 impl Judge for ProjectJudge<'_> {
     fn verdict(&self, a: usize, b: usize) -> Verdict {
+        let acknowledged = self.acknowledgement(a, b);
+        // The name may precede the phrase: "same as `X`; keep the two in step".
+        let declared = match acknowledged {
+            Some(_) => None,
+            None => self.doc_phrase(a, b, DECLARED, sentence_at),
+        };
         Verdict {
             tag: self.tag(a, b),
-            acknowledged: self.acknowledgement(a, b),
+            acknowledged,
+            declared,
         }
     }
 
@@ -300,6 +340,7 @@ impl Judge for FileJudge<'_> {
         Verdict {
             tag: self.tag(a, b),
             acknowledged: None,
+            declared: None,
         }
     }
 
@@ -359,6 +400,18 @@ fn clause_after(text: &str, at: usize) -> &str {
         Some(stop) => &clause[..stop],
         None => clause,
     }
+}
+
+/// The sentence holding `at`, looking back at most 200 bytes: `same as X; keep in step`.
+fn sentence_at(text: &str, at: usize) -> &str {
+    let mut start = at.saturating_sub(200);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let start = text[start..at]
+        .rfind(". ")
+        .map_or(start, |stop| start + stop + 2);
+    &text[start..at + clause_after(text, at).len()]
 }
 
 /// Lower-cased words of `text`, keeping `-` so `unified-evals` stays one word.
@@ -691,6 +744,59 @@ mod tests {
                 "Row"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn maintained_copy_phrases_declare_without_acknowledging() {
+        let g = graph();
+        let verdict = |doc: &str, a: &str, b: &str| {
+            let records = vec![ty(a, "canvas/a.ts", Some(doc)), ty(b, "evals/b.ts", None)];
+            ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type).verdict(0, 1)
+        };
+        let declared = |doc: &str, a: &str, b: &str| {
+            let verdict = verdict(doc, a, b);
+            assert_eq!(verdict.acknowledged, None, "{doc}");
+            verdict.declared
+        };
+        assert_eq!(
+            declared("Port of evals src/row.ts.", "Row", "Row").as_deref(),
+            Some("doc: port of")
+        );
+        assert_eq!(
+            declared("Keep in step with `Bar`.", "Foo", "Bar").as_deref(),
+            Some("doc: keep in step")
+        );
+        // The name may come first, in the same sentence.
+        assert_eq!(
+            declared("Same shape as `Bar`; keep the two in step.", "Foo", "Bar").as_deref(),
+            Some("doc: keep the two in step")
+        );
+        // `support of` and `export of` are not `port of`.
+        assert_eq!(
+            declared("Adds support of evals extensions.", "Row", "Row"),
+            None
+        );
+        assert_eq!(declared("The Excel export of `Bar`.", "Foo", "Bar"), None);
+        // Names nothing in the scan, or names it in another sentence.
+        assert_eq!(declared("Port of BpmnExecution.cs.", "Row", "Row"), None);
+        assert_eq!(
+            declared(
+                "Wraps `Bar`. Keep in step with the wire format.",
+                "Foo",
+                "Bar"
+            ),
+            None
+        );
+        assert_eq!(
+            declared("Keep them in step. See `Bar`.", "Foo", "Bar"),
+            None
+        );
+        // A twin phrase acknowledges outright.
+        let twin = verdict("Mirrors `Bar`; keep the two in step.", "Foo", "Bar");
+        assert_eq!(
+            (twin.acknowledged.as_deref(), twin.declared),
+            (Some("doc: mirrors"), None)
         );
     }
 

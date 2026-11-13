@@ -529,7 +529,7 @@ pub fn render_text(
             pair.similarity,
             pair.typed,
             pair.shared.join(", "),
-            pair_notes(&pair.tag, &pair.acknowledged)
+            pair_notes(&pair.tag, &pair.acknowledged, &None)
         )
         .ok();
         for index in [pair.a, pair.b] {

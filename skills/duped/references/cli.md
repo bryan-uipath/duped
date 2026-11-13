@@ -53,7 +53,7 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 
 `types` hides a type and its implementer, two types sharing only what a scanned common base declares, and a `.d.ts` `declare module '<m>'` typing of a type in module `<m>`.
 
-`bodies` and `types` hide a pair when a doc comment or file header says "mirrors", "mirror of", "structural twin", "kept in sync" or "copy of" and names the other side. Otherwise record it in `duped.toml` at the project root:
+`bodies` and `types` hide a pair when a doc comment or file header says "mirrors", "mirror of", "structural twin", "kept in sync" or "copy of" and names the other side. "port of", "keep in step", "keep the two in step" and "keep them in step" hide a pair only while it is identical; once the copies differ the finding stays, with `diverged` naming the phrase: a documented copy that drifted. Otherwise record it in `duped.toml` at the project root:
 
 ```toml
 [[acknowledged]]

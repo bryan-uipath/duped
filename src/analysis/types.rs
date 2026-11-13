@@ -67,6 +67,8 @@ pub struct TypePair {
     pub tag: Option<Tag>,
     /// Why the pair is deliberate, when it is.
     pub acknowledged: Option<String>,
+    /// The doc phrase declaring it a copy to maintain, when the field names no longer match.
+    pub diverged: Option<String>,
 }
 
 #[derive(Debug)]
@@ -203,7 +205,7 @@ pub fn find_duplicate_types(
                     hidden_ambient += 1;
                     return;
                 }
-                let verdict = judge.verdict(pair.a, pair.b);
+                let verdict = judge.verdict(pair.a, pair.b).settle(pair.similarity >= 1.0);
                 if matches!(verdict.tag, Some(Tag::SameModule { .. }))
                     && !options.include_same_module
                 {
@@ -213,6 +215,7 @@ pub fn find_duplicate_types(
                 } else {
                     pair.tag = verdict.tag;
                     pair.acknowledged = verdict.acknowledged;
+                    pair.diverged = verdict.declared;
                     pairs.push(pair);
                 }
             },
@@ -341,6 +344,7 @@ fn score_pair(a: &Candidate, b: &Candidate, options: &TypeOptions) -> Option<Typ
         relationship,
         tag: None,
         acknowledged: None,
+        diverged: None,
     })
 }
 
@@ -564,7 +568,7 @@ pub fn render_text(
                 pair.typed,
                 pair.shared.len(),
                 relation_text(records, pair),
-                pair_notes(&pair.tag, &pair.acknowledged)
+                pair_notes(&pair.tag, &pair.acknowledged, &pair.diverged)
             )
             .ok();
             for index in [pair.a, pair.b] {
@@ -604,7 +608,7 @@ pub fn render_text(
                     pair.similarity,
                     pair.typed,
                     relation_text(records, pair),
-                    pair_notes(&pair.tag, &pair.acknowledged)
+                    pair_notes(&pair.tag, &pair.acknowledged, &pair.diverged)
                 )
                 .ok();
             }
@@ -644,6 +648,7 @@ pub fn to_json(records: &[Record], report: &TypeReport, judge: &dyn Judge) -> Va
                 "shared": p.shared,
                 "tag": p.tag,
                 "acknowledged": p.acknowledged,
+                "diverged": p.diverged,
             })
         })
         .collect();

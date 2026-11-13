@@ -456,6 +456,75 @@ fn rolls_file_pairs_up_by_directory() {
 }
 
 #[test]
+fn a_documented_port_hides_identical_parts_and_marks_diverged_ones() {
+    let root = temp("port");
+    write(&root, "vsix/package.json", r#"{"name":"@demo/vsix"}"#);
+    write(&root, "portal/package.json", r#"{"name":"@demo/portal"}"#);
+    let customer =
+        "export interface Customer { id: string; name: string; email: string; tier: string }\n";
+    let source = [
+        LIST.replace("NAME", "uniqueItems"),
+        RETRY.replace("NAME", "fetchJson"),
+        ORDER.to_string(),
+        customer.to_string(),
+    ]
+    .concat();
+    write(&root, "vsix/src/deploy.ts", &source);
+    // The port lost a guard and gained a field; the rest is unchanged.
+    let port = source
+        .replace(
+            "if (res.status < 500) throw new Error(`request failed: ${res.status}`);\n",
+            "",
+        )
+        .replace("placedAt: Date", "placedAt: Date; currency: string");
+    assert_ne!(port, source);
+    write(
+        &root,
+        "portal/src/deploy.ts",
+        &format!("// Port of vsix src/deploy.ts.\n{port}"),
+    );
+
+    let report = json(&root, &[]);
+    let findings: Vec<(&str, &str, Option<&str>)> = groups(&report)[0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] != "file")
+        .map(|f| {
+            (
+                f["detector"].as_str().unwrap(),
+                f["a"]["name"].as_str().unwrap(),
+                f["diverged"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        findings,
+        vec![
+            ("bodies", "fetchJson", Some("doc: port of")),
+            ("types", "Order", Some("doc: port of")),
+        ],
+        "{report}"
+    );
+    let text = text(&root);
+    assert!(
+        text.contains("(fetchJson:13 ~ fetchJson:12) (documented copy, diverged: doc: port of)"),
+        "{text}"
+    );
+
+    // Without the header nothing is declared: every pair is an ordinary finding.
+    write(&root, "portal/src/deploy.ts", &port);
+    let report = json(&root, &[]);
+    let findings = groups(&report)[0]["findings"].as_array().unwrap();
+    assert!(findings.iter().all(|f| f["diverged"].is_null()), "{report}");
+    assert!(
+        findings.iter().any(|f| f["a"]["name"] == "uniqueItems"),
+        "{report}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");
