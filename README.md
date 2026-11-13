@@ -351,11 +351,12 @@ test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
 
 ## Agent skills
 
-`skills/` holds three skills for coding agents:
+`skills/` holds four skills for coding agents:
 
 - **duped**: using the CLI, checking for existing code before writing new code, reading findings.
 - **duped-audit**: auditing a whole codebase and ranking what to consolidate.
 - **duped-review**: checking a branch or pull request for copies of existing code.
+- **duped-coupling**: ranking the most reached-into modules and proving fixes with a before/after delta.
 
 They need the `duped` binary on `PATH`.
 
@@ -366,10 +367,10 @@ Claude Code, as a plugin:
 /plugin install duped@duped
 ```
 
-Any agent that reads skill directories (Claude Code, Codex): link or copy all three, keeping them side by side.
+Any agent that reads skill directories (Claude Code, Codex): link or copy all four, keeping them side by side.
 
 ```sh
-for s in duped duped-audit duped-review; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done   # or ~/.codex/skills
+for s in duped duped-audit duped-review duped-coupling; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done   # or ~/.codex/skills
 ```
 
 ## Testing
