@@ -176,7 +176,12 @@ fn says_how_many_files_it_scanned_and_skipped_as_tests() {
         "tests/b.ts",
         "node_modules/p/c.ts",
     ] {
-        write(&root, file, "export const x = 1;\n");
+        let text = if file == "empty.ts" {
+            "// nothing\n"
+        } else {
+            "export const x = 1;\n"
+        };
+        write(&root, file, text);
     }
     let report = json(&root, &[]);
     assert_eq!(report["scannedFiles"], 2);
