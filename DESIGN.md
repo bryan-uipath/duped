@@ -56,7 +56,7 @@ One JSON object per line. Every analysis reads these, so only the extractors are
 
 ### Analyses
 
-- **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs are clustered with union-find.
+- **types:** Jaccard similarity on field names, plus a stricter score that also compares field type text. Pairs across languages are hidden by default: they can't share a definition. Pairs are clustered with union-find.
 - **fns:** Jaccard similarity of parameter names, weighted by how rare each name is, plus a stricter score that also compares parameter and return types. Conventions (a shared name set on many functions), implementations of one base, and wrappers are filtered.
 - **names:** file pairs that declare several of the same top-level names, scored by name rarity, export and matching signature, with each name's shape or signature marked as matching or diverging.
 - **bodies:** functions whose bodies are near-copies: Jaccard similarity of token shingles, with identifiers abstracted and literals kept, and MinHash + LSH banding to find candidate pairs. Exact hashes miss ported code with small edits. Pairs are ranked by shared shingles. File pairs linked through two or more functions on each side are reported as copied modules. Jaccard misses a small body inside a large one and a block pasted into two large functions, so an inverted index also pairs bodies sharing rare shingles (each in ≤10 bodies, so boilerplate doesn't link), and also yields `similar` pairs LSH missed. Their best in-order chain of shared runs, if mostly shared, becomes a `contained` or `block` pair with line ranges; `report` counts only those lines.
