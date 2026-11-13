@@ -87,4 +87,5 @@ findings use `reach|leak|surface` the same way, e.g.
 `reach: import X via packages/foo (entry), not foo/internal/x [path:line]`. State the base,
 `changedFiles`, each detector's status and `kept` count, and coverage limits. If none survive,
 say "No actionable duplication" with that scope. For deliberate pairs, suggest
-acknowledgements only for `bodies`/`types`; `names`/`imports` ignore them.
+acknowledgements only for `bodies`/`types`; `names`/`imports`/`files` ignore them
+unless both sides are file globs.

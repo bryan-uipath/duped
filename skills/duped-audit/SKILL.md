@@ -54,4 +54,4 @@ net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <
 coupling: score <s> (bypassRate <b>, unusedSurface <u>, hiding <h>); hotspots: <boundary> (<n> bypass in, <m> leaks, <term>), …
 ```
 
-Afterwards, offer to persist what you learned in `duped.toml`: repeated exclusions as `[scan] exclude = [...]`, and confirmed-deliberate `bodies`/`types` pairs as `[[acknowledged]]` entries (`names` and `imports` don't apply acknowledgements).
+Afterwards, offer to persist what you learned in `duped.toml`: repeated exclusions as `[scan] exclude = [...]`, and confirmed-deliberate `bodies`/`types` pairs as `[[acknowledged]]` entries, by name, or by file glob on both sides for a whole mirrored file (the only form `names`, `imports` and `files` apply).

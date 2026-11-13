@@ -340,6 +340,7 @@ fn run(cli: Cli) -> Result<()> {
         _ => None,
     };
     let records = scan_records(scan, &config, rules, &root, &base)?;
+    let acks = judge::Acks::new(&config.acknowledged, &root, &base);
     let mut out = output(scan)?;
     match (&cli.command, types, graph) {
         (Command::Extract(_), ..) => {
@@ -350,14 +351,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         (Command::Index(_), ..) => out.write_all(index::render(&records).as_bytes())?,
         (Command::Types(args), Some(options), Some(graph)) => {
-            let judge = judge::ProjectJudge::new(
-                &graph,
-                &records,
-                base,
-                &config.acknowledged,
-                "types",
-                |r| matches!(r, record::Record::Type(_)),
-            );
+            let judge = judge::ProjectJudge::new(&graph, &records, base, &acks, "types", |r| {
+                matches!(r, record::Record::Type(_))
+            });
             let report = analysis::types::find_duplicate_types(&records, &options, &judge);
             if args.json {
                 let json = analysis::types::to_json(&records, &report, &judge);
@@ -372,14 +368,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         (Command::Bodies(args), _, Some(graph)) => {
             let options = body_options(args);
-            let judge = judge::ProjectJudge::new(
-                &graph,
-                &records,
-                base,
-                &config.acknowledged,
-                "functions",
-                |r| analysis::bodies::is_candidate(r, &options),
-            );
+            let judge = judge::ProjectJudge::new(&graph, &records, base, &acks, "functions", |r| {
+                analysis::bodies::is_candidate(r, &options)
+            });
             let report = analysis::bodies::find_duplicate_bodies(&records, &options, &judge);
             if args.json {
                 let json = analysis::bodies::to_json(&records, &report, &judge);
@@ -393,14 +384,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         (Command::Helpers(args), _, Some(graph)) => {
             let options = helper_options(args);
-            let judge = judge::ProjectJudge::new(
-                &graph,
-                &records,
-                base,
-                &config.acknowledged,
-                "functions",
-                |r| matches!(r, record::Record::Function(_)),
-            );
+            let judge = judge::ProjectJudge::new(&graph, &records, base, &acks, "functions", |r| {
+                matches!(r, record::Record::Function(_))
+            });
             let report = analysis::helpers::find_helpers(&records, &options, &judge);
             if args.json {
                 let json = analysis::helpers::to_json(&records, &report, &judge);
@@ -414,14 +400,8 @@ fn run(cli: Cli) -> Result<()> {
         }
         (Command::Names(args), _, Some(graph)) => {
             let options = name_options(args, &config);
-            let judge = judge::ProjectJudge::new(
-                &graph,
-                &records,
-                base,
-                &config.acknowledged,
-                "declarations",
-                |_| true,
-            );
+            let judge =
+                judge::ProjectJudge::new(&graph, &records, base, &acks, "declarations", |_| true);
             let report = analysis::names::find_shared_names(&records, &options, &judge);
             if args.json {
                 let json = analysis::names::to_json(&records, &report, &judge);
@@ -434,14 +414,10 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         (Command::Fns(args), _, Some(graph)) => {
-            let judge = judge::ProjectJudge::new(
-                &graph,
-                &records,
-                base.clone(),
-                &config.acknowledged,
-                "functions",
-                |r| matches!(r, record::Record::Function(_)),
-            );
+            let judge =
+                judge::ProjectJudge::new(&graph, &records, base.clone(), &acks, "functions", |r| {
+                    matches!(r, record::Record::Function(_))
+                });
             let options = analysis::fns::FnOptions {
                 min_params: args.min_params,
                 min_shared: args.min_shared,
@@ -534,15 +510,9 @@ fn report(
         eprintln!("duped: skipped {} unreadable files", extraction.skipped);
     }
     let records = extraction.records;
+    let acks = judge::Acks::new(&config.acknowledged, root, base);
     let judge = |noun, compared: &dyn Fn(&record::Record) -> bool| {
-        judge::ProjectJudge::new(
-            &graph,
-            &records,
-            base.to_path_buf(),
-            &config.acknowledged,
-            noun,
-            compared,
-        )
+        judge::ProjectJudge::new(&graph, &records, base.to_path_buf(), &acks, noun, compared)
     };
 
     let bodies = report::attempt(|| {
@@ -602,15 +572,24 @@ fn report(
         Ok(report::types(&records, &found))
     });
 
+    // `files`, `imports` and `names` pair whole files, which only a file-pair entry covers.
+    let unacknowledged = |found: Result<Vec<report::Finding>, String>| {
+        found.map(|found| {
+            let kept = found
+                .into_iter()
+                .filter(|f| !acks.files(&f.a.file, &f.b.file));
+            kept.collect()
+        })
+    };
     let report = report::Report::new(
         base.display().to_string(),
         args.base.as_deref(),
         changed,
         vec![
             ("bodies", bodies),
-            ("files", identical),
-            ("imports", imports),
-            ("names", names),
+            ("files", unacknowledged(identical)),
+            ("imports", unacknowledged(imports)),
+            ("names", unacknowledged(names)),
             ("types", types),
         ],
         helpers,

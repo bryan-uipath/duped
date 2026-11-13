@@ -6,9 +6,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::analysis::{Judge, Verdict};
-use crate::config::Acknowledged;
+use globset::GlobMatcher;
+
+use crate::config::{Acknowledged, file_glob};
 use crate::lang::imported_packages;
-use crate::modules::{Home, ModuleGraph, ROOT_MODULE, Tag};
+use crate::modules::{self, Home, ModuleGraph, ROOT_MODULE, Tag};
 use crate::record::{Record, qualified};
 use crate::walk::{SourceFile, language_for};
 
@@ -30,6 +32,81 @@ const DECLARED: &[&str] = &[
     "keep them in step",
 ];
 
+/// `duped.toml`'s `[[acknowledged]]` entries, their file globs compiled.
+#[derive(Default)]
+pub struct Acks {
+    /// Each entry's sides and reason.
+    entries: Vec<(Side, Side, String)>,
+    /// The scan directory under the project root, `packages/web/` or empty: globs are
+    /// relative to the root, scanned files to the scan directory.
+    prefix: String,
+}
+
+/// One side of an entry: a name, or a file glob covering all that matching files declare.
+enum Side {
+    Name(String),
+    Files(GlobMatcher),
+}
+
+impl Side {
+    fn new(pattern: &str) -> Self {
+        match file_glob(pattern) {
+            Some(Ok(glob)) => Side::Files(glob),
+            _ => Side::Name(pattern.to_string()),
+        }
+    }
+
+    fn file(&self, prefix: &str, file: &str) -> bool {
+        matches!(self, Side::Files(glob) if glob.is_match(format!("{prefix}{file}")))
+    }
+
+    fn matches(&self, prefix: &str, t: &Record, module: &str) -> bool {
+        match self {
+            Side::Name(pattern) => side_matches(pattern, t, module),
+            Side::Files(_) => self.file(prefix, &t.location().file),
+        }
+    }
+}
+
+impl Acks {
+    /// `base` is the scan directory, under the project `root`.
+    pub fn new(entries: &[Acknowledged], root: &Path, base: &Path) -> Self {
+        let mut prefix = modules::relative(root, base);
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        let entries = entries
+            .iter()
+            .map(|e| {
+                let reason = e.reason.clone().unwrap_or_else(|| "duped.toml".to_string());
+                (Side::new(&e.a), Side::new(&e.b), reason)
+            })
+            .collect();
+        Acks { entries, prefix }
+    }
+
+    /// Why the pair is acknowledged, from the first entry matching it either way round.
+    fn reason(&self, (ta, ma): (&Record, &str), (tb, mb): (&Record, &str)) -> Option<String> {
+        let p = &self.prefix;
+        self.entries
+            .iter()
+            .find(|(a, b, _)| {
+                a.matches(p, ta, ma) && b.matches(p, tb, mb)
+                    || a.matches(p, tb, mb) && b.matches(p, ta, ma)
+            })
+            .map(|(_, _, reason)| reason.clone())
+    }
+
+    /// Whether an entry with a file glob on both sides covers scanned files `a` and `b`:
+    /// every finding between them is deliberate.
+    pub fn files(&self, a: &str, b: &str) -> bool {
+        let p = &self.prefix;
+        self.entries
+            .iter()
+            .any(|(x, y, _)| x.file(p, a) && y.file(p, b) || x.file(p, b) && y.file(p, a))
+    }
+}
+
 pub struct ProjectJudge<'a> {
     graph: &'a ModuleGraph,
     records: &'a [Record],
@@ -40,7 +117,7 @@ pub struct ProjectJudge<'a> {
     tagging: bool,
     /// What is compared, for the summary, e.g. `types`.
     noun: &'static str,
-    acknowledged: &'a [Acknowledged],
+    acknowledged: &'a Acks,
     /// Directory the records' `file` paths are relative to.
     base: PathBuf,
     /// Leading comment of each file, lower-cased, read on first use.
@@ -97,7 +174,7 @@ impl<'a> ProjectJudge<'a> {
         graph: &'a ModuleGraph,
         records: &'a [Record],
         base: PathBuf,
-        acknowledged: &'a [Acknowledged],
+        acknowledged: &'a Acks,
         noun: &'static str,
         compared: impl Fn(&Record) -> bool,
     ) -> Self {
@@ -136,17 +213,8 @@ impl<'a> ProjectJudge<'a> {
             self.graph.name(self.modules[a]),
             self.graph.name(self.modules[b]),
         );
-        for entry in self.acknowledged {
-            let forward = side_matches(&entry.a, ta, ma) && side_matches(&entry.b, tb, mb);
-            let backward = side_matches(&entry.a, tb, mb) && side_matches(&entry.b, ta, ma);
-            if forward || backward {
-                return Some(
-                    entry
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| "duped.toml".to_string()),
-                );
-            }
+        if let Some(reason) = self.acknowledged.reason((ta, ma), (tb, mb)) {
+            return Some(reason);
         }
         // The name must follow the phrase in the same sentence: "mirrors `X`", "twin of the
         // evals `X`", not a phrase in one paragraph and a name in another.
@@ -480,6 +548,23 @@ mod tests {
         })
     }
 
+    fn none() -> &'static Acks {
+        Box::leak(Box::default())
+    }
+
+    /// Entries for a scan of `/repo`, the project root.
+    fn acks(entries: &[(&str, &str, Option<&str>)]) -> Acks {
+        let entries: Vec<Acknowledged> = entries
+            .iter()
+            .map(|&(a, b, reason)| Acknowledged {
+                a: a.into(),
+                b: b.into(),
+                reason: reason.map(str::to_string),
+            })
+            .collect();
+        Acks::new(&entries, Path::new("/repo"), Path::new("/repo"))
+    }
+
     fn is_type(r: &Record) -> bool {
         matches!(r, Record::Type(_))
     }
@@ -510,25 +595,58 @@ mod tests {
             ty("Row", "canvas/a.ts", None),
             ty("Row", "evals/b.ts", None),
         ];
-        let acks = vec![Acknowledged {
-            a: "unified-evals:Row".into(),
-            b: "@x/canvas:Row".into(),
-            reason: Some("boundary".into()),
-        }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, "types", is_type);
+        let listed = acks(&[("unified-evals:Row", "@x/canvas:Row", Some("boundary"))]);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &listed, "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("boundary")
         );
         assert_eq!(judge.module(0), Some("@x/canvas"));
 
-        let wrong = vec![Acknowledged {
-            a: "canvas2:Row".into(),
-            b: "Row".into(),
-            reason: None,
-        }];
+        let wrong = acks(&[("canvas2:Row", "Row", None)]);
         let judge = ProjectJudge::new(&g, &records, "/repo".into(), &wrong, "types", is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
+    }
+
+    #[test]
+    fn a_file_glob_side_covers_everything_its_files_declare() {
+        let g = graph();
+        let records = vec![
+            ty("Task", "sdk/src/types.ts", None),
+            ty("Task", "crates/core/src/tasks.rs", None),
+            ty("Pane", "crates/core/src/model.rs", None),
+            ty("Task", "crates/app/main.rs", None),
+        ];
+        let reason = |acks: &Acks, a, b| {
+            ProjectJudge::new(&g, &records, "/repo".into(), acks, "types", is_type)
+                .verdict(a, b)
+                .acknowledged
+        };
+        // Either way round; `*` stays within a directory.
+        let mirror = acks(&[("crates/core/src/*.rs", "sdk/src/types.ts", Some("wire"))]);
+        assert_eq!(reason(&mirror, 0, 1).as_deref(), Some("wire"));
+        assert_eq!(reason(&mirror, 2, 0).as_deref(), Some("wire"));
+        assert_eq!(reason(&mirror, 0, 3), None);
+        assert_eq!(reason(&mirror, 1, 2), None);
+        assert!(mirror.files("sdk/src/types.ts", "crates/core/src/model.rs"));
+        assert!(!mirror.files("sdk/src/types.ts", "sdk/src/types.ts"));
+
+        // A file on one side and a name on the other: no whole-file pair.
+        let mixed = acks(&[("sdk/src/types.ts", "Pane", None)]);
+        assert_eq!(reason(&mixed, 0, 2).as_deref(), Some("duped.toml"));
+        assert_eq!(reason(&mixed, 0, 1), None);
+        assert!(!mixed.files("sdk/src/types.ts", "crates/core/src/model.rs"));
+
+        // Globs are relative to the project root, scanned files to the scan directory.
+        let entry = Acknowledged {
+            a: "sdk/src/types.ts".into(),
+            b: "crates/**".into(),
+            reason: None,
+        };
+        let scanned = Acks::new(&[entry], Path::new("/repo"), Path::new("/repo/sdk"));
+        assert!(!scanned.files("sdk/src/types.ts", "crates/core/src/model.rs"));
+        assert_eq!(scanned.prefix, "sdk/");
+        assert!(scanned.entries[0].0.file(&scanned.prefix, "src/types.ts"));
     }
 
     #[test]
@@ -544,7 +662,7 @@ mod tests {
             ty("Other", "canvas/c.ts", Some("Returns a copy of the list.")),
             ty("Thing", "evals/d.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), none(), "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
@@ -582,7 +700,7 @@ mod tests {
                 external: Vec::new(),
             },
         ]);
-        let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, base, none(), "types", is_type);
         assert_eq!(
             judge.verdict(0, 1).acknowledged.as_deref(),
             Some("doc: structural twin")
@@ -618,12 +736,8 @@ mod tests {
             function("load", "canvas/a.ts"),
             function("fetch", "evals/b.ts"),
         ];
-        let acks = vec![Acknowledged {
-            a: "unified-evals:fetch".into(),
-            b: "load".into(),
-            reason: None,
-        }];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &acks, "functions", |r| {
+        let listed = acks(&[("unified-evals:fetch", "load", None)]);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &listed, "functions", |r| {
             matches!(r, Record::Function(_))
         });
         let verdict = judge.verdict(1, 2);
@@ -641,7 +755,7 @@ mod tests {
             external: Vec::new(),
         }]);
         let records = vec![ty("A", "a.ts", None), ty("B", "b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), none(), "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert_eq!(judge.module(0), None);
     }
@@ -672,7 +786,7 @@ mod tests {
             module("b", vec![0, 1], vec![]),
         ]);
         let records = vec![ty("A", "a/x.ts", None), ty("B", "b/x.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, root.clone(), &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, root.clone(), none(), "types", is_type);
         assert_eq!(
             judge.tag(0, 1),
             Some(Tag::MoveDown {
@@ -688,7 +802,7 @@ mod tests {
         // Two modules exist, but every scanned type is in one of them.
         let g = graph();
         let records = vec![ty("A", "canvas/a.ts", None), ty("B", "canvas/b.ts", None)];
-        let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, "/repo".into(), none(), "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert!(judge.summary().unwrap().contains("fewer than 2"));
     }
@@ -698,7 +812,7 @@ mod tests {
         let g = graph();
         let ack = |doc: &str, a: &str, b: &str| {
             let records = vec![ty(a, "canvas/a.ts", Some(doc)), ty(b, "evals/b.ts", None)];
-            ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type)
+            ProjectJudge::new(&g, &records, "/repo".into(), none(), "types", is_type)
                 .verdict(0, 1)
                 .acknowledged
         };
@@ -752,7 +866,7 @@ mod tests {
         let g = graph();
         let verdict = |doc: &str, a: &str, b: &str| {
             let records = vec![ty(a, "canvas/a.ts", Some(doc)), ty(b, "evals/b.ts", None)];
-            ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type).verdict(0, 1)
+            ProjectJudge::new(&g, &records, "/repo".into(), none(), "types", is_type).verdict(0, 1)
         };
         let declared = |doc: &str, a: &str, b: &str| {
             let verdict = verdict(doc, a, b);
@@ -830,7 +944,7 @@ mod tests {
             ty("Foo", "canvas/a.ts", None),
             ty("License", "evals/b.ts", None),
         ];
-        let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
+        let judge = ProjectJudge::new(&g, &records, base, none(), "types", is_type);
         assert_eq!(judge.verdict(0, 1).acknowledged, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }

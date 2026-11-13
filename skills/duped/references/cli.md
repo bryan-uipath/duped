@@ -60,9 +60,14 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 a = "@x/web:formatBytes"      # Name, Scope.Name, or module:Name
 b = "@x/cli:formatBytes"
 reason = "cli is published standalone and can't depend on web"
+
+[[acknowledged]]
+a = "sdk/src/types.ts"        # a side with a `/` and no `:` is a root-relative file glob:
+b = "crates/core/src/*.rs"    # everything those files declare
+reason = "the SDK mirrors the wire types"
 ```
 
-Acknowledgements apply to `bodies` and `types`, where `--include-acknowledged` shows hidden pairs, and to `helpers` groups (a copy acknowledged against its group's first member is dropped, with no flag to show it; families ignore them). `names` and `imports` keep reporting the pair.
+Acknowledgements apply to `bodies` and `types`, where `--include-acknowledged` shows hidden pairs, and to `helpers` groups (a copy acknowledged against its group's first member is dropped, with no flag to show it; families ignore them). `names`, `imports` and `files` keep reporting the pair, unless an entry has a file glob on both sides: `report` then drops that file pair from every analysis.
 
 ## Tuning
 

@@ -525,6 +525,63 @@ fn a_documented_port_hides_identical_parts_and_marks_diverged_ones() {
 }
 
 #[test]
+fn a_file_pair_entry_acknowledges_every_finding_between_the_files() {
+    let root = temp("file-pair");
+    let log = [
+        LIST.replace("NAME", "uniqueItems"),
+        RETRY.replace("NAME", "fetchJson"),
+    ]
+    .concat();
+    // An identical copy (`files`, `names`) and a renamed one (`bodies`).
+    write(&root, "pkgs/app/src/log.ts", &log);
+    write(&root, "pkgs/ext/src/log.ts", &log);
+    write(
+        &root,
+        "pkgs/web/rows.ts",
+        &LIST.replace("NAME", "dedupeRows"),
+    );
+    let pairs = |dir: &Path| -> Vec<(String, String)> {
+        let report = json(dir, &["--root", root.to_str().unwrap()]);
+        let pair = |g: &Value| {
+            (
+                g["a"].as_str().unwrap().into(),
+                g["b"].as_str().unwrap().into(),
+            )
+        };
+        groups(&report).iter().map(pair).collect()
+    };
+    let twin = (
+        "pkgs/app/src/log.ts".to_string(),
+        "pkgs/ext/src/log.ts".to_string(),
+    );
+    assert_eq!(pairs(&root).len(), 3);
+    assert!(pairs(&root).contains(&twin));
+
+    write(
+        &root,
+        "duped.toml",
+        "[[acknowledged]]\na = \"pkgs/ext/**\"\nb = \"pkgs/app/src/log.ts\"\nreason = \"a test keeps them identical\"\n",
+    );
+    assert_eq!(pairs(&root).len(), 2);
+    assert!(!pairs(&root).contains(&twin));
+    // Globs stay relative to the project root when a subdirectory is scanned.
+    assert_eq!(pairs(&root.join("pkgs")).len(), 2);
+
+    write(
+        &root,
+        "duped.toml",
+        "[[acknowledged]]\na = \"pkgs/[ext\"\nb = \"x\"\n",
+    );
+    let rejected = duped(&root, &[]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("[[acknowledged]] `pkgs/[ext`"),
+        "{rejected:?}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use globset::{GlobBuilder, GlobMatcher};
 use serde::Deserialize;
 
 use crate::modules::{read_json, read_toml};
@@ -67,7 +68,8 @@ pub struct ModuleOverride {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Acknowledged {
-    /// A type or function name, `Scope.Name`, or either prefixed with `module:`.
+    /// A type or function name, `Scope.Name`, or either prefixed with `module:`; or a file
+    /// glob (see [`file_glob`]).
     pub a: String,
     pub b: String,
     pub reason: Option<String>,
@@ -79,6 +81,15 @@ pub struct LanguageRulesConfig {
     pub conventional_members: Option<ListEdit>,
     pub test_files: Option<ListEdit>,
     pub test_dirs: Option<ListEdit>,
+}
+
+/// An `[[acknowledged]]` side with a `/` and no `:` is a file glob relative to the project
+/// root, e.g. `sdk/src/types.ts` or `crates/core/src/*.rs`; `*` stays within a directory.
+pub fn file_glob(side: &str) -> Option<Result<GlobMatcher, globset::Error>> {
+    (side.contains('/') && !side.contains(':')).then(|| {
+        let glob = GlobBuilder::new(side).literal_separator(true).build()?;
+        Ok(glob.compile_matcher())
+    })
 }
 
 /// A list setting: an array replaces the defaults, `{ add, remove }` edits them.
@@ -118,6 +129,13 @@ pub fn load(root: &Path, explicit: Option<&Path>) -> Result<Config> {
     ] {
         if value.is_some_and(|v| !(0.0..=1.0).contains(&v)) {
             bail!("{}: [types] {key} must be between 0 and 1", path.display());
+        }
+    }
+    for entry in &config.acknowledged {
+        for side in [&entry.a, &entry.b] {
+            if let Some(Err(err)) = file_glob(side) {
+                bail!("{}: [[acknowledged]] `{side}`: {err}", path.display());
+            }
         }
     }
     Ok(config)
