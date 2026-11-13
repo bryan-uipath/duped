@@ -99,7 +99,7 @@ All but `fns` are implemented. Every analysis supports `--json`. `report --base 
 - Module overrides: `path`, `deps`, `ignore`.
 - Include/exclude globs.
 - Thresholds: minimum fields, minimum shared fields, similarity.
-- Acknowledged pairs, each with a reason. Doc comments that say a type mirrors or is a structural twin of the other side count too.
+- Acknowledged pairs, by name or by file glob, each with a reason. Doc comments that say a type mirrors or is a structural twin of the other side count too.
 - Per-language rules: conventional members that don't count toward similarity (such as `toString`), and test-file and test-directory patterns.
 
 ## Skills

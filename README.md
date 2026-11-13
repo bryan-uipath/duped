@@ -200,7 +200,7 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 ### Running every analysis at once
 
-`duped report` runs `bodies`, `helpers`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files` ignores acknowledgements. The header totals it across all file pairs and helper groups, so code copied into three or more files (other than whole identical files or helpers) counts once per pair. `helpers` groups span any number of files, so they are listed after the file pairs, ranked by their own `removableLines`; a copy inside a non-first identical file is dropped, since the file already counts, and `bodies` only compares larger functions, so no line counts twice. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
+`duped report` runs `bodies`, `helpers`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files`, `imports` and `names` pair whole files, so they ignore acknowledgements of names and doc comments; an `[[acknowledged]]` entry with a file glob on both sides drops the file pair from every analysis. The header totals it across all file pairs and helper groups, so code copied into three or more files (other than whole identical files or helpers) counts once per pair. `helpers` groups span any number of files, so they are listed after the file pairs, ranked by their own `removableLines`; a copy inside a non-first identical file is dropped, since the file already counts, and `bodies` only compares larger functions, so no line counts twice. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
 
 - `--base <ref>` keeps only findings on lines added, rewritten or next to a deletion since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`: a `bodies`, `types` or `helpers` finding needs a changed line inside one of its functions, types or regions; `names`, `imports` and identical `files` have no line range and need only a changed file. It needs git; without it, git isn't used.
 - `--top` (default `40`) limits the file pairs, helper groups and families shown, in `--json` too; `filePairs`, `helperGroups`, `helperFamilies` and `truncated` say how many there were.
@@ -309,6 +309,8 @@ The **project root** is found from `DIR`, without leaving its git checkout: the 
 
 A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
+A `duped.toml` side can also be a file glob, which stands for everything the matching files declare: one entry acknowledges a 30-type mirror, or, with a name on the other side, every copy of one type in a directory.
+
 A comment that declares a copy to maintain ("port of", "keep in step", "keep the two in step", "keep them in step") and names the other side anywhere in its sentence acknowledges the pair only while the two still match: bodies identical token for token (a renamed callee at `1.00 similar` is not), the same field names, or one `helpers` group. A pair that no longer matches stays reported with `diverged` set to the phrase (`doc: port of`), shown as `(documented copy, diverged: doc: port of)`: a port that drifted from its source.
 
 ### `duped.toml`
@@ -346,6 +348,11 @@ deps = ["@x/core", "shared"]               # replace detected dependencies
 a = "@x/canvas:DocumentAnnotationRow"      # type or function: Name, Scope.Name, or module:Name
 b = "DocumentAnnotationRow"
 reason = "canvas can't depend on evals"
+
+[[acknowledged]]
+a = "sdk/src/types.ts"                     # a side with a `/` and no `:` is a file glob, relative to the project root (`./build.rs` for a file in it)
+b = "crates/core/src/*.rs"                 # `*` stays within a directory, `**` crosses them
+reason = "the SDK mirrors the wire types"
 
 [rules.typescript]                         # typescript, javascript, python, rust or csharp
 conventional_members = { add = ["dispose"], remove = ["toJSON"] }
