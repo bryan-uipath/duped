@@ -1,6 +1,5 @@
-//! Small functions copied everywhere: N-way groups with identical normalised bodies, too small
-//! for `bodies`, plus same-name families whose bodies have drifted apart. Top-level functions,
-//! and methods that never use their receiver, which could be top-level.
+//! Small top-level functions copied everywhere: N-way groups with identical normalised bodies,
+//! too small for `bodies`, plus same-name families whose bodies have drifted apart.
 //!
 //! Plain parameters are renamed by position, so `isRec(v)` and `isRecord(value)` match; every
 //! other name is kept, so `<AContext.Provider>` and `<BContext.Provider>` wrappers don't.
@@ -71,7 +70,7 @@ pub struct Family {
 
 #[derive(Debug)]
 pub struct HelperReport {
-    /// Functions in the token range, which groups are made from.
+    /// Top-level functions in the token range, which groups are made from.
     pub candidates: usize,
     /// Most removable lines first.
     pub groups: Vec<HelperGroup>,
@@ -86,11 +85,11 @@ pub fn find_helpers(
     options: &HelperOptions,
     judge: &dyn Judge,
 ) -> HelperReport {
-    // Every small function counts toward its name's family; groups need `min_tokens`.
+    // Every small top-level function counts toward its name's family; groups need `min_tokens`.
     let mut by_body: HashMap<(Language, Vec<u64>), Vec<usize>> = HashMap::new();
     for (i, r) in records.iter().enumerate() {
         if let Record::Function(f) = r
-            && (f.scope.is_none() || !uses_receiver(f))
+            && f.scope.is_none()
             && (1..=options.max_tokens).contains(&f.body.len())
         {
             by_body
@@ -230,16 +229,6 @@ fn sort_groups(groups: &mut [HelperGroup]) {
             .then(y.members.len().cmp(&x.members.len()))
             .then(x.members[0].record.cmp(&y.members[0].record))
     });
-}
-
-/// A method reading `this`/`self` (or `Self`, `super`) is tied to its type: no home to move it to,
-/// and `subscribe`, `dispose` and `new` would fill the groups and families.
-fn uses_receiver(f: &FunctionRecord) -> bool {
-    let receivers = ["this", "self", "Self", "super"].map(token_hash);
-    f.body.iter().any(|t| {
-        let (Token::Identifier(h) | Token::Text(h)) = t;
-        receivers.contains(h)
-    })
 }
 
 /// Body tokens with plain parameters as their position, so renamed parameters match; text,
@@ -409,7 +398,7 @@ pub fn render_text(
     let removable: usize = report.groups.iter().map(|g| g.removable_lines).sum();
     writeln!(
         out,
-        "{} groups of identical helpers (~{removable} removable lines) and {} drifted families from {} functions of {}–{} tokens.",
+        "{} groups of identical helpers (~{removable} removable lines) and {} drifted families from {} top-level functions of {}–{} tokens.",
         report.groups.len(),
         report.families.len(),
         report.candidates,
@@ -618,15 +607,17 @@ mod tests {
             )
         };
         let tiny = "export function id(x) { return x.id; }";
-        // Reads its receiver: tied to the class.
-        let method = "class A { has(key) { return this.items.has(key) && !this.closed; } }";
+        let method = format!(
+            "class A {{ isRecord(value) {{ {} }} }}",
+            "return typeof value === 'object' && value !== null && !Array.isArray(value);"
+        );
         let records = extract(&[
             ("a.tsx", &provider("AContext")),
             ("b.tsx", &provider("BContext")),
             ("c.ts", tiny),
             ("d.ts", tiny),
-            ("e.ts", method),
-            ("f.ts", method),
+            ("e.ts", &method),
+            ("f.ts", &method),
         ]);
         let report = find_helpers(&records, &options(), &NoJudge);
         assert!(report.groups.is_empty(), "{:?}", groups(&report));
@@ -638,15 +629,6 @@ mod tests {
             groups(&find_helpers(&records, &loose, &NoJudge)),
             vec![vec!["id", "id"]]
         );
-    }
-
-    #[test]
-    fn methods_without_a_receiver_group() {
-        // No `this`: a top-level helper written inside a class.
-        let method = "class A { static isRecord(value) { return typeof value === 'object' && value !== null && !Array.isArray(value); } }";
-        let records = extract(&[("a.ts", IS_RECORD), ("b.ts", method)]);
-        let report = find_helpers(&records, &options(), &NoJudge);
-        assert_eq!(groups(&report), vec![vec!["isRecord", "isRecord"]]);
     }
 
     #[test]

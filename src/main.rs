@@ -41,7 +41,7 @@ enum Command {
     Types(TypesArgs),
     /// Find functions whose bodies are near-copies, whatever they are called.
     Bodies(BodiesArgs),
-    /// Find small helpers copied with identical bodies, and same-name helpers that drifted.
+    /// Find small top-level helpers copied with identical bodies, and same-name helpers that drifted.
     Helpers(HelpersArgs),
     /// Find TypeScript/JavaScript files that import the same rare things, often ported copies.
     Imports(ImportsArgs),
