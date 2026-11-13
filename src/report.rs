@@ -41,8 +41,8 @@ pub struct Report {
     /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
     pub removable_lines: usize,
     pub truncated: bool,
-    /// Directory pairs linked by two or more file pairs, most removable lines first: a port
-    /// spread over many files. Never cut by `--top`.
+    /// Directory pairs linked by two or more file pairs with removable lines, most removable
+    /// lines first: a port spread over many files. Never cut by `--top`.
     pub directories: Vec<DirectoryPair>,
     pub groups: Vec<Group>,
     /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
@@ -64,7 +64,7 @@ pub enum Status {
     },
 }
 
-/// The file pairs between two directories (or within one, `a == b`), from all groups.
+/// The file pairs with removable lines between two directories.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryPair {
@@ -512,7 +512,9 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&Changed>) -> Vec<
     groups
 }
 
-/// Groups summed by their files' directories, keeping pairs of two or more.
+/// Groups summed by their files' directories, keeping pairs of two or more. Skipped: groups
+/// with nothing removable (`names` or `imports` only), and file pairs inside one directory,
+/// which are mostly unrelated to each other.
 fn directory_pairs(groups: &[Group]) -> Vec<DirectoryPair> {
     let dir = |file: &str| match file.rsplit_once('/') {
         Some((dir, _)) => dir.to_string(),
@@ -521,6 +523,9 @@ fn directory_pairs(groups: &[Group]) -> Vec<DirectoryPair> {
     let mut sums: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
     for g in groups {
         let (a, b) = (dir(&g.a), dir(&g.b));
+        if g.removable_lines == 0 || a == b {
+            continue;
+        }
         let key = if a <= b { (a, b) } else { (b, a) };
         let sum = sums.entry(key).or_default();
         sum.0 += 1;
@@ -845,15 +850,10 @@ pub fn render_text(report: &Report) -> String {
         writeln!(out, "\nDirectories sharing several file pairs:").ok();
     }
     for d in report.directories.iter().take(DIRECTORIES_SHOWN) {
-        let dirs = if d.a == d.b {
-            format!("within {}", d.a)
-        } else {
-            format!("{} ~ {}", d.a, d.b)
-        };
         writeln!(
             out,
-            "   ~{} removable lines, {} file pairs: {dirs}",
-            d.removable_lines, d.file_pairs
+            "   ~{} removable lines, {} file pairs: {} ~ {}",
+            d.removable_lines, d.file_pairs, d.a, d.b
         )
         .ok();
     }
