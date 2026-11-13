@@ -3,7 +3,9 @@
 
 pub mod bodies;
 pub mod coupling;
+pub mod files;
 pub mod fns;
+pub mod helpers;
 pub mod imports;
 pub mod names;
 pub mod types;

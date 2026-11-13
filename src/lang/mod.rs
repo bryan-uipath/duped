@@ -75,16 +75,62 @@ pub fn extract_imports(
         .filter(|f| keep(f.language) && f.language != Language::CSharp)
         .map_init(Parser::new, |parser, file| {
             let source = decode(&std::fs::read(&file.path).ok()?);
-            let imports = match file.language {
-                Language::Python => python::imports(parser, &source, &file.rel),
-                Language::Rust => rust::imports(parser, &source),
-                _ => typescript::imports(parser, &source, &file.rel),
-            };
-            Some((file.rel.clone(), imports))
+            Some((file.rel.clone(), imports_of(parser, &source, file)))
         })
         .collect();
     let skipped = results.iter().filter(|r| r.is_none()).count();
     (results.into_iter().flatten().collect(), skipped)
+}
+
+fn imports_of(parser: &mut Parser, source: &str, file: &SourceFile) -> Vec<Import> {
+    match file.language {
+        Language::Python => python::imports(parser, source, &file.rel),
+        Language::Rust => rust::imports(parser, source),
+        Language::CSharp => Vec::new(),
+        _ => typescript::imports(parser, source, &file.rel),
+    }
+}
+
+/// Packages `file` imports: `@x/core/sub` → `@x/core`, `node:fs` →
+/// `node:fs`, `serde_json::Value` → `serde_json`, `a.b` → `a`. Relative and crate-local paths
+/// are left out; an unreadable file imports nothing.
+pub fn imported_packages(file: &SourceFile) -> Vec<String> {
+    let Ok(bytes) = std::fs::read(&file.path) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    let mut packages: Vec<String> = imports_of(&mut parser, &decode(&bytes), file)
+        .iter()
+        .flat_map(|i| match (file.language, i.specifier.as_str()) {
+            // `use serde_json;` has no prefix: the crate is the imported name.
+            (Language::Rust, "") => i.names.clone(),
+            (language, specifier) => package_of(specifier, language).into_iter().collect(),
+        })
+        .collect();
+    packages.sort_unstable();
+    packages.dedup();
+    packages
+}
+
+fn package_of(specifier: &str, language: Language) -> Option<String> {
+    let first = |sep: &str| specifier.split(sep).next().map(str::to_string);
+    match language {
+        Language::Rust => match first("::")?.as_str() {
+            "crate" | "self" | "super" => None,
+            name => Some(name.to_string()),
+        },
+        Language::Python if specifier.starts_with('.') => None,
+        Language::Python => first("."),
+        _ if specifier.starts_with('.') || specifier.starts_with('/') => None,
+        _ => {
+            let mut parts = specifier.split('/');
+            let head = parts.next()?;
+            match (head.starts_with('@'), parts.next()) {
+                (true, Some(name)) => Some(format!("{head}/{name}")),
+                _ => Some(head.to_string()),
+            }
+        }
+    }
 }
 
 /// TypeScript or JavaScript, the languages `duped imports` compares.
@@ -115,10 +161,14 @@ pub enum TokenClass {
     Identifier,
 }
 
-/// Leaves of `node` in source order as body tokens, classed by `class`; whitespace-only
-/// leaves (such as JSX text between tags) are dropped.
-pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClass>) -> Vec<Token> {
-    let mut tokens = Vec::new();
+/// Leaves of `node` in source order as body tokens, classed by `class`, with each one's
+/// 1-based line; whitespace-only leaves (such as JSX text between tags) are dropped.
+pub fn body_tokens(
+    node: Node,
+    source: &str,
+    class: fn(Node) -> Option<TokenClass>,
+) -> (Vec<Token>, Vec<u32>) {
+    let (mut tokens, mut lines) = (Vec::new(), Vec::new());
     let mut cursor = node.walk();
     'walk: loop {
         let node = cursor.node();
@@ -126,11 +176,15 @@ pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClas
         let class = class(node);
         let leaf = class.is_some() || node.child_count() == 0;
         if leaf && !text.trim().is_empty() {
-            tokens.extend(match class {
+            let token = match class {
                 Some(TokenClass::Skip) => None,
-                Some(TokenClass::Identifier) => Some(Token::Identifier),
+                Some(TokenClass::Identifier) => Some(Token::Identifier(token_hash(text))),
                 Some(TokenClass::Literal) | None => Some(Token::Text(token_hash(text))),
-            });
+            };
+            if let Some(token) = token {
+                tokens.push(token);
+                lines.push(node.start_position().row as u32 + 1);
+            }
         }
         if !leaf && cursor.goto_first_child() {
             continue;
@@ -141,7 +195,7 @@ pub fn body_tokens(node: Node, source: &str, class: fn(Node) -> Option<TokenClas
             }
         }
     }
-    tokens
+    (tokens, lines)
 }
 
 pub fn has_token(node: Node, token: &str) -> bool {
@@ -214,6 +268,37 @@ pub fn collapse_whitespace(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_of_each_specifier() {
+        let ts = |s| package_of(s, Language::TypeScript);
+        assert_eq!(ts("@x/core/sub/path").as_deref(), Some("@x/core"));
+        assert_eq!(ts("react-dom/client").as_deref(), Some("react-dom"));
+        assert_eq!(ts("./util"), None);
+        assert_eq!(ts("@/api/mappers").as_deref(), Some("@/api"));
+        let rs = |s| package_of(s, Language::Rust);
+        assert_eq!(rs("serde_json::Value").as_deref(), Some("serde_json"));
+        assert_eq!(rs("crate::a"), None);
+        assert_eq!(package_of("a.b", Language::Python).as_deref(), Some("a"));
+        assert_eq!(package_of(".models", Language::Python), None);
+    }
+
+    #[test]
+    fn imported_packages_include_whole_crate_uses() {
+        let path = std::env::temp_dir().join(format!("duped-packages-{}.rs", std::process::id()));
+        std::fs::write(
+            &path,
+            "use serde_json;\nuse crate::a::B;\nuse anyhow::Result;\n",
+        )
+        .unwrap();
+        let file = SourceFile {
+            path: path.clone(),
+            rel: "lib.rs".into(),
+            language: Language::Rust,
+        };
+        assert_eq!(imported_packages(&file), vec!["anyhow", "serde_json"]);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn decodes_legacy_and_utf16_sources() {

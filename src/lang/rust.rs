@@ -346,6 +346,10 @@ impl<'a> Extractor<'a> {
         let Some(name) = item.child_by_field_name("name").map(|n| self.text(n)) else {
             return;
         };
+        let (body, body_lines) = item
+            .child_by_field_name("body")
+            .map(|b| body_tokens(b, self.source, token_class))
+            .unwrap_or_default();
         self.records.push(Record::Function(FunctionRecord {
             language: Language::Rust,
             name,
@@ -355,10 +359,8 @@ impl<'a> Extractor<'a> {
             exported,
             location: self.location(pre.anchor, item),
             doc: pre.doc.clone(),
-            body: item
-                .child_by_field_name("body")
-                .map(|b| body_tokens(b, self.source, token_class))
-                .unwrap_or_default(),
+            body,
+            body_lines,
         }));
     }
 
@@ -986,7 +988,7 @@ mod tests {
             functions(&records)[0].body,
             vec![
                 text("{"),
-                Token::Identifier,
+                Token::Identifier(token_hash("user")),
                 text("."),
                 text("name"),
                 text("+"),

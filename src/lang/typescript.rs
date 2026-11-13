@@ -320,6 +320,10 @@ impl<'a> Extractor<'a> {
         let doc = self
             .doc(decl.anchor)
             .or_else(|| self.overload_docs.remove(&qualified(scope, &name)));
+        let (body, body_lines) = node
+            .child_by_field_name("body")
+            .map(|b| body_tokens(b, self.source, token_class))
+            .unwrap_or_default();
         let record = FunctionRecord {
             language: self.language,
             name,
@@ -329,10 +333,8 @@ impl<'a> Extractor<'a> {
             exported: decl.exported,
             location: self.location(decl.anchor, node),
             doc,
-            body: node
-                .child_by_field_name("body")
-                .map(|b| body_tokens(b, self.source, token_class))
-                .unwrap_or_default(),
+            body,
+            body_lines,
         };
         self.records.push(Record::Function(record));
     }
@@ -1294,7 +1296,7 @@ mod tests {
             vec![
                 text("{"),
                 text("return"),
-                Token::Identifier,
+                Token::Identifier(token_hash("user")),
                 text("."),
                 text("name"),
                 text("+"),
@@ -1309,7 +1311,9 @@ mod tests {
         let records = run("function g() { return { id, label: `${user.name}!` }; }");
         let body = &functions(&records)[0].body;
         assert!(body.contains(&text("id")) && body.contains(&text("name")));
-        assert!(!body.contains(&text("user")) && body.contains(&Token::Identifier));
+        assert!(
+            !body.contains(&text("user")) && body.contains(&Token::Identifier(token_hash("user")))
+        );
         let arrow = run("const g = (a) => a.b;\ndeclare function h(): void;");
         assert_eq!(functions(&arrow)[0].body.len(), 3);
         assert!(functions(&arrow)[1].body.is_empty());

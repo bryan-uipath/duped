@@ -29,12 +29,16 @@ pub struct FunctionRecord {
     /// Body tokens in source order, comments dropped; empty for languages without a tokenizer.
     #[serde(skip)]
     pub body: Vec<Token>,
+    /// Each body token's 1-based line.
+    #[serde(skip)]
+    pub body_lines: Vec<u32>,
 }
 
-/// One body token: identifiers are abstracted, everything else is kept by text.
+/// One body token: an identifier, which analyses may abstract, or anything else by text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
-    Identifier,
+    /// [`token_hash`] of the name.
+    Identifier(u32),
     /// [`token_hash`] of a keyword, operator, punctuation, property name or literal.
     Text(u32),
 }

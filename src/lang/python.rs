@@ -201,6 +201,7 @@ impl<'a> Extractor<'a> {
             location: self.location(def.anchor, def.node),
             doc: self.docstring(def.node),
             body: Vec::new(),
+            body_lines: Vec::new(),
         };
         self.records.push(Record::Function(record));
     }

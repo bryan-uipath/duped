@@ -128,7 +128,56 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
-fn groups_rank_by_agreeing_analyses_then_finding_count() {
+fn same_file_type_pairs_count_one_side() {
+    // Two 6-line interfaces with the same fields in one file: one copy is removable, not both.
+    let root = temp("same-file");
+    let shape = |name: &str| {
+        format!(
+            "export interface {name} {{\n  id: string;\n  label: string;\n  owner: string;\n  status: string;\n}}\n"
+        )
+    };
+    write(
+        &root,
+        "a/types.ts",
+        &format!("{}{}", shape("Alpha"), shape("Beta")),
+    );
+    write(&root, "b/other.ts", "export const unrelated = 1;\n");
+    let report = json(&root, &[]);
+    let same: Vec<&Value> = groups(&report)
+        .iter()
+        .filter(|g| g["a"] == g["b"])
+        .collect();
+    assert_eq!(same.len(), 1, "{report}");
+    assert_eq!(same[0]["removableLines"], 6);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn identical_copies_count_once_each() {
+    // Three identical files: two pairs with the first, not three, and not y ~ z from `bodies`.
+    let root = temp("copies");
+    for dir in ["x", "y", "z"] {
+        write(
+            &root,
+            &format!("{dir}/list.ts"),
+            &LIST.replace("NAME", "uniqueItems"),
+        );
+    }
+    let report = json(&root, &[]);
+    let pairs: Vec<(&str, &str)> = groups(&report)
+        .iter()
+        .map(|g| (g["a"].as_str().unwrap(), g["b"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![("x/list.ts", "y/list.ts"), ("x/list.ts", "z/list.ts")]
+    );
+    assert_eq!(report["removableLines"], 22);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let root = temp("rank");
     // `p/`: two functions copied under new names (bodies only: 2 pairs and the file pair).
     let p = |a, b| format!("{}{}", RETRY.replace("NAME", a), TOTALS.replace("NAME", b));
@@ -140,8 +189,20 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     // `r/`: one copied function (bodies, one finding).
     write(&root, "r/one.ts", &LIST.replace("NAME", "uniqueItems"));
     write(&root, "r/two.ts", &LIST.replace("NAME", "dedupeRows"));
+    // `s/`: an identical 12-line file, with CRLF line ends in one copy (files only).
+    let table: String = (0..12)
+        .map(|i| format!("export const LIMIT_{i} = {i};\n"))
+        .collect();
+    write(&root, "s/one.ts", &table);
+    write(&root, "s/two.ts", &table.replace('\n', "\r\n"));
 
     let report = json(&root, &[]);
+    let removable: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(removable, vec![22, 12, 11, 1]);
+    assert_eq!(report["removableLines"], 46);
     let summary: Vec<(&str, Vec<&str>, usize)> = groups(&report)
         .iter()
         .map(|g| {
@@ -156,20 +217,21 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
     assert_eq!(
         summary,
         vec![
-            ("q/one.ts", vec!["names", "types"], 2),
             ("p/one.ts", vec!["bodies"], 3),
+            ("s/one.ts", vec!["files"], 1),
             ("r/one.ts", vec!["bodies"], 1),
+            ("q/one.ts", vec!["names", "types"], 2),
         ]
     );
     // Within a group, by each analysis's rank: the file pair sums its functions' shingles.
-    let kinds: Vec<&str> = report["groups"][1]["findings"]
+    let kinds: Vec<&str> = report["groups"][0]["findings"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| f["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, vec!["file", "function", "function"]);
-    let order = &report["groups"][0]["findings"];
+    let order = &report["groups"][3]["findings"];
     assert_eq!(order[0]["detector"], "names");
     assert_eq!(
         order[0]["evidence"],
@@ -185,15 +247,88 @@ fn groups_rank_by_agreeing_analyses_then_finding_count() {
 
     let text = text(&root);
     assert!(
-        text.starts_with("3 file pairs (bodies 4; imports 0; names 1; types 1).\n"),
+        text.starts_with(
+            "4 file pairs and 0 helper groups, ~46 removable lines (bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
+        ),
         "{text}"
     );
-    assert!(text.contains("\n1. names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"));
+    assert!(text.contains(
+        "\n4. ~1 removable lines, names + types: 2 findings\n   q/one.ts\n   q/two.ts\n"
+    ));
+    assert!(
+        text.contains("   - files file: identical, 12 lines"),
+        "{text}"
+    );
     assert!(
         text.contains("   - bodies file: 2 function pairs"),
         "{text}"
     );
     assert!(text.contains("(uniqueItems:1 ~ dedupeRows:1)"), "{text}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn helper_groups_rank_apart_and_skip_copies_in_identical_files() {
+    let root = temp("helpers");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/core/package.json",
+        r#"{"name":"@demo/core"}"#,
+    );
+    write(
+        &root,
+        "packages/web/package.json",
+        r#"{"name":"@demo/web","dependencies":{"@demo/core":"workspace:*"}}"#,
+    );
+    let guard = "export function NAME(value: unknown): value is Record<string, unknown> {\n  return typeof value === 'object' && value !== null && !Array.isArray(value);\n}\n";
+    write(
+        &root,
+        "packages/core/a.ts",
+        &guard.replace("NAME", "isRecord"),
+    );
+    // `web/p.ts` is an identical copy of `core/p.ts`: its helper is counted with the file,
+    // so the group is left in one module, with no cross-module home.
+    let padded = format!(
+        "{}{}",
+        guard.replace("NAME", "isPlain"),
+        (0..10)
+            .map(|i| format!("export const N{i} = {i};\n"))
+            .collect::<String>()
+    );
+    write(&root, "packages/core/p.ts", &padded);
+    write(&root, "packages/web/p.ts", &padded);
+
+    let report = json(&root, &[]);
+    assert_eq!(report["helperGroups"], 1);
+    assert_eq!(report["detectors"]["helpers"]["total"], 1);
+    let group = &report["helpers"][0];
+    let files: Vec<&str> = group["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, vec!["packages/core/a.ts", "packages/core/p.ts"]);
+    assert_eq!(group["removableLines"], 3);
+    assert_eq!(group["modules"], serde_json::json!(["@demo/core"]));
+    assert_eq!(group["home"], Value::Null);
+    // The identical file's 13 lines, plus 1 of 2 helper copies.
+    assert_eq!(report["removableLines"], 16);
+
+    let text = text(&root);
+    assert!(
+        text.contains("1 file pairs and 1 helper groups, ~16 removable lines"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nIdentical helpers:\n\n1. 2 copies in @demo/core, ~3 removable lines: isPlain, isRecord\n   [@demo/core] isRecord  packages/core/a.ts:1\n"),
+        "{text}"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 

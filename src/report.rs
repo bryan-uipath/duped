@@ -10,11 +10,13 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use crate::analysis::bodies::{BodyReport, file_shared, function_at};
+use crate::analysis::bodies::{BodyReport, file_shared, function_at, kind_text};
+use crate::analysis::files::IdenticalFiles;
+use crate::analysis::helpers::{HelperGroup, render_groups};
 use crate::analysis::imports::{FileImports, ImportReport};
 use crate::analysis::names::NameReport;
-use crate::analysis::pair_notes;
 use crate::analysis::types::TypeReport;
+use crate::analysis::{Judge, pair_notes};
 use crate::modules::{self, Tag};
 use crate::record::{Record, qualified};
 
@@ -32,8 +34,14 @@ pub struct Report {
     pub detectors: BTreeMap<&'static str, Status>,
     /// Groups before `--top`.
     pub file_pairs: usize,
+    /// Helper groups before `--top`.
+    pub helper_groups: usize,
+    /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
+    pub removable_lines: usize,
     pub truncated: bool,
     pub groups: Vec<Group>,
+    /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
+    pub helpers: Vec<HelperGroup>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +59,7 @@ pub enum Status {
 
 /// Findings on one unordered file pair; `a` sorts first.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Group {
     pub a: String,
     pub b: String,
@@ -61,6 +70,8 @@ pub struct Group {
     pub detectors: Vec<&'static str>,
     /// The first tagged finding's tag.
     pub tag: Option<Tag>,
+    /// Estimated lines one copy loses if the pair is merged; groups sort by it.
+    pub removable_lines: usize,
     /// Highest rank first.
     pub findings: Vec<Finding>,
 }
@@ -78,6 +89,22 @@ pub struct Finding {
     /// The analysis's own ranking score, e.g. shared shingles for `bodies`.
     #[serde(skip)]
     rank: f64,
+    #[serde(skip)]
+    span: Span,
+}
+
+/// The lines a finding covers, for its group's `removable_lines`.
+enum Span {
+    None,
+    /// Identical files of this many lines.
+    Whole(usize),
+    /// Each side's line range, inclusive, and its weight: a declaration scaled by similarity,
+    /// or a body region by its density.
+    Lines {
+        a: (usize, usize),
+        b: (usize, usize),
+        weight: f64,
+    },
 }
 
 #[derive(Serialize)]
@@ -88,6 +115,9 @@ pub struct Side {
     pub line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The shared region's first and last lines, for `contained` and `block` bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<(usize, usize)>,
 }
 
 impl Report {
@@ -98,13 +128,28 @@ impl Report {
         base: Option<&str>,
         changed: Option<HashSet<String>>,
         analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
+        helpers: Result<Vec<HelperGroup>, String>,
         top: usize,
     ) -> Self {
+        // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
+        // rest among themselves, which would count the same copy twice.
+        let first_of: HashMap<String, String> = analyses
+            .iter()
+            .filter(|(name, _)| *name == "files")
+            .flat_map(|(_, result)| result.iter().flatten())
+            .map(|f| (f.b.file.clone(), f.a.file.clone()))
+            .collect();
+        let copies = |f: &Finding| {
+            first_of
+                .get(&f.a.file)
+                .is_some_and(|first| first_of.get(&f.b.file) == Some(first))
+        };
         let mut detectors = BTreeMap::new();
         let mut kept = Vec::new();
         for (name, result) in analyses {
             let status = match result {
                 Ok(found) => {
+                    let found: Vec<Finding> = found.into_iter().filter(|f| !copies(f)).collect();
                     let total = found.len();
                     let touches = |f: &Finding| {
                         changed
@@ -122,9 +167,37 @@ impl Report {
             };
             detectors.insert(name, status);
         }
+        let mut kept_helpers = Vec::new();
+        let status = match helpers {
+            Ok(found) => {
+                let total = found.len();
+                for mut h in found {
+                    for m in &mut h.members {
+                        m.changed = changed.as_ref().is_some_and(|f| f.contains(&m.file));
+                    }
+                    if changed.is_none() || h.members.iter().any(|m| m.changed) {
+                        kept_helpers.push(h);
+                    }
+                }
+                Status::Ok {
+                    total,
+                    kept: kept_helpers.len(),
+                }
+            }
+            Err(error) => Status::Failed { error },
+        };
+        detectors.insert("helpers", status);
+
         let mut groups = group_by_file_pair(kept, changed.as_ref());
         let file_pairs = groups.len();
+        let helper_groups = kept_helpers.len();
+        let removable_lines = groups.iter().map(|g| g.removable_lines).sum::<usize>()
+            + kept_helpers
+                .iter()
+                .map(|h| h.removable_lines)
+                .sum::<usize>();
         groups.truncate(top);
+        kept_helpers.truncate(top);
         Report {
             directory,
             mode: if changed.is_some() { "diff" } else { "all" },
@@ -132,14 +205,17 @@ impl Report {
             changed_files: changed.as_ref().map(HashSet::len),
             detectors,
             file_pairs,
-            truncated: file_pairs > top,
+            helper_groups,
+            removable_lines,
+            truncated: file_pairs > top || helper_groups > top,
             groups,
+            helpers: kept_helpers,
         }
     }
 }
 
 /// Runs one analysis; an error or panic fails only it, as a crashed subprocess would.
-pub fn attempt(run: impl FnOnce() -> Result<Vec<Finding>>) -> Result<Vec<Finding>, String> {
+pub fn attempt<T>(run: impl FnOnce() -> Result<T>) -> Result<T, String> {
     match catch_unwind(AssertUnwindSafe(run)) {
         Ok(result) => result.map_err(|err| format!("{err:#}")),
         Err(panic) => Err(panic
@@ -156,20 +232,34 @@ pub fn attempt(run: impl FnOnce() -> Result<Vec<Finding>>) -> Result<Vec<Finding
 pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
     let pairs = report.pairs.iter().map(|p| {
         let tokens = |i| function_at(records, i).body.len();
+        let (mut a, mut b) = (side(&records[p.a]), side(&records[p.b]));
+        // Only the shared region would be removed.
+        let span = match p.region {
+            Some(r) => {
+                (a.region, b.region) = (Some(r.a), Some(r.b));
+                Span::Lines {
+                    a: r.a,
+                    b: r.b,
+                    weight: r.density,
+                }
+            }
+            None => lines(&records[p.a], &records[p.b], p.similarity),
+        };
         Finding {
             detector: "bodies",
             kind: "function",
             tag: p.tag.clone(),
-            a: side(&records[p.a]),
-            b: side(&records[p.b]),
+            a,
+            b,
             evidence: format!(
-                "{} similar, {} shared shingles ({}/{} tokens)",
-                round(p.similarity),
+                "{}, {} shared shingles ({}/{} tokens)",
+                kind_text(p),
                 p.shared,
                 tokens(p.a),
                 tokens(p.b)
             ),
             rank: p.shared as f64,
+            span,
         }
     });
     let files = report.files.iter().map(|f| {
@@ -182,6 +272,7 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
             b: file_side(&f.b),
             evidence: format!("{} function pairs, {shared} shared shingles", f.pairs.len()),
             rank: shared as f64,
+            span: Span::None,
         }
     });
     pairs.chain(files).collect()
@@ -206,6 +297,7 @@ pub fn imports(files: &[FileImports], report: &ImportReport) -> Vec<Finding> {
                     shown.join(", ")
                 ),
                 rank: p.rare as f64,
+                span: Span::None,
             }
         })
         .collect()
@@ -244,6 +336,7 @@ pub fn names(records: &[Record], report: &NameReport) -> Vec<Finding> {
                 b: file_side(&p.b),
                 evidence: shown.join(", "),
                 rank: p.score,
+                span: Span::None,
             }
         })
         .collect()
@@ -271,9 +364,39 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                     shown.join(", ")
                 ),
                 rank: p.similarity,
+                span: lines(&records[p.a], &records[p.b], p.similarity),
             }
         })
         .collect()
+}
+
+/// Each identical group as pairs from its first file, so `n` copies count `n - 1` times.
+pub fn files(paths: &[&str], groups: &[IdenticalFiles], judge: &dyn Judge) -> Vec<Finding> {
+    groups
+        .iter()
+        .flat_map(|g| {
+            let first = g.files[0];
+            g.files[1..].iter().map(move |&other| Finding {
+                detector: "files",
+                kind: "file",
+                tag: judge.tag(first, other),
+                a: file_side(paths[first]),
+                b: file_side(paths[other]),
+                evidence: format!("identical, {} lines", g.lines),
+                rank: g.lines as f64,
+                span: Span::Whole(g.lines),
+            })
+        })
+        .collect()
+}
+
+fn lines(a: &Record, b: &Record, weight: f64) -> Span {
+    let range = |r: &Record| (r.location().start_line, r.location().end_line);
+    Span::Lines {
+        a: range(a),
+        b: range(b),
+        weight,
+    }
 }
 
 fn side(record: &Record) -> Side {
@@ -281,6 +404,7 @@ fn side(record: &Record) -> Side {
         file: record.location().file.clone(),
         line: Some(record.location().start_line),
         name: Some(qualified(record.scope(), record.name())),
+        region: None,
     }
 }
 
@@ -289,6 +413,7 @@ fn file_side(file: &str) -> Side {
         file: file.to_string(),
         line: None,
         name: None,
+        region: None,
     }
 }
 
@@ -316,6 +441,7 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
                 changed: None,
                 detectors: Vec::new(),
                 tag: None,
+                removable_lines: 0,
                 findings: Vec::new(),
             });
             groups.len() - 1
@@ -331,6 +457,7 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
     }
     for g in &mut groups {
         g.detectors.sort_unstable();
+        g.removable_lines = removable_lines(g);
         g.findings.sort_by(|x, y| y.rank.total_cmp(&x.rank));
         g.changed = changed.map(|c| {
             [&g.a, &g.b]
@@ -341,12 +468,44 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&HashSet<String>>)
         });
     }
     groups.sort_by(|x, y| {
-        y.detectors
-            .len()
-            .cmp(&x.detectors.len())
+        y.removable_lines
+            .cmp(&x.removable_lines)
+            .then(y.detectors.len().cmp(&x.detectors.len()))
             .then(y.findings.len().cmp(&x.findings.len()))
     });
     groups
+}
+
+/// The whole file when identical; else the smaller side's matched lines, each line counted
+/// once at the best similarity covering it, so nested or repeated matches aren't summed twice.
+fn removable_lines(group: &Group) -> usize {
+    let whole = group.findings.iter().filter_map(|f| match f.span {
+        Span::Whole(lines) => Some(lines),
+        _ => None,
+    });
+    if let Some(lines) = whole.max() {
+        return lines;
+    }
+    // Keyed by group side (0 = `a`), not file, so a same-file pair keeps two sides.
+    let mut best: HashMap<(usize, usize), f64> = HashMap::new();
+    for f in &group.findings {
+        if let Span::Lines { a, b, weight } = f.span {
+            let (a, b) = if f.a.file == group.a { (a, b) } else { (b, a) };
+            for (side, (start, end)) in [(0, a), (1, b)] {
+                for line in start..=end {
+                    let value = best.entry((side, line)).or_default();
+                    *value = value.max(weight);
+                }
+            }
+        }
+    }
+    let total = |side: usize| -> f64 {
+        best.iter()
+            .filter(|((s, _), _)| *s == side)
+            .map(|(_, v)| v)
+            .sum()
+    };
+    total(0).min(total(1)).round() as usize
 }
 
 // ----- changed files -----
@@ -486,14 +645,18 @@ pub fn render_text(report: &Report) -> String {
     match (&report.base, report.changed_files) {
         (Some(base), Some(changed)) => writeln!(
             out,
-            "{} file pairs touching {changed} files changed since {base} ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines, touching {changed} files changed since {base} ({}).",
             report.file_pairs,
+            report.helper_groups,
+            report.removable_lines,
             counts.join("; ")
         ),
         _ => writeln!(
             out,
-            "{} file pairs ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines ({}).",
             report.file_pairs,
+            report.helper_groups,
+            report.removable_lines,
             counts.join("; ")
         ),
     }
@@ -501,8 +664,9 @@ pub fn render_text(report: &Report) -> String {
     for (rank, group) in report.groups.iter().enumerate() {
         writeln!(
             out,
-            "\n{}. {}: {} findings{}",
+            "\n{}. ~{} removable lines, {}: {} findings{}",
             rank + 1,
+            group.removable_lines,
             group.detectors.join(" + "),
             group.findings.len(),
             pair_notes(&group.tag, &None)
@@ -517,14 +681,18 @@ pub fn render_text(report: &Report) -> String {
             writeln!(out, "   {file}{changed}").ok();
         }
         for f in &group.findings {
-            // Sides in the group's order, e.g. ` (loadUser:12 ~ fetchUser:30)`.
+            // Sides in the group's order, e.g. ` (loadUser:12 ~ fetchUser:30-48)`.
             let (a, b) = if f.a.file == group.a {
                 (&f.a, &f.b)
             } else {
                 (&f.b, &f.a)
             };
-            let members = match (&a.name, a.line, &b.name, b.line) {
-                (Some(an), Some(al), Some(bn), Some(bl)) => format!(" ({an}:{al} ~ {bn}:{bl})"),
+            let at = |s: &Side| match s.region {
+                Some((start, end)) => format!("{start}-{end}"),
+                None => s.line.map(|l| l.to_string()).unwrap_or_default(),
+            };
+            let members = match (&a.name, &b.name) {
+                (Some(an), Some(bn)) => format!(" ({an}:{} ~ {bn}:{})", at(a), at(b)),
                 _ => String::new(),
             };
             writeln!(
@@ -535,7 +703,7 @@ pub fn render_text(report: &Report) -> String {
             .ok();
         }
     }
-    if report.truncated {
+    if report.file_pairs > report.groups.len() {
         writeln!(
             out,
             "\n… {} more file pairs; raise --top to see them.",
@@ -543,5 +711,6 @@ pub fn render_text(report: &Report) -> String {
         )
         .ok();
     }
+    out.push_str(&render_groups(&report.helpers, report.helper_groups));
     out
 }

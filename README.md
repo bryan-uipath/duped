@@ -19,6 +19,7 @@ duped extract [DIR] [--out records.jsonl]   # every top-level function and type,
 duped index [DIR] [--out api-index.md]      # greppable markdown summary, one section per file
 duped types [DIR]                           # types that share most of their properties
 duped bodies [DIR]                          # functions whose bodies are near-copies (TypeScript/JavaScript, Rust)
+duped helpers [DIR]                         # small helpers copied with identical bodies, and drifted same-name ones
 duped imports [DIR]                         # TS/JS files that import the same rare things
 duped names [DIR]                           # file pairs that declare the same names
 duped report [DIR] [--base REF]             # every analysis, grouped by file pair
@@ -122,13 +123,14 @@ Every pair is evidence, not a verdict. Read both types before consolidating them
 - **Tokens:** each body's tokens, with comments dropped and every identifier (local or not) replaced by one placeholder, including those inside template `${…}`. Keywords, operators, property names (shorthand `{ id }` too) and literals are kept, so lookup tables with the same `switch` shape but different labels don't match.
 - **similarity:** Jaccard similarity of the two bodies' token shingles (runs of `--shingle` tokens). Repeated shingles count separately, so a ten-case `switch` doesn't match a three-case one.
 - **shared:** shingles both bodies have, roughly the number of duplicated tokens. Pairs are ranked by it, so a large near-copy outranks a small exact one.
-- **Files sharing several functions:** two files linked by pairs between at least two functions on each side, ranked by total shared. These are usually copied modules rather than one copied helper.
+- **kind:** `similar` at the threshold; otherwise `contained` (one shared region spans at least 80% of one body, such as a wrapper or an inlined helper) or `block` (a shared region of at least 100 shingles, about 15 lines, such as a block pasted into two large functions). A region chains runs of equal shingles in order on both sides, bridging up to 10 unshared ones, and needs at least 60% of its span shared; each side's region lines are printed (`a.ts:120-150`) and are what `report` counts as removable.
+- **Files sharing several functions:** two files linked by `similar` pairs between at least two functions on each side, ranked by total shared. These are usually copied modules rather than one copied helper.
 
-Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time; each candidate's similarity is then computed exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
+Candidate pairs come from MinHash signatures with LSH banding, tuned to find a pair at the threshold 99% of the time, and from an inverted index: pairs sharing at least 20 shingles that are each in at most 10 bodies. Either source can give a `similar` pair, so it finds a few that LSH alone misses; only index pairs can be `contained` or `block`, so idioms and boilerplate repeated across many functions don't link them. Each candidate is then scored exactly. Pairs are tagged and acknowledged as for `types` (below), except that same-module pairs are shown; same-file pairs are hidden instead.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--threshold` | `0.5` | minimum similarity |
+| `--threshold` | `0.5` | minimum similarity for `similar` |
 | `--shingle` | `5` | tokens per shingle |
 | `--min-tokens` | `50` | skip smaller bodies |
 | `--top` | `40` | file pairs and function pairs to show |
@@ -136,7 +138,25 @@ Candidate pairs come from MinHash signatures with LSH banding, tuned to find a p
 | `--cross-language` | off | also pair functions in different languages (TypeScript and JavaScript count as one) |
 | `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
 
-`--json` prints every pair and file pair.
+`--json` prints every pair and file pair; each pair has `kind` and `region: { a: [start, end], b: [start, end] }` (`null` for `similar`).
+
+### Finding copied helpers
+
+`duped bodies` skips bodies under 50 tokens, so a one-line `isRecord` copied into 30 files is invisible there. `duped helpers` groups top-level functions of 8–49 body tokens whose bodies are identical after normalising, N copies at a time. TypeScript, JavaScript and Rust.
+
+- **Normalising:** plain parameters become their position, so `isRec(v)` and `isRecord(value)` match; a destructured parameter keeps its keys by name, since callers pass those names. Every other identifier keeps its name too, so two `<XContext.Provider>` wrappers don't. Text naming a parameter, such as shorthand `{ x }`, also records which parameter, so `{ x }` from the first parameter doesn't match `{ x }` from the second. `{ return x; }` counts as `x`, like an arrow function's expression body. Literals and property names are kept. Methods are skipped.
+- **removableLines:** every copy's lines but the longest one's. Groups rank by it.
+- **home:** where the one kept copy could live, chosen as for a `types` cluster; `none` when no module is reachable from all of them.
+- **Same name, different bodies:** a name with 3 or more small definitions, at least 2 bodies and one body copied at least twice: a helper whose copies drifted. Names whose definitions all differ (`run`, `parse`) are conventions and are left out.
+- A copy acknowledged against its group's first member is hidden from groups (there is no flag to show it); families ignore acknowledgements.
+- **Gap:** the 49-token limit applies to the raw body, but matching uses the normalised one, so `function f(x) { return E; }` with 50–53 raw tokens isn't a helper, while its arrow twin `x => E` is, and `bodies` skips the arrow. Such a pair falls between the two.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--min-tokens` | `8` | skip smaller (normalised) bodies; tiny ones like `x.id` match everywhere |
+| `--top` | `40` | groups and families to show |
+
+`--json` prints `{ summary, groups, families }`; each group has `members` (`name`, `module`, `file`, `line`, `lines`, `tokens`), `removableLines`, `modules` and `home`, each family `name`, `definitions` and `variants` (members per body, largest first).
 
 ### Finding ported files by their imports
 
@@ -180,13 +200,13 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 ### Running every analysis at once
 
-`duped report` runs `bodies`, `imports`, `names` and `types` with their defaults (and `duped.toml`), over one walk and one module graph, and groups their pairs by file pair. A file pair found by several analyses is most likely a ported module, so groups are ranked by how many analyses found them, then by how many findings they have. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
+`duped report` runs `bodies`, `helpers`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files` ignores acknowledgements. The header totals it across all file pairs and helper groups, so code copied into three or more files (other than whole identical files or helpers) counts once per pair. `helpers` groups span any number of files, so they are listed after the file pairs, ranked by their own `removableLines`; a copy inside a non-first identical file is dropped, since the file already counts, and `bodies` only compares larger functions, so no line counts twice. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
 
 - `--base <ref>` keeps only file pairs with a side added, modified or renamed since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`. It needs git; without it, git isn't used.
-- `--top` (default `40`) limits the file pairs shown, in `--json` too; `filePairs` and `truncated` say how many there were.
+- `--top` (default `40`) limits the file pairs and helper groups shown, in `--json` too; `filePairs`, `helperGroups` and `truncated` say how many there were.
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
-`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, truncated, groups }`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`.
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, removableLines, truncated, groups, helpers }`. `helpers` are groups as `duped helpers --json` prints them, each member also `changed` with `--base`; with `--base` a group is kept when a member changed. `truncated` is true when either file pairs or helper groups exceed `--top`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`; a `contained` or `block` side also has `region: [start, end]`.
 
 ### Finding duplicate functions
 
@@ -263,11 +283,11 @@ done
 | --- | --- |
 | `importable` | one side's module already depends on the other's: `vsix can import @x/core` |
 | `importable-indirect` | it depends on it only through other modules; add a direct dependency first |
-| `move-down` | neither depends on the other, but both depend on a lower module that could hold one copy |
+| `move-down` | neither depends on the other, but both depend on `home`: the lowest common dependency that declares every package the copies' files import (a package no module declares, such as `node:fs` or a path alias, doesn't count); when none does, the one missing fewest, with `missing` listing the rest |
 | `boundary` | no dependency path either way, or both sides are under no module; often deliberate |
 | `same-module` | both in one module; hidden unless `--include-same-module` |
 
-Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else the lowest module they all depend on.
+Clusters are ranked by their most actionable pair: `importable` first, then `importable-indirect`, `move-down` and `boundary`. Each cluster also names a home when there is one: a member's module that every other member can import, or else a module they all depend on, chosen as for `move-down`.
 
 Modules come from manifests under the project root:
 

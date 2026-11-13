@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use crate::analysis::{Judge, Verdict};
 use crate::config::Acknowledged;
+use crate::lang::imported_packages;
 use crate::modules::{Home, ModuleGraph, ROOT_MODULE, Tag};
 use crate::record::{Record, qualified};
+use crate::walk::{SourceFile, language_for};
 
 /// Doc phrases that mark a copy as deliberate, matched case-insensitively.
 const DELIBERATE: &[&str] = &[
@@ -34,6 +36,51 @@ pub struct ProjectJudge<'a> {
     base: PathBuf,
     /// Leading comment of each file, lower-cased, read on first use.
     headers: RefCell<HashMap<String, String>>,
+    packages: Packages,
+}
+
+/// Packages each file imports, read on first use: what a move-down home must declare.
+struct Packages {
+    base: PathBuf,
+    cache: RefCell<HashMap<String, Vec<String>>>,
+}
+
+impl Packages {
+    fn new(base: &Path) -> Self {
+        Packages {
+            base: base.to_path_buf(),
+            cache: RefCell::default(),
+        }
+    }
+
+    /// Packages `sides` (files relative to `base`, with their modules) import that their own
+    /// module declares, sorted. An undeclared import, like Node's `events`, is a built-in or
+    /// a hoisted package, so a home needn't declare it either.
+    fn of(&self, graph: &ModuleGraph, sides: &[(&str, Option<usize>)]) -> Vec<String> {
+        let mut all: Vec<String> = Vec::new();
+        for &(file, module) in sides {
+            let mut cache = self.cache.borrow_mut();
+            let packages = cache.entry(file.to_string()).or_insert_with(|| {
+                let path = self.base.join(file);
+                language_for(&path).map_or_else(Vec::new, |language| {
+                    imported_packages(&SourceFile {
+                        path,
+                        rel: file.to_string(),
+                        language,
+                    })
+                })
+            });
+            all.extend(
+                packages
+                    .iter()
+                    .filter(|p| module.is_some_and(|m| graph.declares(m, p)))
+                    .cloned(),
+            );
+        }
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
 }
 
 impl<'a> ProjectJudge<'a> {
@@ -68,6 +115,7 @@ impl<'a> ProjectJudge<'a> {
             tagging: spanned.len() >= 2,
             noun,
             acknowledged,
+            packages: Packages::new(&base),
             base,
             headers: RefCell::default(),
         }
@@ -175,8 +223,11 @@ impl Judge for ProjectJudge<'_> {
     }
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
-        self.tagging
-            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
+        self.tagging.then(|| {
+            let sides = [a, b].map(|i| (self.records[i].location().file.as_str(), self.modules[i]));
+            let needs = self.packages.of(self.graph, &sides);
+            self.graph.tag(self.modules[a], self.modules[b], &needs)
+        })
     }
 
     fn module(&self, record: usize) -> Option<&str> {
@@ -188,7 +239,12 @@ impl Judge for ProjectJudge<'_> {
             return None;
         }
         let modules: Vec<Option<usize>> = members.iter().map(|&m| self.modules[m]).collect();
-        self.graph.home(&modules)
+        let sides: Vec<(&str, Option<usize>)> = members
+            .iter()
+            .map(|&m| (self.records[m].location().file.as_str(), self.modules[m]))
+            .collect();
+        self.graph
+            .home(&modules, &self.packages.of(self.graph, &sides))
     }
 
     fn summary(&self) -> Option<String> {
@@ -210,6 +266,8 @@ impl Judge for ProjectJudge<'_> {
 pub struct FileJudge<'a> {
     graph: &'a ModuleGraph,
     modules: Vec<Option<usize>>,
+    files: Vec<String>,
+    packages: Packages,
     /// As for [`ProjectJudge`]: the scanned files must span at least two modules.
     tagging: bool,
 }
@@ -221,8 +279,9 @@ impl<'a> FileJudge<'a> {
         base: &Path,
         files: impl IntoIterator<Item = &'f str>,
     ) -> Self {
+        let files: Vec<String> = files.into_iter().map(str::to_string).collect();
         let modules: Vec<Option<usize>> = files
-            .into_iter()
+            .iter()
             .map(|f| graph.module_of(&base.join(f)))
             .collect();
         let spanned: HashSet<Option<usize>> = modules.iter().copied().collect();
@@ -230,6 +289,8 @@ impl<'a> FileJudge<'a> {
             graph,
             tagging: spanned.len() >= 2,
             modules,
+            files,
+            packages: Packages::new(base),
         }
     }
 }
@@ -243,8 +304,11 @@ impl Judge for FileJudge<'_> {
     }
 
     fn tag(&self, a: usize, b: usize) -> Option<Tag> {
-        self.tagging
-            .then(|| self.graph.tag(self.modules[a], self.modules[b]))
+        self.tagging.then(|| {
+            let sides = [a, b].map(|i| (self.files[i].as_str(), self.modules[i]));
+            let needs = self.packages.of(self.graph, &sides);
+            self.graph.tag(self.modules[a], self.modules[b], &needs)
+        })
     }
 
     fn module(&self, file: usize) -> Option<&str> {
@@ -374,12 +438,14 @@ mod tests {
                 root: "/repo/canvas".into(),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "@x/unified-evals".into(),
                 root: "/repo/evals".into(),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ])
     }
@@ -453,12 +519,14 @@ mod tests {
                 root: base.join("canvas"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "@x/unified-evals".into(),
                 root: base.join("evals"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ]);
         let judge = ProjectJudge::new(&g, &records, base, &[], "types", is_type);
@@ -487,6 +555,7 @@ mod tests {
                 },
                 doc: None,
                 body: Vec::new(),
+                body_lines: Vec::new(),
             })
         };
         let g = graph();
@@ -516,11 +585,49 @@ mod tests {
             root: "/repo".into(),
             deps: vec![],
             aliases: Vec::new(),
+            external: Vec::new(),
         }]);
         let records = vec![ty("A", "a.ts", None), ty("B", "b.ts", None)];
         let judge = ProjectJudge::new(&g, &records, "/repo".into(), &[], "types", is_type);
         assert_eq!(judge.verdict(0, 1).tag, None);
         assert_eq!(judge.module(0), None);
+    }
+
+    #[test]
+    fn homes_ignore_imports_the_files_own_module_does_not_declare() {
+        // `a` and `b` import Node's `events`; only `web` declares it (a polyfill).
+        let root = std::env::temp_dir().join(format!("duped-needs-{}", std::process::id()));
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(
+                root.join(dir).join("x.ts"),
+                "import { EventEmitter } from 'events';\n",
+            )
+            .unwrap();
+        }
+        let module = |name: &str, deps: Vec<usize>, external: Vec<String>| Module {
+            name: name.into(),
+            root: root.join(name),
+            deps,
+            aliases: Vec::new(),
+            external,
+        };
+        let g = ModuleGraph::new(vec![
+            module("base", vec![], vec![]),
+            module("web", vec![0], vec!["events".into()]),
+            module("a", vec![0, 1], vec![]),
+            module("b", vec![0, 1], vec![]),
+        ]);
+        let records = vec![ty("A", "a/x.ts", None), ty("B", "b/x.ts", None)];
+        let judge = ProjectJudge::new(&g, &records, root.clone(), &[], "types", is_type);
+        assert_eq!(
+            judge.tag(0, 1),
+            Some(Tag::MoveDown {
+                home: "base".into(),
+                missing: vec![]
+            })
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -603,12 +710,14 @@ mod tests {
                 root: base.join("canvas"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
             Module {
                 name: "e".into(),
                 root: base.join("evals"),
                 deps: vec![],
                 aliases: Vec::new(),
+                external: Vec::new(),
             },
         ]);
         let records = vec![
