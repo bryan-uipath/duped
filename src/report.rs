@@ -788,6 +788,8 @@ pub fn merge_base(dir: &Path, a: &str, b: &str) -> Result<String> {
 fn git(args: &[&str], cwd: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(args)
+        // It overrides `-U0`, e.g. `-u3` adds context lines to every hunk.
+        .env_remove("GIT_DIFF_OPTS")
         .current_dir(cwd)
         .output()
         .context("cannot run git")?;
