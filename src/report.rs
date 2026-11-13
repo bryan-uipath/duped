@@ -58,11 +58,28 @@ pub enum Status {
     Ok {
         total: usize,
         kept: usize,
+        #[serde(skip_serializing_if = "Hidden::is_empty")]
+        hidden: Hidden,
     },
     Failed {
         error: String,
     },
 }
+
+/// Pairs an analysis left out across the scan, by reason, e.g. `sameFile: 16`.
+pub type Hidden = BTreeMap<&'static str, usize>;
+
+/// An analysis's findings and hidden counts, or why it failed.
+pub type Outcome = Result<(Vec<Finding>, Hidden), String>;
+
+/// Each reason's text and the `report` flag that shows its pairs.
+const HIDDEN: [(&str, &str); 5] = [
+    ("sameFile", "same-file (--include-same-file)"),
+    ("sameModule", "same-module (--include-same-module)"),
+    ("acknowledged", "acknowledged"),
+    ("implementations", "implementations of one contract"),
+    ("ambient", "ambient module declarations"),
+];
 
 /// The file pairs between two directories (or within one, `a == b`), from all groups.
 #[derive(Serialize)]
@@ -145,8 +162,8 @@ impl Report {
         directory: String,
         base: Option<&str>,
         changed: Option<Changed>,
-        analyses: Vec<(&'static str, Result<Vec<Finding>, String>)>,
-        helpers: Result<(Vec<HelperGroup>, Vec<Family>), String>,
+        analyses: Vec<(&'static str, Outcome)>,
+        helpers: Result<(Vec<HelperGroup>, Vec<Family>, Hidden), String>,
         top: usize,
     ) -> Self {
         // `n` identical copies are `n - 1` pairs with the first; other analyses also pair the
@@ -154,7 +171,7 @@ impl Report {
         let first_of: HashMap<String, String> = analyses
             .iter()
             .filter(|(name, _)| *name == "files")
-            .flat_map(|(_, result)| result.iter().flatten())
+            .flat_map(|(_, result)| result.iter().flat_map(|(found, _)| found))
             .map(|f| (f.b.file.clone(), f.a.file.clone()))
             .collect();
         let copies = |f: &Finding| {
@@ -166,7 +183,7 @@ impl Report {
         let mut kept = Vec::new();
         for (name, result) in analyses {
             let status = match result {
-                Ok(found) => {
+                Ok((found, hidden)) => {
                     let found: Vec<Finding> = found.into_iter().filter(|f| !copies(f)).collect();
                     let total = found.len();
                     let touches = |f: &Finding| changed.as_ref().is_none_or(|c| c.touches(f));
@@ -185,6 +202,7 @@ impl Report {
                     Status::Ok {
                         total,
                         kept: kept.len() - before,
+                        hidden,
                     }
                 }
                 Err(error) => Status::Failed { error },
@@ -194,7 +212,7 @@ impl Report {
         let mut kept_helpers = Vec::new();
         let mut kept_families = Vec::new();
         let status = match helpers {
-            Ok((found, families)) => {
+            Ok((found, families, hidden)) => {
                 for mut f in families {
                     let mut any = false;
                     for m in f.variants.iter_mut().flatten() {
@@ -217,6 +235,7 @@ impl Report {
                 Status::Ok {
                     total,
                     kept: kept_helpers.len(),
+                    hidden,
                 }
             }
             Err(error) => Status::Failed { error },
@@ -270,7 +289,7 @@ pub fn attempt<T>(run: impl FnOnce() -> Result<T>) -> Result<T, String> {
 // ----- findings -----
 
 /// Function pairs, then files sharing several functions.
-pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
+pub fn bodies(records: &[Record], report: &BodyReport) -> (Vec<Finding>, Hidden) {
     let pairs = report.pairs.iter().map(|p| {
         let tokens = |i| function_at(records, i).body.len();
         let (mut a, mut b) = (side(&records[p.a]), side(&records[p.b]));
@@ -316,11 +335,15 @@ pub fn bodies(records: &[Record], report: &BodyReport) -> Vec<Finding> {
             span: Span::None,
         }
     });
-    pairs.chain(files).collect()
+    let hidden = [
+        ("sameFile", report.hidden_same_file),
+        ("acknowledged", report.hidden_acknowledged),
+    ];
+    (pairs.chain(files).collect(), hidden.into())
 }
 
-pub fn imports(files: &[FileImports], report: &ImportReport) -> Vec<Finding> {
-    report
+pub fn imports(files: &[FileImports], report: &ImportReport) -> (Vec<Finding>, Hidden) {
+    let found = report
         .pairs
         .iter()
         .map(|p| {
@@ -341,11 +364,12 @@ pub fn imports(files: &[FileImports], report: &ImportReport) -> Vec<Finding> {
                 span: Span::None,
             }
         })
-        .collect()
+        .collect();
+    (found, [("sameModule", report.hidden_same_module)].into())
 }
 
-pub fn names(records: &[Record], report: &NameReport) -> Vec<Finding> {
-    report
+pub fn names(records: &[Record], report: &NameReport) -> (Vec<Finding>, Hidden) {
+    let found = report
         .pairs
         .iter()
         .map(|p| {
@@ -380,11 +404,12 @@ pub fn names(records: &[Record], report: &NameReport) -> Vec<Finding> {
                 span: Span::None,
             }
         })
-        .collect()
+        .collect();
+    (found, [("sameModule", report.hidden_same_module)].into())
 }
 
-pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
-    report
+pub fn types(records: &[Record], report: &TypeReport) -> (Vec<Finding>, Hidden) {
+    let found = report
         .pairs
         .iter()
         .map(|p| {
@@ -408,7 +433,14 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                 span: lines(&records[p.a], &records[p.b], p.similarity),
             }
         })
-        .collect()
+        .collect();
+    let hidden = [
+        ("sameModule", report.hidden_same_module),
+        ("acknowledged", report.hidden_acknowledged),
+        ("implementations", report.hidden_implementations),
+        ("ambient", report.hidden_ambient),
+    ];
+    (found, hidden.into())
 }
 
 /// Each identical group as pairs from its first file, so `n` copies count `n - 1` times.
@@ -496,11 +528,14 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&Changed>) -> Vec<
         g.removable_lines = removable_lines(g);
         g.findings.sort_by(|x, y| y.rank.total_cmp(&x.rank));
         g.changed = changed.map(|c| {
-            [&g.a, &g.b]
+            let mut files: Vec<String> = [&g.a, &g.b]
                 .into_iter()
                 .filter(|f| c.file(f))
                 .cloned()
-                .collect()
+                .collect();
+            // A same-file pair has one file.
+            files.dedup();
+            files
         });
     }
     groups.sort_by(|x, y| {
@@ -519,7 +554,8 @@ fn directory_pairs(groups: &[Group]) -> Vec<DirectoryPair> {
         None => ".".to_string(),
     };
     let mut sums: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
-    for g in groups {
+    // A same-file pair links no two files.
+    for g in groups.iter().filter(|g| g.a != g.b) {
         let (a, b) = (dir(&g.a), dir(&g.b));
         let key = if a <= b { (a, b) } else { (b, a) };
         let sum = sums.entry(key).or_default();
@@ -815,7 +851,7 @@ pub fn render_text(report: &Report) -> String {
         .detectors
         .iter()
         .map(|(name, status)| match status {
-            Status::Ok { total, kept } if report.base.is_some() => {
+            Status::Ok { total, kept, .. } if report.base.is_some() => {
                 format!("{name} {kept} of {total}")
             }
             Status::Ok { total, .. } => format!("{name} {total}"),
@@ -841,6 +877,23 @@ pub fn render_text(report: &Report) -> String {
         ),
     }
     .ok();
+    let hidden: Vec<String> = HIDDEN
+        .iter()
+        .filter_map(|(reason, text)| {
+            let count: usize = report
+                .detectors
+                .values()
+                .filter_map(|status| match status {
+                    Status::Ok { hidden, .. } => hidden.get(reason),
+                    Status::Failed { .. } => None,
+                })
+                .sum();
+            (count > 0).then(|| format!("{count} {text}"))
+        })
+        .collect();
+    if !hidden.is_empty() {
+        writeln!(out, "Hidden pairs: {}.", hidden.join(", ")).ok();
+    }
     if !report.directories.is_empty() {
         writeln!(out, "\nDirectories sharing several file pairs:").ok();
     }
@@ -876,8 +929,10 @@ pub fn render_text(report: &Report) -> String {
             pair_notes(&group.tag, &None)
         )
         .ok();
-        for file in [&group.a, &group.b] {
-            let changed = if group.changed.as_ref().is_some_and(|c| c.contains(file)) {
+        // A same-file pair prints its file once.
+        let both = [&group.a, &group.b];
+        for file in &both[..if group.a == group.b { 1 } else { 2 }] {
+            let changed = if group.changed.as_ref().is_some_and(|c| c.contains(*file)) {
                 " (changed)"
             } else {
                 ""

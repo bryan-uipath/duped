@@ -45,7 +45,8 @@ as a ported feature folder; report those as one finding, not one per file.
 Inspect `detectors` statuses and counts (`kept` touches the change, `total` is
 repo-wide), `filePairs`, `helperGroups`, `helperFamilies`, and `truncated` (any list cut by
 `--top`), then select relevant `groups` and `helpers`; avoid dumping the full JSON. Failed detectors are gaps,
-not clean results. `--top` defaults to 40 even for JSON. Expand it when needed
+not clean results. `detectors.<name>.hidden` counts pairs left out across the scan:
+`--include-same-file` and `--include-same-module` show `sameFile` and `sameModule`. `--top` defaults to 40 even for JSON. Expand it when needed
 for coverage or disclose that only the selected groups were reviewed.
 
 ## Reading a finding

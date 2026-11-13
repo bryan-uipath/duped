@@ -47,7 +47,7 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 | `importable-indirect` | `tag.copy` depends on `tag.owner` only through other modules | add the direct dependency, then as above |
 | `move-down` | neither depends on the other; both depend on `tag.home` | move one copy down. `home` is the lowest common dependency declaring the files' package imports; `missing` lists any it lacks. Files' own local imports (`./x`, `@/x`) must move too or be injected |
 | `boundary` | no dependency path either way | often deliberate; flag only real drift |
-| `same-module` | both in `tag.module` (hidden by default except in `bodies`) | consolidate locally |
+| `same-module` | both in `tag.module` (hidden by default except in `bodies`, which hides same-file pairs; `report --include-same-module --include-same-file` shows both) | consolidate locally |
 
 ## Deliberate copies
 

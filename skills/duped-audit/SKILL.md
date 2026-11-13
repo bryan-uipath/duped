@@ -19,7 +19,7 @@ The main noise is directories whose contents are *meant* to repeat each other: e
 duped report <dir> --top 60 --exclude '**/examples' --json > /tmp/duped-audit.json
 ```
 
-`<dir>` can be the repo root or one package. If `truncated` is true, raise `--top` before concluding anything about coverage. For a wider net on one analysis, run it directly, e.g. `duped bodies <dir> --threshold 0.4 --json`.
+`<dir>` can be the repo root or one package. If `truncated` is true, raise `--top` before concluding anything about coverage. Sum `detectors.*.hidden`: when `sameFile` or `sameModule` rival the kept counts, or one module holds most of the code, rerun with `--include-same-file --include-same-module`; a group with `a == b` is duplication inside one file. For a wider net on one analysis, run it directly, e.g. `duped bodies <dir> --threshold 0.4 --json`.
 
 ## 3. Verify
 
