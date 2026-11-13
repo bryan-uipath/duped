@@ -321,7 +321,7 @@ fn groups_rank_by_removable_lines_then_agreeing_analyses() {
     let text = text(&root);
     assert!(
         text.starts_with(
-            "4 file pairs and 0 helper groups, ~46 removable lines (bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
+            "4 file pairs and 0 helper groups, ~46 removable lines (findings: bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
         ),
         "{text}"
     );
@@ -527,6 +527,29 @@ fn directories_skip_one_directory_and_pairs_with_nothing_removable() {
     assert_eq!(lines, vec![11, 11, 0, 0]);
     assert_eq!(report["directories"], serde_json::json!([]));
     assert!(!text(&root).contains("Directories sharing"));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn header_and_directories_count_a_line_once_however_many_pairs_cover_it() {
+    let root = temp("once");
+    // One function in three files: three pairs of 11 lines, but only two copies to remove.
+    write(&root, "a/one.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "a/two.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "b/all.ts", &LIST.replace("NAME", "distinctRows"));
+
+    let report = json(&root, &[]);
+    let lines: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![11, 11, 11]);
+    assert_eq!(report["removableLines"], 22);
+    // Both pairs between `a` and `b` match the same lines of `b/all.ts`.
+    assert_eq!(
+        report["directories"],
+        serde_json::json!([{ "a": "a", "b": "b", "filePairs": 2, "removableLines": 11 }])
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 

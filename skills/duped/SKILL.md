@@ -31,7 +31,8 @@ duped report <root> --json > <temporary-file>               # whole codebase
 The report combines bodies, files (identical copies), imports, names, and types,
 grouped by file pair and ranked by `removableLines`, an estimate of what merging
 the pair removes, then `helpers`: small helpers copied N ways (`isRecord` in 30
-files), ranked apart by their own `removableLines`. The header total covers both.
+files), ranked apart by their own `removableLines`. The header total covers both, counting
+each line once, so it is less than the groups' sum when one file is in many pairs.
 Last, `families`: same-name helpers whose copies drifted (`isRecord`: 28
 definitions, 4 bodies), one list of copies per body.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
