@@ -450,6 +450,8 @@ fn duped(dir: &Path, args: &[&str]) -> Output {
         .arg("report")
         .arg(dir)
         .args(args)
+        // A user's context setting must not widen the changed lines.
+        .env("GIT_DIFF_OPTS", "-u99")
         .output()
         .unwrap()
 }
