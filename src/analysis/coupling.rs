@@ -600,22 +600,26 @@ impl<'a> Tree<'a> {
             if !found.is_empty() {
                 manifests.insert(d.clone(), found);
             }
-            let mut configs: Vec<&String> = names.iter().filter(|n| is_tsconfig(n)).collect();
-            if !configs.is_empty() {
-                // `tsconfig.json` decides; `tsconfig.app.json` and the like fill in.
-                configs.sort_by_key(|n| {
-                    let rank = match n.as_str() {
-                        "tsconfig.json" => 0,
-                        "jsconfig.json" => 1,
-                        _ => 2,
-                    };
-                    (rank, *n)
-                });
-                let found = configs
-                    .into_iter()
-                    .filter_map(|n| load_aliases(&base.join(d).join(n)))
-                    .collect();
+            if let Some(found) = aliases_in(&base.join(d), &names) {
                 aliases.insert(d.clone(), found);
+            }
+        }
+        // Scanning `packages/app/src`: the nearest config is above it, within the checkout.
+        if !aliases.contains_key("") {
+            for dir in base.ancestors().skip(1) {
+                let names: Vec<String> = std::fs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                if let Some(found) = aliases_in(dir, &names) {
+                    aliases.insert(String::new(), found);
+                    break;
+                }
+                if names.iter().any(|n| n == ".git") {
+                    break;
+                }
             }
         }
         // The scan root, Python projects and their `src/`, and the parents of top-level packages.
@@ -762,21 +766,21 @@ impl<'a> Tree<'a> {
     fn aliased(&self, importer: &str, spec: &str) -> Option<String> {
         let configs = std::iter::successors(Some(dir_of(importer)), |d| parent(d))
             .find_map(|d| self.aliases.get(d))?;
-        configs.iter().find_map(|config| {
-            // A matched pattern whose targets all miss falls back to `baseUrl`.
-            best_match(config.paths.iter().map(|(p, _)| p.as_str()), spec)
-                .and_then(|(pattern, star)| {
-                    let (_, targets) = config.paths.iter().find(|(p, _)| p == pattern)?;
-                    targets.iter().find_map(|t| {
-                        let t = t.to_string_lossy();
-                        let t = star.map_or(t.to_string(), |star| t.replacen('*', star, 1));
-                        self.script_file(strip_declaration(&self.inside(Path::new(&t))?))
-                    })
-                })
-                .or_else(|| {
-                    let url = config.base_url.as_ref()?;
-                    self.script_file(&self.inside(&url.join(spec))?)
-                })
+        let by_paths = |config: &Aliases| {
+            let (pattern, star) = best_match(config.paths.iter().map(|(p, _)| p.as_str()), spec)?;
+            let (_, targets) = config.paths.iter().find(|(p, _)| p == pattern)?;
+            targets.iter().find_map(|t| {
+                let t = t.to_string_lossy();
+                let t = star.map_or(t.to_string(), |star| t.replacen('*', star, 1));
+                self.script_file(strip_declaration(&self.inside(Path::new(&t))?))
+            })
+        };
+        // Any config's `paths` beat a `baseUrl`; a pattern whose targets all miss falls back.
+        configs.iter().find_map(by_paths).or_else(|| {
+            configs.iter().find_map(|config| {
+                let url = config.base_url.as_ref()?;
+                self.script_file(&self.inside(&url.join(spec))?)
+            })
         })
     }
 
@@ -1216,6 +1220,29 @@ fn all_strings<'v>(value: &'v Value, out: &mut Vec<&'v str>) {
     }
 }
 
+/// The aliases of each tsconfig among `names` in `dir`; `None` when it has no tsconfig.
+fn aliases_in(dir: &Path, names: &[String]) -> Option<Vec<Aliases>> {
+    let mut configs: Vec<&String> = names.iter().filter(|n| is_tsconfig(n)).collect();
+    if configs.is_empty() {
+        return None;
+    }
+    // `tsconfig.json` decides; `tsconfig.app.json` and the like fill in.
+    configs.sort_by_key(|n| {
+        let rank = match n.as_str() {
+            "tsconfig.json" => 0,
+            "jsconfig.json" => 1,
+            _ => 2,
+        };
+        (rank, *n)
+    });
+    Some(
+        configs
+            .into_iter()
+            .filter_map(|n| load_aliases(&dir.join(n)))
+            .collect(),
+    )
+}
+
 /// `tsconfig.json`, `tsconfig.app.json`, `jsconfig.json`, …
 fn is_tsconfig(name: &str) -> bool {
     name == "jsconfig.json"
@@ -1255,7 +1282,7 @@ struct Inherited {
 }
 
 /// Each setting comes from `config`, else the last `extends` entry setting it.
-/// `seen` stops cycles and repeat reads; `depth` stops long chains.
+/// `seen` is the chain being followed, to stop cycles; `depth` stops long chains.
 fn inherited(config: &Path, seen: &mut HashSet<PathBuf>, depth: usize) -> Option<Inherited> {
     if depth > 16 || !seen.insert(config.to_path_buf()) {
         return None;
@@ -1287,6 +1314,8 @@ fn inherited(config: &Path, seen: &mut HashSet<PathBuf>, depth: usize) -> Option
     if let Some(url) = options.and_then(|o| o.get("baseUrl")?.as_str()) {
         merged.base_url = Some(clean(&dir.join(url)));
     }
+    // Two `extends` entries may share a base; the later one brings its settings back.
+    seen.remove(config);
     Some(merged)
 }
 

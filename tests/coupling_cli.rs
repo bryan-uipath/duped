@@ -363,6 +363,60 @@ fn typescript_resolves_tsconfig_paths() {
         vec![e("src/main.ts", "src/feature/deep.ts", 1)],
         "{app}"
     );
+    // Scanning `packages/app/src`: the nearest tsconfig is above the scan.
+    let src = json(&root.join("packages/app/src"), &["--all-edges"]);
+    assert_eq!(
+        edges(&src),
+        vec![e("main.ts", "feature/deep.ts", 1)],
+        "{src}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn typescript_extends_entries_sharing_a_base_apply_in_order() {
+    let root = packages("extends");
+    let paths =
+        |target: &str| format!(r#"{{"compilerOptions":{{"paths":{{"@x":["{target}"]}}}}}}"#);
+    write(&root, "packages/app/common.json", &paths("src/shared/x.ts"));
+    write(
+        &root,
+        "packages/app/left.json",
+        r#"{"extends":"./common","compilerOptions":{"paths":{"@x":["src/left/x.ts"]}}}"#,
+    );
+    write(
+        &root,
+        "packages/app/right.json",
+        r#"{"extends":"./common"}"#,
+    );
+    // `right` comes last and brings `common`'s paths back, as in `tsc`.
+    write(
+        &root,
+        "packages/app/tsconfig.json",
+        r#"{"extends":["./left","./right"]}"#,
+    );
+    write(&root, "packages/app/src/left/x.ts", "export const x = 1;\n");
+    write(
+        &root,
+        "packages/app/src/shared/x.ts",
+        "export const x = 2;\n",
+    );
+    // An entry file each, so reaching `x.ts` is an edge.
+    for dir in ["left", "shared"] {
+        let index = format!("packages/app/src/{dir}/index.ts");
+        write(&root, &index, "export { x } from './x';\n");
+    }
+    write(
+        &root,
+        "packages/app/src/main.ts",
+        "import { x } from '@x';\n",
+    );
+    let app = json(&root.join("packages/app"), &["--all-edges"]);
+    assert_eq!(
+        edges(&app),
+        vec![e("src/main.ts", "src/shared/x.ts", 1)],
+        "{app}"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 

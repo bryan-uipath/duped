@@ -35,7 +35,7 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 - `--rev REF` scans a commit; combine with `--json` over `git rev-list --first-parent` for a history.
 - `package.json` `exports` (patterns too), `main`, `module` and `types` targets are entries; a missing `dist/` path is read under `src/`.
 - `noConsumers: true`: nothing in the scan imports the boundary, so its unused surface doesn't lower its score.
-- Not resolved: tsconfig `paths`, `require`, C# `using`.
+- tsconfig `paths` and `baseUrl` resolve (nearest `tsconfig*.json`, relative `extends`). Not resolved: `require`, C# `using`.
 
 ## Dependency tags
 
