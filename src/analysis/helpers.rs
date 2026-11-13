@@ -46,7 +46,7 @@ pub struct Member {
     pub line: usize,
     pub lines: usize,
     pub tokens: usize,
-    /// Set by `report --base` when the file changed.
+    /// Set by `report --base` when the change touched its lines.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub changed: bool,
 }
@@ -57,6 +57,15 @@ pub struct HelperFamily {
     pub name: String,
     /// Record indices per distinct body, largest variant first, each in file order.
     pub variants: Vec<Vec<usize>>,
+}
+
+/// A family, as both `helpers` and `report` print it.
+#[derive(Debug, Serialize)]
+pub struct Family {
+    pub name: String,
+    pub definitions: usize,
+    /// One list of copies per distinct body, largest first.
+    pub variants: Vec<Vec<Member>>,
 }
 
 #[derive(Debug)]
@@ -327,37 +336,66 @@ pub fn render_text(
     }
     let shown = &report.groups[..top.min(report.groups.len())];
     out.push_str(&render_groups(shown, report.groups.len()));
-    if !report.families.is_empty() {
+    let shown = &report.families[..top.min(report.families.len())];
+    out.push_str(&render_families(
+        &families(records, shown, judge),
+        report.families.len(),
+    ));
+    out
+}
+
+/// `families` as printed, with each variant's copies.
+pub fn families(records: &[Record], families: &[HelperFamily], judge: &dyn Judge) -> Vec<Family> {
+    families
+        .iter()
+        .map(|f| Family {
+            name: f.name.clone(),
+            definitions: definitions(f),
+            variants: f
+                .variants
+                .iter()
+                .map(|v| v.iter().map(|&m| member(records, m, judge)).collect())
+                .collect(),
+        })
+        .collect()
+}
+
+/// The `shown` families ranked, of `total`; shared with `report`.
+pub fn render_families(shown: &[Family], total: usize) -> String {
+    let mut out = String::new();
+    if total > 0 {
         writeln!(out, "\nSame name, different bodies:").ok();
     }
-    for (rank, f) in report.families.iter().take(top).enumerate() {
+    for (rank, f) in shown.iter().enumerate() {
         writeln!(
             out,
             "\n{}. {}: {} definitions, {} bodies",
             rank + 1,
             f.name,
-            definitions(f),
+            f.definitions,
             f.variants.len()
         )
         .ok();
         for v in &f.variants {
-            let first = function_at(records, v[0]);
+            // A changed copy stands for its variant, so `(changed)` names the right file.
+            let shown = v.iter().find(|m| m.changed).unwrap_or(&v[0]);
+            let changed = if shown.changed { " (changed)" } else { "" };
             writeln!(
                 out,
-                "   {}× {}  {}:{}",
+                "   {}× {}  {}:{}{changed}",
                 v.len(),
-                first.name,
-                first.location.file,
-                first.location.start_line
+                shown.name,
+                shown.file,
+                shown.line
             )
             .ok();
         }
     }
-    if report.families.len() > top {
+    if total > shown.len() {
         writeln!(
             out,
             "\n… {} more families; raise --top to see them.",
-            report.families.len() - top
+            total - shown.len()
         )
         .ok();
     }
@@ -418,22 +456,6 @@ pub fn render_groups(shown: &[HelperGroup], total: usize) -> String {
 
 /// Everything, untruncated: `{ summary, groups, families }`.
 pub fn to_json(records: &[Record], report: &HelperReport, judge: &dyn Judge) -> Value {
-    let families: Vec<Value> = report
-        .families
-        .iter()
-        .map(|f| {
-            let variants: Vec<Vec<Member>> = f
-                .variants
-                .iter()
-                .map(|v| v.iter().map(|&m| member(records, m, judge)).collect())
-                .collect();
-            json!({
-                "name": f.name,
-                "definitions": definitions(f),
-                "variants": variants,
-            })
-        })
-        .collect();
     json!({
         "summary": {
             "candidates": report.candidates,
@@ -444,7 +466,7 @@ pub fn to_json(records: &[Record], report: &HelperReport, judge: &dyn Judge) -> 
             "hidden": { "acknowledged": report.hidden_acknowledged },
         },
         "groups": report.groups,
-        "families": families,
+        "families": families(records, &report.families, judge),
     })
 }
 

@@ -202,11 +202,11 @@ Pairs are tagged by module like `types` pairs, ranked by score, and same-module 
 
 `duped report` runs `bodies`, `helpers`, `imports`, `names` and `types` with their defaults (and `duped.toml`), plus `files`, over one walk and one module graph, and groups their pairs by file pair. `files` finds files of 10 or more lines whose content is identical, ignoring line endings and trailing whitespace; `n` identical copies give `n - 1` pairs, all with the first. Groups are ranked by `removableLines`, then by how many analyses found them, then by how many findings they have. `removableLines` estimates what merging the pair removes: a whole identical file, or else the smaller side's matched function and type lines (only the shared region for `contained` and `block` bodies), each line counted once at the best similarity covering it. Pairs among the other copies of an identical file are dropped, so each copy counts once. `files` ignores acknowledgements. The header totals it across all file pairs and helper groups, so code copied into three or more files (other than whole identical files or helpers) counts once per pair. `helpers` groups span any number of files, so they are listed after the file pairs, ranked by their own `removableLines`; a copy inside a non-first identical file is dropped, since the file already counts, and `bodies` only compares larger functions, so no line counts twice. Findings within a group are ordered by their analysis's score (shared shingles, rare imports, name score or field similarity).
 
-- `--base <ref>` keeps only file pairs with a side added, modified or renamed since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`. It needs git; without it, git isn't used.
-- `--top` (default `40`) limits the file pairs and helper groups shown, in `--json` too; `filePairs`, `helperGroups` and `truncated` say how many there were.
+- `--base <ref>` keeps only findings on lines added, rewritten or next to a deletion since the merge base of `<ref>` and `HEAD`, including uncommitted and untracked files under `DIR`: a `bodies`, `types` or `helpers` finding needs a changed line inside one of its functions, types or regions; `names`, `imports` and identical `files` have no line range and need only a changed file. It needs git; without it, git isn't used.
+- `--top` (default `40`) limits the file pairs, helper groups and families shown, in `--json` too; `filePairs`, `helperGroups`, `helperFamilies` and `truncated` say how many there were.
 - An analysis that fails is reported as `failed`, with its error, and the others still run.
 
-`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, removableLines, truncated, groups, helpers }`. `helpers` are groups as `duped helpers --json` prints them, each member also `changed` with `--base`; with `--base` a group is kept when a member changed. `truncated` is true when either file pairs or helper groups exceed `--top`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`; a `contained` or `block` side also has `region: [start, end]`.
+`--json` prints `{ directory, mode, base, changedFiles, detectors, filePairs, helperGroups, helperFamilies, removableLines, truncated, directories, groups, helpers, families }`. `directories` rolls file pairs up by directory, `{ a, b, filePairs, removableLines }` for each directory pair (or one directory, `a == b`) linked by two or more file pairs, most removable lines first: a port spread over many files shows as one line. `--top` doesn't cut it; the text report lists the first 10. `families` are same-name helpers whose copies drifted, as `duped helpers --json` prints them; with `--base` a family is kept when the change touched a member, which is then `changed`; `detectors.helpers` counts groups only. `helpers` are groups as `duped helpers --json` prints them, each member also `changed` with `--base` when the change touched its lines; with `--base` a group is kept when a member changed. `truncated` is true when file pairs, helper groups or families exceed `--top`. `detectors.<name>` is `{ status: "ok", total, kept }` (`total` across `DIR`, `kept` touching the change) or `{ status: "failed", error }`. Each group has `a`, `b`, `changed` (with `--base`), `detectors`, `tag`, `removableLines` and `findings`, each `{ detector, kind, tag, a, b, evidence }` where `kind` is `function`, `type` or `file`; a `contained` or `block` side also has `region: [start, end]`.
 
 ### Finding duplicate functions
 
@@ -302,6 +302,11 @@ When the scanned types (for `names`, the scanned declarations) span fewer than t
 
 The **project root** is found from `DIR`, without leaving its git checkout: the nearest directory with a `duped.toml`, else the nearest workspace root (`pnpm-workspace.yaml`, `package.json` with `workspaces`, a Cargo `[workspace]`, a uv workspace, or a `.sln`), else the checkout. Outside a checkout it is `DIR`. `--root` sets it explicitly.
 
+`types` also hides two kinds of pair that share members by contract, counted in its `Hidden pairs` line (`summary.hidden.implementations`, `summary.hidden.ambient` in JSON):
+
+- a type and one that extends or implements it, or two types whose common base is in the scan and declares their shared members, leaving fewer than `--min-shared` of their own (two `implements StorageProvider`). Bases match by name: one declared more than once accounts only for the members every declaration has. A base outside the scan (`BaseModel`, `React.Component`) accounts for nothing; list its members under `conventional_members` if they are noise.
+- a type inside a `.d.ts` file's `declare module '<name>'` and a type in the module `<name>`: a typing of that module, not a second definition.
+
 A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
 ### `duped.toml`
@@ -351,11 +356,12 @@ test_dirs = ["test", "tests", "__tests__"] # an array replaces the defaults
 
 ## Agent skills
 
-`skills/` holds three skills for coding agents:
+`skills/` holds four skills for coding agents:
 
 - **duped**: using the CLI, checking for existing code before writing new code, reading findings.
 - **duped-audit**: auditing a whole codebase and ranking what to consolidate.
 - **duped-review**: checking a branch or pull request for copies of existing code.
+- **duped-coupling**: ranking the most reached-into modules and proving fixes with a before/after delta.
 
 They need the `duped` binary on `PATH`.
 
@@ -366,10 +372,10 @@ Claude Code, as a plugin:
 /plugin install duped@duped
 ```
 
-Any agent that reads skill directories (Claude Code, Codex): link or copy all three, keeping them side by side.
+Any agent that reads skill directories (Claude Code, Codex): link or copy all four, keeping them side by side.
 
 ```sh
-for s in duped duped-audit duped-review; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done   # or ~/.codex/skills
+for s in duped duped-audit duped-review duped-coupling; do ln -s "$PWD/skills/$s" ~/.claude/skills/$s; done   # or ~/.codex/skills
 ```
 
 ## Testing

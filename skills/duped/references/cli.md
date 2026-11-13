@@ -5,7 +5,7 @@ Read the relevant section for installation, detector selection, dependency tags,
 ## Install
 
 ```bash
-duped report --help >/dev/null 2>&1 || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs a build with `report`
+printf '%s\n' "duped 0.3.0" "$(duped --version 2>/dev/null)" | sort -V -C || cargo install --locked --force --git https://github.com/bryan-uipath/duped   # needs 0.3.0 or newer
 ```
 
 ## Commands
@@ -19,7 +19,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
-| `duped report` | every analysis plus identical files, grouped by file pair and ranked by `removableLines`, then `helpers` groups ranked apart (see SKILL.md) | all |
+| `duped report` | every analysis plus identical files, grouped by file pair and ranked by `removableLines`, then `helpers` groups ranked apart, then drifted `families` (see SKILL.md) | all |
 | `duped coupling` | imports that bypass a directory's entry file, by depth; surface, hiding, leaks and a 0–1 score per boundary | TS/JS, Python, Rust |
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
@@ -50,6 +50,8 @@ Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths 
 | `same-module` | both in `tag.module` (hidden by default except in `bodies`) | consolidate locally |
 
 ## Deliberate copies
+
+`types` hides a type and its implementer, two types sharing only what a scanned common base declares, and a `.d.ts` `declare module '<m>'` typing of a type in module `<m>`.
 
 `bodies` and `types` hide a pair when a doc comment or file header says "mirrors", "mirror of", "structural twin", "kept in sync" or "copy of" and names the other side. Otherwise record it in `duped.toml` at the project root:
 

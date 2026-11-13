@@ -24,7 +24,7 @@ code search needs structural evidence.
 ## All analyses at once
 
 ```bash
-duped report <root> --base <ref> --json > <temporary-file>  # changed-file pairs
+duped report <root> --base <ref> --json > <temporary-file>  # findings on changed lines
 duped report <root> --json > <temporary-file>               # whole codebase
 ```
 
@@ -32,14 +32,18 @@ The report combines bodies, files (identical copies), imports, names, and types,
 grouped by file pair and ranked by `removableLines`, an estimate of what merging
 the pair removes, then `helpers`: small helpers copied N ways (`isRecord` in 30
 files), ranked apart by their own `removableLines`. The header total covers both.
+Last, `families`: same-name helpers whose copies drifted (`isRecord`: 28
+definitions, 6 bodies), one list of copies per body.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
 `target`, …) and `.gitignore`d paths are skipped by default; checked-in
 generated code is not. Paths are relative to the scan root. Use a unique
 temporary file per run and pass its literal path to later commands. Reuse a
 report only when the caller states it matches the current tree; else rerun.
 
+Read `directories` first: directory pairs linked by several file pairs, such
+as a ported feature folder; report those as one finding, not one per file.
 Inspect `detectors` statuses and counts (`kept` touches the change, `total` is
-repo-wide), `filePairs`, `helperGroups`, and `truncated` (either list cut by
+repo-wide), `filePairs`, `helperGroups`, `helperFamilies`, and `truncated` (any list cut by
 `--top`), then select relevant `groups` and `helpers`; avoid dumping the full JSON. Failed detectors are gaps,
 not clean results. `--top` defaults to 40 even for JSON. Expand it when needed
 for coverage or disclose that only the selected groups were reviewed.
@@ -47,10 +51,11 @@ for coverage or disclose that only the selected groups were reviewed.
 ## Reading a finding
 
 Scores prioritize inspection, not conclusions. Agreement between detectors
-is stronger evidence. Prioritize behavioral drift: `~` in `names`, or `bodies`
-similarity below ~0.95, means the copies already differ; diff them. With
-`--base`, `changed` identifies changed files, not changed lines: confirm the
-duplicated code belongs to the change. Respect dependency direction (`tag.copy` imports
+is stronger evidence. Prioritize behavioral drift: `~` in `names`, a `families`
+entry, or `bodies` similarity below ~0.95, means the copies already differ; diff them. With
+`--base`, `bodies`, `types` and `helpers` findings are kept only when the
+change touched their lines; `names`, `imports` and `files` are kept per changed file,
+so confirm those belong to the change. Respect dependency direction (`tag.copy` imports
 `tag.owner`); consult the reference for other tag kinds.
 
 ## Verifying a finding

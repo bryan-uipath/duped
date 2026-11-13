@@ -106,6 +106,44 @@ fn diff_mode_keeps_pairs_touching_changed_files_under_the_scanned_path() {
 }
 
 #[test]
+fn diff_mode_keeps_only_findings_on_changed_lines() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("lines");
+    let both = format!(
+        "{}{}",
+        LIST.replace("NAME", "uniqueItems"),
+        RETRY.replace("NAME", "fetchJson")
+    );
+    write(&root, "a.ts", &both);
+    write(&root, "list.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "retry.ts", &RETRY.replace("NAME", "loadJson"));
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    // Only `fetchJson` changes; `uniqueItems`, in the same file, was copied before.
+    write(&root, "a.ts", &both.replace("retries exhausted", "gave up"));
+
+    let report = json(&root, &["--base", "main"]);
+    assert_eq!(report["changedFiles"], 1);
+    let pairs: Vec<(&str, &str)> = groups(&report)
+        .iter()
+        .map(|g| (g["a"].as_str().unwrap(), g["b"].as_str().unwrap()))
+        .collect();
+    assert_eq!(pairs, vec![("a.ts", "retry.ts")]);
+    assert_eq!(report["detectors"]["bodies"]["total"], 2);
+    assert_eq!(report["detectors"]["bodies"]["kept"], 1);
+
+    // A deletion alone counts: it can be what makes two bodies match.
+    write(&root, "a.ts", &both.replace("seen.add(item.id);\n", ""));
+    let report = json(&root, &["--base", "main"]);
+    assert_eq!(groups(&report).len(), 1);
+    assert_eq!(report["groups"][0]["b"], "list.ts");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn all_mode_needs_no_git_and_truncates_to_top() {
     let root = temp("all");
     for (file, name) in [("a.ts", "one"), ("b.ts", "two"), ("c.ts", "three")] {
@@ -333,6 +371,91 @@ fn helper_groups_rank_apart_and_skip_copies_in_identical_files() {
 }
 
 #[test]
+fn lists_helper_families_whose_copies_drifted() {
+    let root = temp("families");
+    let guard = "export const isRecord = (v: unknown) => typeof v === 'object' && v !== null && !Array.isArray(v);\n";
+    write(&root, "x.ts", guard);
+    write(&root, "y.ts", guard);
+    write(&root, "z.ts", &guard.replace(" && !Array.isArray(v)", ""));
+
+    let report = json(&root, &[]);
+    assert_eq!(report["helperFamilies"], 1);
+    let family = &report["families"][0];
+    assert_eq!(family["name"], "isRecord");
+    assert_eq!(family["definitions"], 3);
+    let variants: Vec<usize> = family["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_array().unwrap().len())
+        .collect();
+    assert_eq!(variants, vec![2, 1]);
+    assert_eq!(family["variants"][1][0]["file"], "z.ts");
+
+    let text = text(&root);
+    assert!(
+        text.contains("\nSame name, different bodies:\n\n1. isRecord: 3 definitions, 2 bodies\n   2× isRecord  x.ts:1\n   1× isRecord  z.ts:1\n"),
+        "{text}"
+    );
+
+    // With `--base`, the family is kept for its changed copy, which stands for its variant.
+    if has_git() {
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+        assert_eq!(json(&root, &["--base", "main"])["helperFamilies"], 0);
+        write(&root, "y.ts", &guard.replace("isRecord =", "isRecord  ="));
+        let report = json(&root, &["--base", "main"]);
+        assert_eq!(report["helperFamilies"], 1);
+        let copies = &report["families"][0]["variants"][0];
+        assert_eq!(copies[0].get("changed"), None);
+        assert_eq!(copies[1]["changed"], true);
+        let text = String::from_utf8(duped(&root, &["--base", "main"]).stdout).unwrap();
+        assert!(
+            text.contains("   2× isRecord  y.ts:1 (changed)\n"),
+            "{text}"
+        );
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn rolls_file_pairs_up_by_directory() {
+    let root = temp("directories");
+    write(&root, "a/list.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "b/rows.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "a/http.ts", &RETRY.replace("NAME", "fetchJson"));
+    write(&root, "b/load.ts", &RETRY.replace("NAME", "loadJson"));
+    // One pair between `a` and the root: not a roll-up.
+    write(&root, "totals.ts", &TOTALS.replace("NAME", "sumLines"));
+    write(
+        &root,
+        "a/totals.ts",
+        &TOTALS.replace("NAME", "invoiceTotals"),
+    );
+
+    let report = json(&root, &[]);
+    assert_eq!(report["filePairs"], 3);
+    let lines: u64 = groups(&report)
+        .iter()
+        .filter(|g| g["b"].as_str().unwrap().starts_with("b/"))
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        report["directories"],
+        serde_json::json!([{ "a": "a", "b": "b", "filePairs": 2, "removableLines": lines }])
+    );
+    let text = text(&root);
+    assert!(
+        text.contains(&format!(
+            "\nDirectories sharing several file pairs:\n   ~{lines} removable lines, 2 file pairs: a ~ b\n\n1. "
+        )),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");
@@ -363,6 +486,8 @@ fn duped(dir: &Path, args: &[&str]) -> Output {
         .arg("report")
         .arg(dir)
         .args(args)
+        // A user's context setting must not widen the changed lines.
+        .env("GIT_DIFF_OPTS", "-u99")
         .output()
         .unwrap()
 }

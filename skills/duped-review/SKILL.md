@@ -24,18 +24,20 @@ REPORT=$(mktemp /tmp/duped-review.XXXXXX)
 duped report <repo root> --base "$BASE" --json > "$REPORT"; echo "$REPORT"
 ```
 
-Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only file pairs where a side was added or modified since the merge base (committed, uncommitted or untracked). Filtering is per file: confirm the duplicated code is in the changed lines before reporting.
+Candidates are generated across the whole repo, so copies of *unchanged* code are found; the output keeps only findings whose lines the change added or rewrote since the merge base (committed, uncommitted or untracked). `names`, `imports` and identical `files` findings have no lines and are kept per changed file: confirm those belong to the change before reporting.
 
 ## 2. Read the groups
 
-Inspect detector statuses, counts (`filePairs`, `helperGroups`), and `truncated`
-(file pairs or helper groups cut by `--top`) before selected groups; `helpers`
+Inspect detector statuses, counts (`filePairs`, `helperGroups`, `helperFamilies`), and `truncated`
+(file pairs, helper groups or families cut by `--top`) before selected groups; `helpers`
 lists small helpers the change copies N ways, with `changed` on its copies;
+`families` lists same-name helpers whose bodies differ: a `changed` copy in a
+minority variant is a helper the change wrote differently from the rest;
 avoid dumping the full JSON into context. Report failed detectors as gaps.
 If truncated (`--top` defaults to 40, JSON included), rerun once with a larger
 `--top` or state the coverage limit; do not claim a complete clean result from a subset.
 
-`changed` says which side the change touched. Work in this order:
+`changed` lists the sides in changed files. Work in this order:
 
 1. **2–3 analyses agree** (`bodies` + `imports` + `names`): almost always a ported module.
 2. **`bodies` alone**: a function body near-copies another under different names. The most precise single analysis.
