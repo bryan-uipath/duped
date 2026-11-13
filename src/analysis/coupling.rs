@@ -340,9 +340,14 @@ pub fn analyze(
         BTreeMap::new();
     let mut used: HashSet<(String, String)> = HashSet::new();
     let mut used_all: HashSet<String> = HashSet::new();
+    // Files of `used_all` imported whole from their own crate, where `pub(crate)` is in reach.
+    let mut used_within: HashSet<String> = HashSet::new();
     let mut mark = |tree: &Tree, importer: &str, file: &str, name: &str| {
         if tree.innermost(file).is_some_and(|b| !within(importer, &b)) {
             if name == "*" || name.is_empty() {
+                if tree.crate_dir(importer) == tree.crate_dir(file) {
+                    used_within.insert(file.to_string());
+                }
                 used_all.insert(file.to_string());
             } else {
                 used.insert((file.to_string(), name.to_string()));
@@ -519,20 +524,24 @@ pub fn analyze(
                 surface.insert(shown);
             }
         }
-        // A name re-exported by two entries is used if either is; a public module's are its own.
+        // A name re-exported by two entries is used if either is; a public module's names
+        // (`x::Name`) and whole-module imports are its own.
         let shared = |e: &&String| !tree.public.contains_key(&(dir.clone(), (*e).clone()));
         let unused: Vec<String> = unused
             .into_iter()
-            .filter(|n| !entry_files.iter().filter(shared).any(|e| is_used(e, n)))
+            .filter(|n| {
+                n.contains("::") || !entry_files.iter().filter(shared).any(|e| is_used(e, n))
+            })
             .collect();
         let own = owned.get(dir).map(Vec::as_slice).unwrap_or_default();
         let (incoming, bypass_in) = incoming.get(dir).copied().unwrap_or_default();
         let hidden = own
             .iter()
-            // Rust `use a::b;` (common) reaches only what module `b` exports.
+            // Rust `use other_crate::b;` (common) reaches only what module `b` exports.
             .filter(|(f, n)| {
                 let reached = lang(f) != Language::Rust
                     || exports(f, n)
+                    || used_within.contains(*f)
                     || used.contains(&(f.to_string(), n.to_string()));
                 !(is_used(f, n) && reached) && !surfaced.contains(&(*f, *n))
             })
@@ -724,7 +733,11 @@ impl<'a> Tree<'a> {
             let mut i = 0;
             while i < entries.len() {
                 let parent = self.public.get(&(dir.clone(), entries[i].clone())).cloned();
-                for (name, file) in modules.get(&entries[i]).into_iter().flatten() {
+                // Beside a `lib.rs`, `main.rs` is the binary's root: its modules export nothing.
+                let binary = name_of(&entries[i]) == "main.rs"
+                    && entries.contains(&join(dir_of(&entries[i]), "lib.rs"));
+                let children = modules.get(&entries[i]).filter(|_| !binary);
+                for (name, file) in children.into_iter().flatten() {
                     if !entries.contains(file) {
                         let path = match &parent {
                             Some(p) => format!("{p}::{name}"),

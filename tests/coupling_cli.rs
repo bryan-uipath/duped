@@ -617,7 +617,7 @@ fn rust_pub_mod_chains_are_surface() {
     write(
         &root,
         "crates/app/src/main.rs",
-        "use core_lib::api;\nuse core_lib::api::deep::deep;\nuse core_lib::private::secret;\nfn main() {}\n",
+        "use core_lib::*;\nuse core_lib::api;\nuse core_lib::api::deep::deep;\nuse core_lib::private::secret;\nfn main() {}\n",
     );
     let report = json(&root, &["--all-edges"]);
     let main = "crates/app/src/main.rs";
@@ -628,6 +628,7 @@ fn rust_pub_mod_chains_are_surface() {
             e(main, "crates/core/src/private.rs", 1),
             e(main, "crates/core/src/api.rs", 0),
             e(main, "crates/core/src/api/deep.rs", 0),
+            e(main, "crates/core/src/lib.rs", 0),
         ]
     );
     let core = boundary(&report, "crates/core");
@@ -635,16 +636,75 @@ fn rust_pub_mod_chains_are_surface() {
         core["surface"],
         serde_json::json!(["api::Client", "api::deep::deep", "api::deep::spare", "root"])
     );
-    assert_eq!(
-        core["unused"],
-        serde_json::json!(["api::deep::spare", "root"])
-    );
+    // The root glob uses `root`, not a public module's `spare`.
+    assert_eq!(core["unused"], serde_json::json!(["api::deep::spare"]));
     // `use core_lib::api;` doesn't reach the private `helper`.
     assert_eq!((&core["declared"], &core["hidden"]), (&4.into(), &1.into()));
     assert_eq!(leaks(&report), ["crates/core/src/private.rs#secret"]);
     // The workspace root has no entry and no code: no row.
     let rows = report["boundaries"].as_array().unwrap();
     assert!(rows.iter().all(|b| b["dir"] != ""));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `core` has a library and a binary root; its `user` reaches a nested module of its own.
+#[test]
+fn rust_binary_roots_and_same_crate_reaches() {
+    let root = temp("rs-roots");
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root,
+        "crates/core/Cargo.toml",
+        "[package]\nname = \"core-lib\"\n",
+    );
+    write(
+        &root,
+        "crates/core/src/lib.rs",
+        "mod api;\nmod inner;\nmod user;\npub use api::Client;\n",
+    );
+    write(
+        &root,
+        "crates/core/src/main.rs",
+        "pub mod api;\nfn main() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api.rs",
+        "pub struct Client;\npub struct Hidden;\n",
+    );
+    write(&root, "crates/core/src/inner/mod.rs", "mod b;\n");
+    write(
+        &root,
+        "crates/core/src/inner/b.rs",
+        "pub(crate) fn f() {}\n",
+    );
+    write(&root, "crates/core/src/user.rs", "use crate::inner::b;\n");
+    write(
+        &root,
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncore-lib = { path = \"../core\" }\n",
+    );
+    write(
+        &root,
+        "crates/app/src/main.rs",
+        "use core_lib::api::Hidden;\nfn main() {}\n",
+    );
+    let report = json(&root, &[]);
+    // The binary's `pub mod api;` doesn't widen the library: `Hidden` is past the entry.
+    assert!(edges(&report).contains(&e("crates/app/src/main.rs", "crates/core/src/api.rs", 1)));
+    let core = boundary(&report, "crates/core");
+    assert_eq!(core["surface"], serde_json::json!(["Client"]));
+    assert_eq!(leaks(&report), ["crates/core/src/api.rs#Hidden"]);
+    // `use crate::inner::b;` reaches `pub(crate)` items: `f` is used from outside `inner`.
+    let inner = boundary(&report, "crates/core/src/inner");
+    assert_eq!(
+        (&inner["declared"], &inner["hidden"]),
+        (&1.into(), &0.into())
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
