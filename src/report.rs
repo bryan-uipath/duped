@@ -41,6 +41,9 @@ pub struct Report {
     /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
     pub removable_lines: usize,
     pub truncated: bool,
+    /// Directory pairs linked by two or more file pairs, most removable lines first: a port
+    /// spread over many files. Never cut by `--top`.
+    pub directories: Vec<DirectoryPair>,
     pub groups: Vec<Group>,
     /// `helpers` groups: one finding over any number of files, so ranked apart from file pairs.
     pub helpers: Vec<HelperGroup>,
@@ -59,6 +62,16 @@ pub enum Status {
     Failed {
         error: String,
     },
+}
+
+/// The file pairs between two directories (or within one, `a == b`), from all groups.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryPair {
+    pub a: String,
+    pub b: String,
+    pub file_pairs: usize,
+    pub removable_lines: usize,
 }
 
 /// Findings on one unordered file pair; `a` sorts first.
@@ -219,6 +232,7 @@ impl Report {
                 .map(|h| h.removable_lines)
                 .sum::<usize>();
         let helper_families = kept_families.len();
+        let directories = directory_pairs(&groups);
         groups.truncate(top);
         kept_helpers.truncate(top);
         kept_families.truncate(top);
@@ -233,6 +247,7 @@ impl Report {
             helper_families,
             removable_lines,
             truncated: file_pairs > top || helper_groups > top || helper_families > top,
+            directories,
             groups,
             helpers: kept_helpers,
             families: kept_families,
@@ -495,6 +510,35 @@ fn group_by_file_pair(findings: Vec<Finding>, changed: Option<&Changed>) -> Vec<
             .then(y.findings.len().cmp(&x.findings.len()))
     });
     groups
+}
+
+/// Groups summed by their files' directories, keeping pairs of two or more.
+fn directory_pairs(groups: &[Group]) -> Vec<DirectoryPair> {
+    let dir = |file: &str| match file.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => ".".to_string(),
+    };
+    let mut sums: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+    for g in groups {
+        let (a, b) = (dir(&g.a), dir(&g.b));
+        let key = if a <= b { (a, b) } else { (b, a) };
+        let sum = sums.entry(key).or_default();
+        sum.0 += 1;
+        sum.1 += g.removable_lines;
+    }
+    let mut pairs: Vec<DirectoryPair> = sums
+        .into_iter()
+        .filter(|(_, (file_pairs, _))| *file_pairs >= 2)
+        .map(|((a, b), (file_pairs, removable_lines))| DirectoryPair {
+            a,
+            b,
+            file_pairs,
+            removable_lines,
+        })
+        .collect();
+    // Stable: ties keep path order.
+    pairs.sort_by_key(|p| std::cmp::Reverse(p.removable_lines));
+    pairs
 }
 
 /// A finding's files, in path order.
@@ -761,6 +805,9 @@ fn git(args: &[&str], cwd: &Path) -> Result<String> {
 
 // ----- output -----
 
+/// Directory pairs the text report lists; `--json` has them all.
+const DIRECTORIES_SHOWN: usize = 10;
+
 /// Human-readable report: what each analysis found, then the ranked file pairs.
 pub fn render_text(report: &Report) -> String {
     let mut out = String::new();
@@ -794,6 +841,30 @@ pub fn render_text(report: &Report) -> String {
         ),
     }
     .ok();
+    if !report.directories.is_empty() {
+        writeln!(out, "\nDirectories sharing several file pairs:").ok();
+    }
+    for d in report.directories.iter().take(DIRECTORIES_SHOWN) {
+        let dirs = if d.a == d.b {
+            format!("within {}", d.a)
+        } else {
+            format!("{} ~ {}", d.a, d.b)
+        };
+        writeln!(
+            out,
+            "   ~{} removable lines, {} file pairs: {dirs}",
+            d.removable_lines, d.file_pairs
+        )
+        .ok();
+    }
+    if report.directories.len() > DIRECTORIES_SHOWN {
+        writeln!(
+            out,
+            "   … {} more in --json.",
+            report.directories.len() - DIRECTORIES_SHOWN
+        )
+        .ok();
+    }
     for (rank, group) in report.groups.iter().enumerate() {
         writeln!(
             out,
