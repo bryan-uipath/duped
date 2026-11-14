@@ -45,6 +45,12 @@ pub(crate) const SKIPPED_DIRS: &[&str] = &[
 /// Walk `root`, honouring `.gitignore` even outside a git checkout. Unreadable
 /// entries are reported on stderr and skipped rather than ending the walk.
 pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
+    Ok(discover_counting(root, options)?.0)
+}
+
+/// `discover`, plus how many source files only the test rules left out, e.g. 138 `*.test.ts`.
+pub fn discover_counting(root: &Path, options: &WalkOptions) -> Result<(Vec<SourceFile>, usize)> {
+    let mut skipped_tests = 0;
     let excludes = build_globs(&options.excludes)?;
     let root_excludes = build_globs(&options.root_excludes)?;
     let mut files = Vec::new();
@@ -77,8 +83,11 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
         if is_excluded(&excludes, &rel)
             || is_csharp_build_output(&rel)
             || root_rel.is_some_and(|r| is_excluded(&root_excludes, &r))
-            || (!options.include_tests && is_test)
         {
+            continue;
+        }
+        if !options.include_tests && is_test {
+            skipped_tests += 1;
             continue;
         }
         files.push(SourceFile {
@@ -99,7 +108,7 @@ pub fn discover(root: &Path, options: &WalkOptions) -> Result<Vec<SourceFile>> {
             .strip_suffix(".pyi")
             .is_none_or(|stem| !modules.contains(&format!("{stem}.py")))
     });
-    Ok(files)
+    Ok((files, skipped_tests))
 }
 
 pub fn language_for(path: &Path) -> Option<Language> {
@@ -230,6 +239,20 @@ mod tests {
             .len(),
             7
         );
+
+        // Only `src/a.test.ts`: excluded, ignored and `node_modules` files aren't counted.
+        let counted = discover_counting(
+            &root,
+            &WalkOptions {
+                include_tests: false,
+                excludes: vec!["src/legacy".to_string()],
+                root_excludes: Vec::new(),
+                root_prefix: None,
+                rules: Rules::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!((counted.0.len(), counted.1), (5, 1));
 
         let single = discover(
             &root.join("src/a.ts"),
