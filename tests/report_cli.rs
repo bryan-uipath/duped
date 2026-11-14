@@ -315,7 +315,7 @@ fn groups_rank_by_removable_lines_then_agreeing_analyses() {
         order[1]["evidence"]
             .as_str()
             .unwrap()
-            .starts_with("exact, 1 field overlap")
+            .starts_with("exact, 1.00 field overlap")
     );
 
     let text = text(&root);

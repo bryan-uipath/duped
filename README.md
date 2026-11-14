@@ -95,7 +95,7 @@ Overload signatures (TypeScript overloads, Python `@overload`) fold into their i
 `duped types` compares every object-shaped type (interfaces, object type aliases, classes) with every other, and every enum or literal union with every other. It reports pairs whose field names overlap, whatever the types are called.
 
 - **similarity:** Jaccard similarity of field names: shared names ÷ all names.
-- **typed:** the same, but a shared field only counts when its types match, so it drops when shared fields have different types. Spacing doesn't matter, union order doesn't matter, and `T | undefined`, `T | null` and `T` count as the same type. A field with no type annotation matches any type.
+- **typed:** the same, but a shared field only counts when its types match, so it drops when shared fields have different types. Spacing doesn't matter, union order doesn't matter, and `T | undefined`, `T | null` and `T` count as the same type. A field with no type annotation matches any type, and so does every field of a pair in two languages (`String` vs `string`).
 - **relationship:**
   - `exact` (`A = B`): same names and types.
   - `superset` (`A ⊃ B`) or `subset` (`A ⊂ B`): one has every field of the other, and more. This is how a redeclared union that has fallen behind the original shows up.
@@ -113,6 +113,7 @@ By default it prints clusters, which are groups of types linked by qualifying pa
 | `--top` | `40` | clusters (or pairs) to show |
 | `--include-same-module` | off | also report pairs whose two types are in one module |
 | `--include-acknowledged` | off | also report pairs acknowledged as deliberate |
+| `--cross-language` | off | also pair types in different languages (TypeScript and JavaScript count as one) |
 
 Every pair is evidence, not a verdict. Read both types before consolidating them.
 
@@ -309,6 +310,8 @@ The **project root** is found from `DIR`, without leaving its git checkout: the 
 - a type and one that extends or implements it, or two types whose common base is in the scan and declares their shared members, leaving fewer than `--min-shared` of their own (two `implements StorageProvider`). Bases match by name: one declared more than once accounts only for the members every declaration has. A base outside the scan (`BaseModel`, `React.Component`) accounts for nothing; list its members under `conventional_members` if they are noise.
 - a type inside a `.d.ts` file's `declare module '<name>'` and a type in the module `<name>`: a typing of that module, not a second definition.
 
+A pair in two languages, such as a Rust struct and the TypeScript interface mirroring its wire format, is hidden unless `--cross-language` (`summary.hidden.cross_language`): the two can't share one definition. TypeScript and JavaScript count as one language, since either can import the other. `report` has no flag for it; set `cross_language = true` under `[types]`.
+
 A pair is **acknowledged**, and hidden unless `--include-acknowledged`, when `duped.toml` lists it, or when either type's doc comment, or the comment at the top of its file, calls it deliberate ("mirrors", "mirror of", "structural twin", "kept in sync", "copy of") and names the other side: the other type as a whole word (not when both types share the name), or the other module by its full name (`@x/unified-evals`), its last name segment (`unified-evals`) or its directory (`evals`), the last two as whole words. Licence and copyright headers are ignored.
 
 ### `duped.toml`
@@ -327,6 +330,7 @@ threshold = 0.7
 common_field_fraction = 0.1
 exclude_names = ["*Dto"]                   # in addition to *Props
 default_excludes = true                    # false drops the *Props exclusion
+cross_language = false                     # true also pairs types across languages
 
 [names]
 min_shared = 2

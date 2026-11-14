@@ -406,8 +406,8 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                 a: side(&records[p.a]),
                 b: side(&records[p.b]),
                 evidence: format!(
-                    "{relationship}, {} field overlap: {}",
-                    round(p.similarity),
+                    "{relationship}, {:.2} field overlap: {}",
+                    p.similarity,
                     shown.join(", ")
                 ),
                 rank: p.similarity,

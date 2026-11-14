@@ -255,6 +255,9 @@ struct TypesArgs {
     /// Also report pairs acknowledged as deliberate (in `duped.toml` or by a doc comment).
     #[arg(long)]
     include_acknowledged: bool,
+    /// Also pair types written in different languages, e.g. a Rust struct and its TypeScript mirror.
+    #[arg(long)]
+    cross_language: bool,
     /// List ranked pairs instead of clusters.
     #[arg(long)]
     pairs: bool,
@@ -761,6 +764,7 @@ fn type_options(
             .unwrap_or(0.1),
         include_same_module: args.include_same_module,
         include_acknowledged: args.include_acknowledged,
+        cross_language: args.cross_language || types.cross_language,
         rules,
     })
 }
