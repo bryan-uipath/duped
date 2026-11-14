@@ -12,7 +12,7 @@ Numbers are evidence; the score never gates anything.
 ## 1. Measure
 
 ```bash
-duped coupling <dir> --top 30 --json > <temporary-file>
+duped coupling <dir> --json > <temporary-file>   # --json ignores --top; select with jq
 ```
 
 Read `totals` (`score`, `bypassRate`, `unusedSurface`,

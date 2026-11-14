@@ -10,7 +10,7 @@ printf '%s\n' "duped 0.3.0" "$(duped --version 2>/dev/null)" | sort -V -C || car
 
 ## Commands
 
-Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable), `--include-tests`, `--root`, `--config`, `--out`. Analyses also take `--json` and `--top N`. Exclude globs are anchored at `PATH`: `examples` skips only `PATH/examples`; use `**/examples` for every `examples/` directory.
+Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable), `--include-tests`, `--root`, `--config`, `--out`. Analyses also take `--json` and `--top N` (default 40). Only `report --json` honours `--top`; every other `--json` prints everything (`coupling`: megabytes on a monorepo), so write it to a file and select with `jq`. Exclude globs are anchored at `PATH`: `examples` skips only `PATH/examples`; use `**/examples` for every `examples/` directory.
 
 | Command | Finds | Languages |
 |---|---|---|
@@ -19,16 +19,31 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | `duped imports` | files importing the same rare set of modules and symbols: ported copies whose declarations were all renamed | TS/JS |
 | `duped names` | file pairs declaring ≥2 of the same top-level names; each name marked `=` same signature/shape, `~` differs, `?` unknown | all |
 | `duped types` | types sharing most of their fields under any names: `exact`, `subset`, `superset`, `overlap` | all |
+| `duped fns` | functions sharing most of their parameter names under any names; a prototype with a weak signal, not part of `report` | all |
 | `duped report` | every analysis plus identical files, grouped by file pair and ranked by `removableLines`, then `helpers` groups ranked apart, then drifted `families` (see SKILL.md) | all |
 | `duped coupling` | imports that bypass a directory's entry file, by depth; surface, hiding, leaks and a 0–1 score per boundary | TS/JS, Python, Rust |
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
 
-Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths are skipped by default.
+Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths are skipped by default. `report` says how many: `scannedFiles`, `skippedTestFiles` (line 2 of the text); excluded, ignored and build-output paths are in neither.
+
+Flags that widen a scan:
+
+| Flag | Commands | Adds |
+|---|---|---|
+| `--include-tests` | all | test, mock and fixture files (`*.test.*`, `tests/`, `__tests__/`, `fixtures/`, …) |
+| `--include-same-file` | `bodies` | pairs whose two functions share a file |
+| `--cross-language` | `bodies` | pairs across languages, e.g. a TypeScript helper and its Rust port |
+| `--include-same-module` | `types`, `names`, `imports`, `fns` | pairs inside one module |
+| `--include-acknowledged` | `bodies`, `types`, `fns` | pairs acknowledged as deliberate |
+| `--include-wrappers` | `fns` | pairs where one function calls the other |
+| `--include-implementations` | `fns` | same-name methods of classes sharing a base |
+
+`report --json` `truncated` is true when any of three lists was cut: `filePairs` > `groups | length`, `helperGroups` > `helpers | length`, `helperFamilies` > `families | length`.
 
 ## Coupling
 
-`duped coupling [PATH] [--base REF] [--rev REF] [--folder P] [--all-edges]` measures, never gates. A boundary is a directory with an entry file (`index.*`, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`), a manifest, or the name `internal`. A Rust module an entry declares `pub mod x;` is an entry too. `bypass` counts boundaries entered after the first, plus 1 when the target isn't the entry: `../foo` → `foo/index.ts` is 0, `../foo/bar.ts` 1, `../foo/internal/x.ts` 2.
+`duped coupling [PATH] [--base REF] [--rev REF] [--folder P] [--all-edges]` measures, never gates. `--folder` is relative to `PATH`, like the JSON's paths: `coupling packages --folder canvas`, not `--folder packages/canvas` (a path matching no boundary scores 1.000). A boundary is a directory with an entry file (`index.*`, `__init__.py`, `mod.rs`, `lib.rs`, `main.rs`), a manifest, or the name `internal`. A Rust module an entry declares `pub mod x;` is an entry too. `bypass` counts boundaries entered after the first, plus 1 when the target isn't the entry: `../foo` → `foo/index.ts` is 0, `../foo/bar.ts` 1, `../foo/internal/x.ts` 2.
 
 - Headline: `totals.score` (0–1, higher is better), the mean of `1 − bypassRate` (bypassing ÷ cross-boundary imported symbols), `1 − unusedSurface` (entry exports nobody outside imports, boundaries with consumers only) and `hiding` (declarations neither surfaced by an entry nor imported from outside). `bypassCost` and `meanBypassDepth` are diagnostics only.
 - Cross-package: a bypass whose importer is in another package than its target. Listed first; `edges[].importerPackage` / `targetPackage`, `totals.crossPackageBypassEdges` / `crossPackageBypassSymbols`, `boundaries[].crossPackageBypassIn`, and `crossPackage: true` on `diff` changes. Not part of the score. Rank boundaries by `crossPackageBypassIn`, then `bypassIn`: counts, since a score ranks a boundary with 5 imports above one with 400.
