@@ -33,7 +33,7 @@ grouped by file pair and ranked by `removableLines`, an estimate of what merging
 the pair removes, then `helpers`: small helpers copied N ways (`isRecord` in 30
 files), ranked apart by their own `removableLines`. The header total covers both.
 Last, `families`: same-name helpers whose copies drifted (`isRecord`: 28
-definitions, 6 bodies), one list of copies per body.
+definitions, 4 bodies), one list of copies per body.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
 `target`, …) and `.gitignore`d paths are skipped by default; checked-in
 generated code is not. Paths are relative to the scan root. Use a unique
