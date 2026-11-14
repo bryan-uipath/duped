@@ -42,7 +42,8 @@ pub struct Report {
     pub helper_groups: usize,
     /// Drifted helper families before `--top`.
     pub helper_families: usize,
-    /// Sum of the groups' and helper groups' `removable_lines`, before `--top`.
+    /// The groups' removable lines, each line of a file once, plus the helper groups',
+    /// before `--top`: at most the sum of the groups' `removable_lines`.
     pub removable_lines: usize,
     pub truncated: bool,
     /// Directory pairs linked by two or more file pairs with removable lines, most removable
@@ -68,7 +69,8 @@ pub enum Status {
     },
 }
 
-/// The file pairs with removable lines between two directories.
+/// The file pairs with removable lines between two directories; `removable_lines` counts
+/// each line of a file once.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryPair {
@@ -230,7 +232,7 @@ impl Report {
         let mut groups = group_by_file_pair(kept, changed.as_ref());
         let file_pairs = groups.len();
         let helper_groups = kept_helpers.len();
-        let removable_lines = groups.iter().map(|g| g.removable_lines).sum::<usize>()
+        let removable_lines = lines_once(&groups)
             + kept_helpers
                 .iter()
                 .map(|h| h.removable_lines)
@@ -526,25 +528,23 @@ fn directory_pairs(groups: &[Group]) -> Vec<DirectoryPair> {
         Some((dir, _)) => dir.to_string(),
         None => ".".to_string(),
     };
-    let mut sums: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+    let mut linked: BTreeMap<(String, String), Vec<&Group>> = BTreeMap::new();
     for g in groups {
         let (a, b) = (dir(&g.a), dir(&g.b));
         if g.removable_lines == 0 || a == b {
             continue;
         }
         let key = if a <= b { (a, b) } else { (b, a) };
-        let sum = sums.entry(key).or_default();
-        sum.0 += 1;
-        sum.1 += g.removable_lines;
+        linked.entry(key).or_default().push(g);
     }
-    let mut pairs: Vec<DirectoryPair> = sums
+    let mut pairs: Vec<DirectoryPair> = linked
         .into_iter()
-        .filter(|(_, (file_pairs, _))| *file_pairs >= 2)
-        .map(|((a, b), (file_pairs, removable_lines))| DirectoryPair {
+        .filter(|(_, groups)| groups.len() >= 2)
+        .map(|((a, b), groups)| DirectoryPair {
             a,
             b,
-            file_pairs,
-            removable_lines,
+            file_pairs: groups.len(),
+            removable_lines: lines_once(groups),
         })
         .collect();
     // Stable: ties keep path order.
@@ -564,33 +564,55 @@ fn file_pair(f: &Finding) -> (String, String) {
 /// The whole file when identical; else the smaller side's matched lines, each line counted
 /// once at the best similarity covering it, so nested or repeated matches aren't summed twice.
 fn removable_lines(group: &Group) -> usize {
-    let whole = group.findings.iter().filter_map(|f| match f.span {
-        Span::Whole(lines) => Some(lines),
-        _ => None,
-    });
-    if let Some(lines) = whole.max() {
-        return lines;
-    }
-    // Keyed by group side (0 = `a`), not file, so a same-file pair keeps two sides.
-    let mut best: HashMap<(usize, usize), f64> = HashMap::new();
+    let [a, b] = matched(group);
+    total(&a).min(total(&b)).round() as usize
+}
+
+/// Each side's matched lines (0 = `a`) with the best weight covering each; every line of an
+/// identical file at 1. By side, not file, so a same-file pair keeps two sides.
+fn matched(group: &Group) -> [BTreeMap<usize, f64>; 2] {
+    let mut best = [BTreeMap::new(), BTreeMap::new()];
     for f in &group.findings {
-        if let Span::Lines { a, b, weight } = f.span {
-            let (a, b) = if f.a.file == group.a { (a, b) } else { (b, a) };
-            for (side, (start, end)) in [(0, a), (1, b)] {
-                for line in start..=end {
-                    let value = best.entry((side, line)).or_default();
-                    *value = value.max(weight);
-                }
+        let (a, b, weight) = match f.span {
+            Span::None => continue,
+            Span::Whole(lines) => ((1, lines), (1, lines), 1.0),
+            Span::Lines { a, b, weight } if f.a.file == group.a => (a, b, weight),
+            Span::Lines { a, b, weight } => (b, a, weight),
+        };
+        for (side, (start, end)) in [(0, a), (1, b)] {
+            for line in start..=end {
+                let value: &mut f64 = best[side].entry(line).or_default();
+                *value = value.max(weight);
             }
         }
     }
-    let total = |side: usize| -> f64 {
-        best.iter()
-            .filter(|((s, _), _)| *s == side)
-            .map(|(_, v)| v)
-            .sum()
-    };
-    total(0).min(total(1)).round() as usize
+    best
+}
+
+fn total(lines: &BTreeMap<usize, f64>) -> f64 {
+    lines.values().sum()
+}
+
+/// The groups' removable lines with each line of a file counted once. A pair charges its
+/// `b` file, the later path, so of three copies the first is never charged and two count;
+/// never more than the pair's own estimate.
+fn lines_once<'a>(groups: impl IntoIterator<Item = &'a Group>) -> usize {
+    let mut counted: HashMap<(&str, usize), f64> = HashMap::new();
+    let mut sum = 0;
+    for g in groups {
+        let [a, b] = matched(g);
+        let mut new = 0.0;
+        for (&line, &weight) in &b {
+            let seen = counted.entry((&g.b, line)).or_default();
+            if weight > *seen {
+                new += weight - *seen;
+                *seen = weight;
+            }
+        }
+        // Rounded per pair, as its own estimate is, so the sum never exceeds the pairs'.
+        sum += new.min(total(&a)).round() as usize;
+    }
+    sum
 }
 
 // ----- changed files -----
@@ -836,7 +858,7 @@ pub fn render_text(report: &Report) -> String {
     match (&report.base, report.changed_files) {
         (Some(base), Some(changed)) => writeln!(
             out,
-            "{} file pairs and {} helper groups, ~{} removable lines, touching {changed} files changed since {base} ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines, touching {changed} files changed since {base} (findings: {}).",
             report.file_pairs,
             report.helper_groups,
             report.removable_lines,
@@ -844,7 +866,7 @@ pub fn render_text(report: &Report) -> String {
         ),
         _ => writeln!(
             out,
-            "{} file pairs and {} helper groups, ~{} removable lines ({}).",
+            "{} file pairs and {} helper groups, ~{} removable lines (findings: {}).",
             report.file_pairs,
             report.helper_groups,
             report.removable_lines,
