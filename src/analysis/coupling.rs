@@ -275,8 +275,21 @@ pub fn analyze(
     }
     let exports = |file: &str, name: &str| exported.get(file).is_some_and(|s| s.contains(name));
 
-    let tree = Tree::new(base, graph, files.iter().map(|f| f.rel.clone()).collect());
+    let mut tree = Tree::new(base, graph, files.iter().map(|f| f.rel.clone()).collect());
     let lang = |file: &str| language.get(file).copied().unwrap_or(Language::TypeScript);
+    // Rust `pub mod x;`: file → (`x`, its file).
+    let mut modules: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for (file, list) in &imports {
+        for import in list.iter().filter(|i| is_pub_mod(i)) {
+            if let Some((child, names)) = tree.resolve_rust(file, import)
+                && names.is_empty()
+            {
+                let name = import.reexported[0].clone();
+                modules.entry(file.clone()).or_default().push((name, child));
+            }
+        }
+    }
+    tree.publish(&modules);
 
     // Entry files' re-exports: (exported name, real file, its name there).
     let entries: HashSet<&str> = tree
@@ -327,9 +340,14 @@ pub fn analyze(
         BTreeMap::new();
     let mut used: HashSet<(String, String)> = HashSet::new();
     let mut used_all: HashSet<String> = HashSet::new();
+    // Files of `used_all` imported whole from their own crate, where `pub(crate)` is in reach.
+    let mut used_within: HashSet<String> = HashSet::new();
     let mut mark = |tree: &Tree, importer: &str, file: &str, name: &str| {
         if tree.innermost(file).is_some_and(|b| !within(importer, &b)) {
             if name == "*" || name.is_empty() {
+                if tree.crate_dir(importer) == tree.crate_dir(file) {
+                    used_within.insert(file.to_string());
+                }
                 used_all.insert(file.to_string());
             } else {
                 used.insert((file.to_string(), name.to_string()));
@@ -337,7 +355,7 @@ pub fn analyze(
         }
     };
     for (file, list) in &imports {
-        for import in list {
+        for import in list.iter().filter(|i| !is_pub_mod(i)) {
             for (target, names) in tree.resolve(file, lang(file), import) {
                 if target == *file {
                     continue;
@@ -484,6 +502,7 @@ pub fn analyze(
         let mut surface: BTreeSet<String> = BTreeSet::new();
         let mut unused = BTreeSet::new();
         for entry in entry_files {
+            let module = tree.public.get(&(dir.clone(), entry.clone()));
             let mut names: Vec<String> = exported
                 .get(entry.as_str())
                 .map(|s| s.iter().map(|n| n.to_string()).collect())
@@ -497,23 +516,40 @@ pub fn analyze(
                 }
             }
             for name in names {
+                // A public module's names are surface under its path: `ax::Frame`.
+                let shown = module.map_or(name.clone(), |m| format!("{m}::{name}"));
                 if !is_used(entry, &name) {
-                    unused.insert(name.clone());
+                    unused.insert(shown.clone());
                 }
-                surface.insert(name);
+                surface.insert(shown);
             }
         }
-        // A name re-exported by two entries is used if either is.
+        // A name re-exported by two entries is used if either is; a public module's names
+        // (`x::Name`) and whole-module imports are its own.
+        let shared = |e: &&String| !tree.public.contains_key(&(dir.clone(), (*e).clone()));
         let unused: Vec<String> = unused
             .into_iter()
-            .filter(|n| !entry_files.iter().any(|e| is_used(e, n)))
+            .filter(|n| {
+                n.contains("::") || !entry_files.iter().filter(shared).any(|e| is_used(e, n))
+            })
             .collect();
         let own = owned.get(dir).map(Vec::as_slice).unwrap_or_default();
         let (incoming, bypass_in) = incoming.get(dir).copied().unwrap_or_default();
         let hidden = own
             .iter()
-            .filter(|(f, n)| !is_used(f, n) && !surfaced.contains(&(*f, *n)))
+            // Rust `use other_crate::b;` (common) reaches only what module `b` exports.
+            .filter(|(f, n)| {
+                let reached = lang(f) != Language::Rust
+                    || exports(f, n)
+                    || used_within.contains(*f)
+                    || used.contains(&(f.to_string(), n.to_string()));
+                !(is_used(f, n) && reached) && !surfaced.contains(&(*f, *n))
+            })
             .count();
+        // A manifest with no entry and no code of its own, e.g. a Cargo workspace root.
+        if entry_files.is_empty() && own.is_empty() && incoming == 0 {
+            continue;
+        }
         if incoming > 0 {
             totals.surface += surface.len();
             totals.unused_surface += unused.len();
@@ -560,6 +596,8 @@ struct Tree<'a> {
     python_roots: Vec<String>,
     /// Directory → its tsconfigs' `paths`, `tsconfig.json` first.
     aliases: HashMap<String, Vec<Aliases>>,
+    /// (boundary, entry file) → its module path there, for Rust `pub mod` entries: `ax`.
+    public: HashMap<(String, String), String>,
 }
 
 /// A tsconfig's effective `paths` and `baseUrl`, after `extends`.
@@ -652,6 +690,7 @@ impl<'a> Tree<'a> {
             passthrough: HashSet::new(),
             python_roots: roots.into_iter().collect(),
             aliases,
+            public: HashMap::new(),
         };
         let mut by_dir: HashMap<&str, Vec<String>> = HashMap::new();
         for file in tree.files.iter().filter(|f| is_entry_name(name_of(f))) {
@@ -685,6 +724,33 @@ impl<'a> Tree<'a> {
             tree.boundaries.insert(dir.clone(), entries);
         }
         tree
+    }
+
+    /// Rust: every file an entry reaches by `pub mod` chains is an entry too, as a package
+    /// `exports` path is. `modules` is file → (`x`, its file) per `pub mod x;`.
+    fn publish(&mut self, modules: &HashMap<String, Vec<(String, String)>>) {
+        for (dir, entries) in &mut self.boundaries {
+            let mut i = 0;
+            while i < entries.len() {
+                let parent = self.public.get(&(dir.clone(), entries[i].clone())).cloned();
+                // Beside a `lib.rs`, `main.rs` is the binary's root: its modules export nothing.
+                let binary = name_of(&entries[i]) == "main.rs"
+                    && entries.contains(&join(dir_of(&entries[i]), "lib.rs"));
+                let children = modules.get(&entries[i]).filter(|_| !binary);
+                for (name, file) in children.into_iter().flatten() {
+                    if !entries.contains(file) {
+                        let path = match &parent {
+                            Some(p) => format!("{p}::{name}"),
+                            None => name.clone(),
+                        };
+                        self.public.insert((dir.clone(), file.clone()), path);
+                        entries.push(file.clone());
+                    }
+                }
+                i += 1;
+            }
+            entries.sort();
+        }
     }
 
     fn counted(&self, dir: &str) -> bool {
@@ -1420,6 +1486,11 @@ fn without_trailing_commas(json: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Rust `pub mod x;`: a module re-exported whole, not an import.
+fn is_pub_mod(import: &Import) -> bool {
+    import.names.is_empty() && !import.reexported.is_empty()
 }
 
 fn is_private_python(file: &str) -> bool {
