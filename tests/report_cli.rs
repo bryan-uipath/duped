@@ -491,6 +491,46 @@ fn rolls_file_pairs_up_by_directory() {
 }
 
 #[test]
+fn directories_skip_one_directory_and_pairs_with_nothing_removable() {
+    let root = temp("directories-skip");
+    // Two copied functions inside `c`: sibling pairs, not a port.
+    write(&root, "c/list.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "c/rows.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "c/http.ts", &RETRY.replace("NAME", "fetchJson"));
+    write(&root, "c/load.ts", &RETRY.replace("NAME", "loadJson"));
+    // `d` and `e` share only names, in two file pairs: nothing to remove.
+    for (file, x, y) in [
+        ("one.ts", "openDoor", "shutDoor"),
+        ("two.ts", "liftLid", "dropLid"),
+    ] {
+        write(
+            &root,
+            &format!("d/{file}"),
+            &format!(
+                "export function {x}(a: string) {{ return a.trim(); }}\nexport function {y}(n: number) {{ return n + 1; }}\n"
+            ),
+        );
+        write(
+            &root,
+            &format!("e/{file}"),
+            &format!(
+                "export function {x}(a: number[]) {{ return a.length; }}\nexport function {y}(s: string, t: string) {{ return s + t; }}\n"
+            ),
+        );
+    }
+
+    let report = json(&root, &[]);
+    let lines: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![11, 11, 0, 0]);
+    assert_eq!(report["directories"], serde_json::json!([]));
+    assert!(!text(&root).contains("Directories sharing"));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn a_failed_analysis_is_reported_and_the_others_still_run() {
     let root = temp("failed");
     write(&root, "duped.toml", "[types]\nexclude_names = [\"[bad\"]\n");
