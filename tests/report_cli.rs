@@ -166,6 +166,41 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
+fn says_how_many_files_it_scanned_and_skipped_as_tests() {
+    let root = temp("scanned");
+    // `empty.ts` declares nothing but is still read; `node_modules` is never walked.
+    for file in [
+        "a.ts",
+        "empty.ts",
+        "a.test.ts",
+        "tests/b.ts",
+        "node_modules/p/c.ts",
+    ] {
+        let text = if file == "empty.ts" {
+            "// nothing\n"
+        } else {
+            "export const x = 1;\n"
+        };
+        write(&root, file, text);
+    }
+    let report = json(&root, &[]);
+    assert_eq!(report["scannedFiles"], 2);
+    assert_eq!(report["skippedTestFiles"], 2);
+    assert!(text(&root).contains(
+        "\nScanned 2 files; skipped 2 test, mock and fixture files (--include-tests).\n"
+    ));
+
+    let all = json(&root, &["--include-tests"]);
+    assert_eq!(
+        (&all["scannedFiles"], &all["skippedTestFiles"]),
+        (&4.into(), &0.into())
+    );
+    let all = String::from_utf8(duped(&root, &["--include-tests"]).stdout).unwrap();
+    assert!(all.contains("\nScanned 4 files.\n"), "{all}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn same_file_type_pairs_count_one_side() {
     // Two 6-line interfaces with the same fields in one file: one copy is removable, not both.
     let root = temp("same-file");

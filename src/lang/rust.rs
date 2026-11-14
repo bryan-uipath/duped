@@ -40,6 +40,7 @@ pub fn extract(parser: &mut Parser, source: &str, rel: &str) -> Vec<Record> {
 
 /// Each leaf of every `use` tree, outside inline `mod`s (whose paths start elsewhere):
 /// `use a::{b::C, d::*}` is `a::b` → `C` and `a::d` → `*`. `pub use` leaves are re-exports.
+/// `pub mod x;` is `self::x` re-exported whole, with no names.
 pub fn imports(parser: &mut Parser, source: &str) -> Vec<Import> {
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -51,7 +52,17 @@ pub fn imports(parser: &mut Parser, source: &str) -> Vec<Import> {
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         match node.kind() {
-            "mod_item" => {}
+            "mod_item" => {
+                let declared = node.child_by_field_name("body").is_none() && is_pub(node, source);
+                if let Some(name) = node.child_by_field_name("name").filter(|_| declared) {
+                    let name = &source[name.byte_range()];
+                    out.push(Import {
+                        specifier: format!("self::{name}"),
+                        names: Vec::new(),
+                        reexported: vec![name.to_string()],
+                    });
+                }
+            }
             "use_declaration" => {
                 let Some(argument) = node.child_by_field_name("argument") else {
                     continue;
@@ -726,7 +737,7 @@ mod tests {
     fn imports_expand_use_trees() {
         let source = "pub use crate::a::{self, b::C as D, e::*};\nuse super::x;\n\
             pub(crate) use foo::Bar;\nuse baz;\nmod inline { use skipped::Y; }\n\
-            fn f() { use self::local::Z; }";
+            fn f() { use self::local::Z; }\npub mod open;\nmod closed;\npub(crate) mod ours;";
         let found: Vec<(String, Vec<String>, Vec<String>)> = imports(&mut Parser::new(), source)
             .into_iter()
             .map(|i| (i.specifier, i.names, i.reexported))
@@ -742,6 +753,7 @@ mod tests {
                 ("foo".into(), s(&["Bar"]), vec![]),
                 ("".into(), s(&["baz"]), vec![]),
                 ("self::local".into(), s(&["Z"]), vec![]),
+                ("self::open".into(), vec![], s(&["open"])),
             ]
         );
     }

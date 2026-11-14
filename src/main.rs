@@ -65,7 +65,7 @@ struct CouplingArgs {
     /// Scan the tree at this ref, in a temporary worktree, instead of the working tree.
     #[arg(long)]
     rev: Option<String>,
-    /// Also print the score of the boundaries under this path, relative to DIR (repeatable).
+    /// Also print the score of the boundaries under this path, relative to the scanned PATH (repeatable).
     #[arg(long = "folder")]
     folders: Vec<String>,
     /// List every cross-boundary edge, not only bypass edges.
@@ -531,11 +531,12 @@ fn report(
         .transpose()?;
     let graph = modules::ModuleGraph::discover(root, &config.modules)?;
     let walk = walk_options(&args.scan, config, rules.clone(), root, base);
-    let files = walk::discover(&args.scan.path, &walk)?;
+    let (files, skipped_tests) = walk::discover_counting(&args.scan.path, &walk)?;
     let extraction = lang::extract_files(&files);
     if extraction.skipped > 0 {
         eprintln!("duped: skipped {} unreadable files", extraction.skipped);
     }
+    let scanned_files = files.len() - extraction.skipped;
     let records = extraction.records;
     let judge = |noun, compared: &dyn Fn(&record::Record) -> bool| {
         judge::ProjectJudge::new(
@@ -605,7 +606,7 @@ fn report(
         Ok(report::types(&records, &found))
     });
 
-    let report = report::Report::new(
+    let mut report = report::Report::new(
         base.display().to_string(),
         args.base.as_deref(),
         changed,
@@ -619,6 +620,7 @@ fn report(
         helpers,
         args.top,
     );
+    (report.scanned_files, report.skipped_test_files) = (scanned_files, skipped_tests);
     let mut out = output(&args.scan)?;
     if args.json {
         serde_json::to_writer_pretty(&mut out, &report)?;
