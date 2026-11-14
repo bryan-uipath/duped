@@ -43,6 +43,8 @@ pub struct TypesConfig {
     pub exclude_names: Vec<String>,
     /// `false` drops the built-in `*Props` exclusion.
     pub default_excludes: Option<bool>,
+    /// `true` pairs types across languages, as `--cross-language` does; `report` reads it too.
+    pub cross_language: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
