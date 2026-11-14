@@ -269,7 +269,7 @@ done
 | --- | --- | --- |
 | `--base <ref>` | | edge-matched changes since the merge base |
 | `--rev <ref>` | working tree | scan this commit instead |
-| `--folder <path>` | | also print the score of the boundaries under this path (repeatable) |
+| `--folder <path>` | | also print the score of the boundaries under this path, relative to `DIR` (repeatable) |
 | `--all-edges` | off | list every cross-boundary edge, not only bypass edges |
 | `--top` | `40` | boundaries (worst score first), edges and leaks to show |
 

@@ -65,7 +65,7 @@ struct CouplingArgs {
     /// Scan the tree at this ref, in a temporary worktree, instead of the working tree.
     #[arg(long)]
     rev: Option<String>,
-    /// Also print the score of the boundaries under this path, relative to DIR (repeatable).
+    /// Also print the score of the boundaries under this path, relative to the scanned PATH (repeatable).
     #[arg(long = "folder")]
     folders: Vec<String>,
     /// List every cross-boundary edge, not only bypass edges.
