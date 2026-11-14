@@ -123,6 +123,12 @@ struct ReportArgs {
     /// committed or not, or untracked.
     #[arg(long)]
     base: Option<String>,
+    /// Also report function pairs in the same file.
+    #[arg(long)]
+    include_same_file: bool,
+    /// Also report type, name and import pairs in the same module.
+    #[arg(long)]
+    include_same_module: bool,
     /// How many file pairs to show.
     #[arg(long, default_value_t = 40)]
     top: usize,
@@ -550,7 +556,10 @@ fn report(
     };
 
     let bodies = report::attempt(|| {
-        let options = body_options(&defaults());
+        let options = analysis::bodies::BodyOptions {
+            include_same_file: args.include_same_file,
+            ..body_options(&defaults())
+        };
         let judge = judge("functions", &|r| {
             analysis::bodies::is_candidate(r, &options)
         });
@@ -566,7 +575,7 @@ fn report(
         let paths: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         let judge = judge::FileJudge::new(&graph, base, paths.iter().copied());
         let found = analysis::files::find_identical_files(&sources, analysis::files::MIN_LINES);
-        Ok(report::files(&paths, &found, &judge))
+        Ok((report::files(&paths, &found, &judge), report::Hidden::new()))
     });
     let helpers = report::attempt(|| {
         let options = helper_options(&defaults());
@@ -575,32 +584,43 @@ fn report(
         // A copy in a non-first identical file is counted with that file, not again here.
         let copies: HashSet<String> = identical
             .iter()
-            .flatten()
+            .flat_map(|(found, _)| found)
             .map(|f| f.b.file.clone())
             .collect();
         let families = analysis::helpers::families(&records, &found.families, &judge);
         let groups = analysis::helpers::without_files(&records, found.groups, &copies, &judge);
-        Ok((groups, families))
+        let hidden = [("acknowledged", found.hidden_acknowledged)].into();
+        Ok((groups, families, hidden))
     });
     let imports = report::attempt(|| {
         // Unreadable files were counted above.
         let (imports, _) = lang::extract_imports(&files, lang::is_script);
         let files = analysis::imports::file_items(imports);
         let judge = judge::FileJudge::new(&graph, base, files.iter().map(|f| f.file.as_str()));
-        let found =
-            analysis::imports::find_shared_imports(&files, &import_options(&defaults()), &judge);
+        let options = ImportOptions {
+            include_same_module: args.include_same_module,
+            ..import_options(&defaults())
+        };
+        let found = analysis::imports::find_shared_imports(&files, &options, &judge);
         Ok(report::imports(&files, &found))
     });
     let names = report::attempt(|| {
+        let options = analysis::names::NameOptions {
+            include_same_module: args.include_same_module,
+            ..name_options(&defaults(), config)
+        };
         let found = analysis::names::find_shared_names(
             &records,
-            &name_options(&defaults(), config),
+            &options,
             &judge("declarations", &|_| true),
         );
         Ok(report::names(&records, &found))
     });
     let types = report::attempt(|| {
-        let options = type_options(&defaults(), config, rules)?;
+        let options = analysis::types::TypeOptions {
+            include_same_module: args.include_same_module,
+            ..type_options(&defaults(), config, rules)?
+        };
         let judge = judge("types", &|r| matches!(r, record::Record::Type(_)));
         let found = analysis::types::find_duplicate_types(&records, &options, &judge);
         Ok(report::types(&records, &found))

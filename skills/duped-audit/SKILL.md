@@ -24,7 +24,7 @@ duped report <dir> --top 60 --exclude '**/examples' --json > "$REPORT"; echo "$R
 
 Use the printed literal path in later commands (shell variables don't persist between calls).
 
-`<dir>` can be the repo root or one package. If `truncated` is true, raise `--top` before concluding anything about coverage. It doesn't say which list was cut: compare `filePairs` with `groups | length`, `helperGroups` with `helpers | length` and `helperFamilies` with `families | length`; `--top` at the largest count lifts every cut. For a wider net on one analysis, run it directly into a file, e.g. `duped bodies <dir> --threshold 0.4 --json > <temporary-file>`: only `report --json` honours `--top`, the others print every pair.
+`<dir>` can be the repo root or one package. If `truncated` is true, raise `--top` before concluding anything about coverage. It doesn't say which list was cut: compare `filePairs` with `groups | length`, `helperGroups` with `helpers | length` and `helperFamilies` with `families | length`; `--top` at the largest count lifts every cut. Sum `detectors.*.hidden`: when `sameFile` or `sameModule` rival the kept counts, or one module holds most of the code, rerun with `--include-same-file --include-same-module`; a group with `a == b` is duplication inside one file. For a wider net on one analysis, run it directly into a file, e.g. `duped bodies <dir> --threshold 0.4 --json > <temporary-file>`: only `report --json` honours `--top`, the others print every pair.
 
 ## 3. Verify
 

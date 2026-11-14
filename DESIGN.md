@@ -92,7 +92,7 @@ Each cluster also gets a suggested home: a member's module that every other memb
 | `duped report [PATH]` | `bodies`, `files`, `imports`, `names` and `types` pairs grouped by file pair, ranked by estimated removable lines; `helpers` groups ranked apart |
 | `duped coupling [PATH]` | imports that bypass entry files, by depth; surface, hiding and leaks per boundary |
 
-All are implemented; `fns` is a prototype (signatures only) and not part of `report`. Every analysis supports `--json`. `report --base <ref>` keeps only findings whose lines the diff since the merge base touches (per file for `names`, `imports` and `files`, which have no lines); `coupling --base <ref>` compares with a scan of the merge base, and `coupling --rev <ref>` scans a commit. The other commands don't take `--base`.
+All are implemented; `fns` is a prototype (signatures only) and not part of `report`. Every analysis supports `--json`. `report` counts the same-file and same-module pairs its analyses hide and shows them with `--include-same-file` and `--include-same-module`. `report --base <ref>` keeps only findings whose lines the diff since the merge base touches (per file for `names`, `imports` and `files`, which have no lines); `coupling --base <ref>` compares with a scan of the merge base, and `coupling --rev <ref>` scans a commit. The other commands don't take `--base`.
 
 ## Per-repo config: `duped.toml`
 

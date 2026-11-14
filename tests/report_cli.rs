@@ -491,6 +491,97 @@ fn rolls_file_pairs_up_by_directory() {
 }
 
 #[test]
+fn hidden_pairs_are_counted_and_shown_by_flag() {
+    // In one package: a copy within each of two files, and a type copied between two files.
+    let root = temp("hidden");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/core/package.json",
+        r#"{"name":"@demo/core"}"#,
+    );
+    // Pairs are tagged only when the scanned types span two modules.
+    write(
+        &root,
+        "packages/web/package.json",
+        r#"{"name":"@demo/web"}"#,
+    );
+    write(
+        &root,
+        "packages/web/point.ts",
+        "export interface Point { x: number; y: number; z: number; w: number }\n",
+    );
+    let two = |body: &str, a, b| body.replace("NAME", a) + &body.replace("NAME", b);
+    write(
+        &root,
+        "packages/core/list.ts",
+        &two(LIST, "uniqueItems", "dedupeRows"),
+    );
+    write(
+        &root,
+        "packages/core/http.ts",
+        &two(RETRY, "fetchJson", "loadJson"),
+    );
+    let shape = |name: &str| {
+        format!(
+            "export interface {name} {{\n  id: string;\n  label: string;\n  owner: string;\n  status: string;\n}}\n"
+        )
+    };
+    write(&root, "packages/core/alpha.ts", &shape("Alpha"));
+    write(&root, "packages/core/beta.ts", &shape("Beta"));
+
+    let report = json(&root, &[]);
+    assert_eq!(report["filePairs"], 0, "{report}");
+    assert_eq!(report["detectors"]["bodies"]["hidden"]["sameFile"], 2);
+    assert_eq!(report["detectors"]["types"]["hidden"]["sameModule"], 1);
+    assert!(report["detectors"]["files"].get("hidden").is_none());
+    let text = text(&root);
+    assert!(
+        text.contains(
+            "\nHidden pairs: 2 same-file (--include-same-file), 1 same-module (--include-same-module).\n"
+        ),
+        "{text}"
+    );
+
+    let flags = ["--include-same-file", "--include-same-module"];
+    let report = json(&root, &flags);
+    assert_eq!(report["detectors"]["bodies"]["hidden"]["sameFile"], 0);
+    assert_eq!(report["detectors"]["types"]["hidden"]["sameModule"], 0);
+    let pairs: Vec<(&str, &str, u64)> = groups(&report)
+        .iter()
+        .map(|g| {
+            (
+                g["a"].as_str().unwrap(),
+                g["b"].as_str().unwrap(),
+                g["removableLines"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // One copy of each is removable.
+    assert_eq!(
+        pairs,
+        vec![
+            ("packages/core/list.ts", "packages/core/list.ts", 11),
+            ("packages/core/http.ts", "packages/core/http.ts", 11),
+            ("packages/core/alpha.ts", "packages/core/beta.ts", 6),
+        ]
+    );
+    // Same-file pairs link no two files, so they aren't a directory roll-up.
+    assert_eq!(report["directories"], serde_json::json!([]));
+    let text = String::from_utf8(duped(&root, &flags).stdout).unwrap();
+    assert!(!text.contains("Hidden pairs"), "{text}");
+    assert!(
+        text.contains("\n   packages/core/list.ts\n   - bodies function"),
+        "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn directories_skip_one_directory_and_pairs_with_nothing_removable() {
     let root = temp("directories-skip");
     // Two copied functions inside `c`: sibling pairs, not a port.
@@ -550,6 +641,31 @@ fn header_and_directories_count_a_line_once_however_many_pairs_cover_it() {
         report["directories"],
         serde_json::json!([{ "a": "a", "b": "b", "filePairs": 2, "removableLines": 11 }])
     );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn diff_mode_keeps_same_file_pairs_on_changed_lines() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("same-file-diff");
+    let old = RETRY.replace("NAME", "fetchJson") + &RETRY.replace("NAME", "loadJson");
+    let list = LIST.replace("NAME", "uniqueItems");
+    write(&root, "a.ts", &format!("{old}{list}"));
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "base"]);
+    let copy = LIST.replace("NAME", "dedupeRows");
+    write(&root, "a.ts", &format!("{old}{list}{copy}"));
+
+    let report = json(&root, &["--base", "main", "--include-same-file"]);
+    assert_eq!(report["detectors"]["bodies"]["total"], 2);
+    assert_eq!(groups(&report).len(), 1, "{report}");
+    let group = &groups(&report)[0];
+    assert_eq!(group["changed"], serde_json::json!(["a.ts"]));
+    assert_eq!(group["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(group["findings"][0]["b"]["name"], "dedupeRows");
     std::fs::remove_dir_all(&root).unwrap();
 }
 
