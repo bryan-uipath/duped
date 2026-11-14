@@ -32,6 +32,10 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_files: Option<usize>,
     pub detectors: BTreeMap<&'static str, Status>,
+    /// Source files read, with or without declarations; set by the caller.
+    pub scanned_files: usize,
+    /// Test, mock and fixture files left out; 0 with `--include-tests`.
+    pub skipped_test_files: usize,
     /// Groups before `--top`.
     pub file_pairs: usize,
     /// Helper groups before `--top`.
@@ -242,6 +246,8 @@ impl Report {
             base: base.map(str::to_string),
             changed_files: changed.as_ref().map(|c| c.0.len()),
             detectors,
+            scanned_files: 0,
+            skipped_test_files: 0,
             file_pairs,
             helper_groups,
             helper_families,
@@ -400,8 +406,8 @@ pub fn types(records: &[Record], report: &TypeReport) -> Vec<Finding> {
                 a: side(&records[p.a]),
                 b: side(&records[p.b]),
                 evidence: format!(
-                    "{relationship}, {} field overlap: {}",
-                    round(p.similarity),
+                    "{relationship}, {:.2} field overlap: {}",
+                    p.similarity,
                     shown.join(", ")
                 ),
                 rank: p.similarity,
@@ -843,6 +849,16 @@ pub fn render_text(report: &Report) -> String {
             report.helper_groups,
             report.removable_lines,
             counts.join("; ")
+        ),
+    }
+    .ok();
+    // A low total is only clean if the scan covered the code, e.g. `Scanned 181 files; skipped 245 …`.
+    write!(out, "Scanned {} files", report.scanned_files).ok();
+    match report.skipped_test_files {
+        0 => writeln!(out, "."),
+        n => writeln!(
+            out,
+            "; skipped {n} test, mock and fixture files (--include-tests)."
         ),
     }
     .ok();

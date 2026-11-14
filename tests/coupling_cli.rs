@@ -537,14 +537,14 @@ fn rust_resolves_crates_modules_and_globs() {
     write(
         &root,
         "crates/core/src/lib.rs",
-        "pub mod api;\npub mod internal;\npub use api::Client;\n",
+        "mod api;\nmod internal;\npub use api::Client;\n",
     );
     write(
         &root,
         "crates/core/src/api.rs",
         "pub struct Client;\npub(crate) fn hidden() {}\n",
     );
-    write(&root, "crates/core/src/internal/mod.rs", "pub mod deep;\n");
+    write(&root, "crates/core/src/internal/mod.rs", "mod deep;\n");
     write(
         &root,
         "crates/core/src/internal/deep.rs",
@@ -577,6 +577,303 @@ fn rust_resolves_crates_modules_and_globs() {
     let core = boundary(&report, "crates/core");
     assert_eq!(core["surface"], serde_json::json!(["Client"]));
     assert_eq!(leaks(&report).len(), 2);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn rust_pub_mod_chains_are_surface() {
+    let root = temp("rs-pub-mod");
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root,
+        "crates/core/Cargo.toml",
+        "[package]\nname = \"core-lib\"\n",
+    );
+    write(
+        &root,
+        "crates/core/src/lib.rs",
+        "pub mod api;\nmod private;\npub fn root() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api.rs",
+        "pub mod deep;\npub struct Client;\nfn helper() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api/deep.rs",
+        "pub fn deep() {}\npub fn spare() {}\n",
+    );
+    write(&root, "crates/core/src/private.rs", "pub fn secret() {}\n");
+    write(
+        &root,
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncore-lib = { path = \"../core\" }\n",
+    );
+    write(
+        &root,
+        "crates/app/src/main.rs",
+        "use core_lib::*;\nuse core_lib::api;\nuse core_lib::api::deep::deep;\nuse core_lib::private::secret;\nfn main() {}\n",
+    );
+    let report = json(&root, &["--all-edges"]);
+    let main = "crates/app/src/main.rs";
+    assert_eq!(
+        edges(&report),
+        vec![
+            // Only the private module is past the entry.
+            e(main, "crates/core/src/private.rs", 1),
+            e(main, "crates/core/src/api.rs", 0),
+            e(main, "crates/core/src/api/deep.rs", 0),
+            e(main, "crates/core/src/lib.rs", 0),
+        ]
+    );
+    let core = boundary(&report, "crates/core");
+    assert_eq!(
+        core["surface"],
+        serde_json::json!(["api::Client", "api::deep::deep", "api::deep::spare", "root"])
+    );
+    // The root glob uses `root`, not a public module's `spare`.
+    assert_eq!(core["unused"], serde_json::json!(["api::deep::spare"]));
+    // `use core_lib::api;` doesn't reach the private `helper`.
+    assert_eq!((&core["declared"], &core["hidden"]), (&4.into(), &1.into()));
+    assert_eq!(leaks(&report), ["crates/core/src/private.rs#secret"]);
+    // The workspace root has no entry and no code: no row.
+    let rows = report["boundaries"].as_array().unwrap();
+    assert!(rows.iter().all(|b| b["dir"] != ""));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `b` reaches into `a` at depth 1; `a` reaches into its own `inner/internal/` at depth 2.
+#[test]
+fn cross_package_bypasses_are_named_counted_and_listed_first() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("cross-package");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/a/package.json",
+        r#"{"name":"@m/a","main":"src/index.ts"}"#,
+    );
+    write(&root, "packages/a/src/index.ts", "export function a() {}\n");
+    write(
+        &root,
+        "packages/a/src/other.ts",
+        "export function other() {}\n",
+    );
+    write(&root, "packages/a/src/inner/index.ts", "export {};\n");
+    write(
+        &root,
+        "packages/a/src/inner/internal/deeper.ts",
+        "export function deeper() {}\n",
+    );
+    write(
+        &root,
+        "packages/a/src/user.ts",
+        "import { deeper } from './inner/internal/deeper';\n",
+    );
+    write(&root, "packages/b/package.json", r#"{"name":"@m/b"}"#);
+    write(&root, "packages/b/src/main.ts", "export {};\n");
+    git(&root, &["init", "-q", "-b", "main"]);
+    commit(&root, "base");
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    write(
+        &root,
+        "packages/b/src/main.ts",
+        "import { other } from '@m/a/other';\n",
+    );
+    commit(&root, "feature");
+
+    let report = json(&root, &["--base", "main"]);
+    let (main, user) = ("packages/b/src/main.ts", "packages/a/src/user.ts");
+    assert_eq!(
+        edges(&report),
+        vec![
+            e(main, "packages/a/src/other.ts", 1),
+            e(user, "packages/a/src/inner/internal/deeper.ts", 2),
+        ]
+    );
+    let packages = |edge: &Value| {
+        (
+            edge["importerPackage"].clone(),
+            edge["targetPackage"].clone(),
+        )
+    };
+    assert_eq!(
+        packages(&report["edges"][0]),
+        ("@m/b".into(), "@m/a".into())
+    );
+    assert_eq!(
+        packages(&report["edges"][1]),
+        ("@m/a".into(), "@m/a".into())
+    );
+    assert_eq!(report["totals"]["bypassEdges"], 2);
+    assert_eq!(report["totals"]["crossPackageBypassEdges"], 1);
+    assert_eq!(report["totals"]["crossPackageBypassSymbols"], 1);
+    let a = boundary(&report, "packages/a");
+    assert_eq!(
+        (&a["bypassIn"], &a["crossPackageBypassIn"]),
+        (&1.into(), &1.into())
+    );
+    let inner = boundary(&report, "packages/a/src/inner");
+    assert_eq!(
+        (&inner["bypassIn"], &inner["crossPackageBypassIn"]),
+        (&1.into(), &0.into())
+    );
+    assert_eq!(report["diff"]["regressed"][0]["crossPackage"], true);
+
+    let listed = text(&root, &[]);
+    assert!(
+        listed.contains("2 bypass, 1 of them cross-package"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("bypass in 1 of 1 (1 cross-package)"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("packages/a/src/other.ts  ups=1 downs=1 bypass=1  [@m/b -> @m/a]"),
+        "{listed}"
+    );
+    let delta = text(&root, &["--base", "main"]);
+    assert!(delta.contains("bypass=1 (cross-package)"), "{delta}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Without a workspace, two packages may share a name: still two packages.
+#[test]
+fn packages_sharing_a_name_are_still_cross_package() {
+    let root = temp("same-name");
+    write(&root, "apps/web/package.json", r#"{"name":"app"}"#);
+    write(
+        &root,
+        "apps/web/src/main.ts",
+        "import { x } from '../../admin/src/x';\n",
+    );
+    write(&root, "apps/admin/package.json", r#"{"name":"app"}"#);
+    write(&root, "apps/admin/src/index.ts", "export {};\n");
+    write(&root, "apps/admin/src/x.ts", "export function x() {}\n");
+    let report = json(&root, &[]);
+    assert_eq!(report["totals"]["bypassEdges"], 1);
+    assert_eq!(report["totals"]["crossPackageBypassEdges"], 1);
+    assert_eq!(boundary(&report, "apps/admin")["crossPackageBypassIn"], 1);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `user.ts` imports `x` twice at depth 1: from its own package (2 downs) and from `b` (1).
+#[test]
+fn base_delta_matches_symbols_whatever_the_listing_order() {
+    if !has_git() {
+        return;
+    }
+    let root = temp("tie");
+    write(
+        &root,
+        "pnpm-workspace.yaml",
+        "packages:\n  - 'packages/*'\n",
+    );
+    write(
+        &root,
+        "packages/a/package.json",
+        r#"{"name":"@m/a","main":"src/index.ts"}"#,
+    );
+    write(&root, "packages/a/src/index.ts", "export {};\n");
+    write(&root, "packages/a/src/inner/index.ts", "export {};\n");
+    write(
+        &root,
+        "packages/a/src/inner/deep/index.ts",
+        "export function x() {}\n",
+    );
+    write(
+        &root,
+        "packages/a/src/user.ts",
+        "import { x } from './inner/deep';\nimport { x as y } from '@m/b/other';\n",
+    );
+    write(&root, "packages/b/package.json", r#"{"name":"@m/b"}"#);
+    write(&root, "packages/b/src/index.ts", "export {};\n");
+    write(&root, "packages/b/src/other.ts", "export function x() {}\n");
+    git(&root, &["init", "-q", "-b", "main"]);
+    commit(&root, "base");
+    // Both imports go, and so does `b`'s file; `a`'s `x` stays put.
+    write(&root, "packages/a/src/user.ts", "export {};\n");
+    std::fs::remove_file(root.join("packages/b/src/other.ts")).unwrap();
+    let report = branch(&root, "feature");
+    // The collision keeps the edge with more downs, not the cross-package one listed first.
+    assert_eq!(
+        names(&report["diff"]["removedWithoutMove"]),
+        vec!["packages/a/src/user.ts#x"]
+    );
+    assert_eq!(report["diff"]["improved"], serde_json::json!([]));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `core` has a library and a binary root; its `user` reaches a nested module of its own.
+#[test]
+fn rust_binary_roots_and_same_crate_reaches() {
+    let root = temp("rs-roots");
+    write(
+        &root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root,
+        "crates/core/Cargo.toml",
+        "[package]\nname = \"core-lib\"\n",
+    );
+    write(
+        &root,
+        "crates/core/src/lib.rs",
+        "mod api;\nmod inner;\nmod user;\npub use api::Client;\n",
+    );
+    write(
+        &root,
+        "crates/core/src/main.rs",
+        "pub mod api;\nfn main() {}\n",
+    );
+    write(
+        &root,
+        "crates/core/src/api.rs",
+        "pub struct Client;\npub struct Hidden;\n",
+    );
+    write(&root, "crates/core/src/inner/mod.rs", "mod b;\n");
+    write(
+        &root,
+        "crates/core/src/inner/b.rs",
+        "pub(crate) fn f() {}\n",
+    );
+    write(&root, "crates/core/src/user.rs", "use crate::inner::b;\n");
+    write(
+        &root,
+        "crates/app/Cargo.toml",
+        "[package]\nname = \"app\"\n[dependencies]\ncore-lib = { path = \"../core\" }\n",
+    );
+    write(
+        &root,
+        "crates/app/src/main.rs",
+        "use core_lib::api::Hidden;\nfn main() {}\n",
+    );
+    let report = json(&root, &[]);
+    // The binary's `pub mod api;` doesn't widen the library: `Hidden` is past the entry.
+    assert!(edges(&report).contains(&e("crates/app/src/main.rs", "crates/core/src/api.rs", 1)));
+    let core = boundary(&report, "crates/core");
+    assert_eq!(core["surface"], serde_json::json!(["Client"]));
+    assert_eq!(leaks(&report), ["crates/core/src/api.rs#Hidden"]);
+    // `use crate::inner::b;` reaches `pub(crate)` items: `f` is used from outside `inner`.
+    let inner = boundary(&report, "crates/core/src/inner");
+    assert_eq!(
+        (&inner["declared"], &inner["hidden"]),
+        (&1.into(), &0.into())
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
