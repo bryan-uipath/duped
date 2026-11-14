@@ -35,6 +35,8 @@ pub struct Edge {
     pub bypass: usize,
     /// Boundary directories whose entry the edge goes past.
     bypassed: Vec<String>,
+    /// Importer and target sit in different packages (modules of the module graph).
+    pub cross_package: bool,
 }
 
 impl Edge {
@@ -65,6 +67,8 @@ pub struct Boundary {
     /// Imported symbols from outside that land inside, and how many go past the entry.
     pub incoming: usize,
     pub bypass_in: usize,
+    /// Symbols of `bypass_in` imported from another package.
+    pub cross_package_in: usize,
     pub leaks: usize,
 }
 
@@ -114,6 +118,9 @@ pub struct Totals {
     pub edges: usize,
     pub cross_edges: usize,
     pub bypass_edges: usize,
+    /// Bypass edges, and their symbols, whose importer is in another package than the target.
+    pub cross_package_bypass_edges: usize,
+    pub cross_package_bypass_symbols: usize,
     /// Σ bypass over edges.
     pub bypass_depth: usize,
     pub leaks: usize,
@@ -155,6 +162,14 @@ fn hiding_of(hidden: usize, declared: usize) -> f64 {
     }
 }
 
+/// File → its module's index in the module graph (names can repeat) and name.
+type Packages = HashMap<String, (Option<usize>, String)>;
+
+/// `a` and `b` sit in different packages.
+fn crosses(packages: &Packages, a: &str, b: &str) -> bool {
+    packages.get(a).map(|p| p.0) != packages.get(b).map(|p| p.0)
+}
+
 fn ratio(a: usize, b: usize) -> f64 {
     if b == 0 { 0.0 } else { a as f64 / b as f64 }
 }
@@ -166,6 +181,8 @@ pub struct Coupling {
     pub edges: Vec<Edge>,
     pub boundaries: Vec<Boundary>,
     pub leaks: Vec<Leak>,
+    /// Each scanned file's package: its module in the module graph, and that module's name.
+    packages: Packages,
     /// Line counts per scanned file, for `--base`.
     lines: HashMap<String, usize>,
     /// Top-level declarations per file, with their line spans.
@@ -251,6 +268,13 @@ pub fn analyze(
             let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
             let last = usize::from(bytes.last().is_some_and(|&b| b != b'\n'));
             Some((f.rel.clone(), newlines + last))
+        })
+        .collect();
+    let packages: Packages = files
+        .iter()
+        .map(|f| {
+            let module = graph.module_of(&base.join(&f.rel));
+            (f.rel.clone(), (module, graph.name(module).to_string()))
         })
         .collect();
     let mut declared: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -392,11 +416,13 @@ pub fn analyze(
         files: files.len(),
         ..Totals::default()
     };
-    let mut incoming: HashMap<String, (usize, usize)> = HashMap::new();
+    // Boundary → symbols coming in, those bypassing, and those bypassing from another package.
+    let mut incoming: HashMap<String, (usize, usize, usize)> = HashMap::new();
     let mut leaks: BTreeMap<(String, String), (String, Vec<String>)> = BTreeMap::new();
     let mut edges = Vec::new();
     for ((importer, target), (via, names)) in merged {
         let (ups, downs, bypass, bypassed) = tree.score(&importer, &target);
+        let cross_package = crosses(&packages, &importer, &target);
         let edge = Edge {
             importer,
             target,
@@ -406,6 +432,7 @@ pub fn analyze(
             downs,
             bypass,
             bypassed,
+            cross_package,
         };
         let symbols = edge.symbols().len();
         totals.symbols += symbols;
@@ -419,6 +446,10 @@ pub fn analyze(
             totals.bypass_symbols += symbols;
             totals.symbol_depth += symbols * bypass;
             totals.bypass_cost += symbols * bypass * bypass;
+            if cross_package {
+                totals.cross_package_bypass_edges += 1;
+                totals.cross_package_bypass_symbols += symbols;
+            }
         }
         // Every boundary the edge enters from outside counts it as incoming.
         let mut dir = Some(dir_of(&edge.target));
@@ -428,6 +459,7 @@ pub fn analyze(
                 slot.0 += symbols;
                 if edge.bypassed.iter().any(|b| b == d) {
                     slot.1 += symbols;
+                    slot.2 += usize::from(cross_package) * symbols;
                 }
             }
             dir = parent(d);
@@ -534,7 +566,8 @@ pub fn analyze(
             })
             .collect();
         let own = owned.get(dir).map(Vec::as_slice).unwrap_or_default();
-        let (incoming, bypass_in) = incoming.get(dir).copied().unwrap_or_default();
+        let (incoming, bypass_in, cross_package_in) =
+            incoming.get(dir).copied().unwrap_or_default();
         let hidden = own
             .iter()
             // Rust `use other_crate::b;` (common) reaches only what module `b` exports.
@@ -565,6 +598,7 @@ pub fn analyze(
             hidden,
             incoming,
             bypass_in,
+            cross_package_in,
             leaks: leaks.iter().filter(|l| l.boundary == *dir).count(),
         });
     }
@@ -573,6 +607,7 @@ pub fn analyze(
         edges,
         boundaries,
         leaks,
+        packages,
         lines,
         declared,
     }
@@ -1533,6 +1568,8 @@ pub struct Change {
     /// Regressions only: how many other files already bypassed to this target and symbol at
     /// base. Many means an established convention rather than a new kind of reach-in.
     pub prior_importers: usize,
+    /// The importer is in another package than the target, at head or else at base.
+    pub cross_package: bool,
 }
 
 #[derive(Debug)]
@@ -1562,7 +1599,13 @@ pub struct Diff {
 pub fn diff(base: &Coupling, head: &Coupling) -> Diff {
     let (before, after) = (base.symbol_map(), head.symbol_map());
     let side = |s: Option<&(&str, usize)>| s.map(|(t, d)| (t.to_string(), *d));
+    let cross_package = |key: &(&str, &str)| {
+        let side = after.get(key).map(|s| (head, s));
+        let side = side.or_else(|| before.get(key).map(|s| (base, s)));
+        side.is_some_and(|(c, (target, _))| crosses(&c.packages, key.0, target))
+    };
     let change = |key: &(&str, &str), reason, grew| Change {
+        cross_package: cross_package(key),
         importer: key.0.to_string(),
         symbol: key.1.to_string(),
         before: side(before.get(key)),
@@ -1672,6 +1715,19 @@ pub struct Output<'a> {
     pub all_edges: bool,
 }
 
+/// The edges to show: bypasses from another package first, the ones to act on. Output
+/// only, so `--base` symbol matching doesn't depend on it.
+fn listed<'a>(o: &Output<'a>) -> Vec<&'a Edge> {
+    let mut edges: Vec<&Edge> = o
+        .coupling
+        .edges
+        .iter()
+        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
+        .collect();
+    edges.sort_by_key(|e| !(e.cross_package && e.bypass > 0));
+    edges
+}
+
 /// `.` for the scanned directory itself.
 fn shown(dir: &str) -> &str {
     if dir.is_empty() { "." } else { dir }
@@ -1703,11 +1759,12 @@ pub fn render_text(o: &Output) -> String {
     .ok();
     writeln!(
         out,
-        "{} files, {} edges ({} cross-boundary, {} bypass, depth {}), {} symbols, {} leaks; bypassCost {}, meanBypassDepth {:.2}.",
+        "{} files, {} edges ({} cross-boundary, {} bypass, {} of them cross-package, depth {}), {} symbols, {} leaks; bypassCost {}, meanBypassDepth {:.2}.",
         t.files,
         t.edges,
         t.cross_edges,
         t.bypass_edges,
+        t.cross_package_bypass_edges,
         t.bypass_depth,
         t.symbols,
         t.leaks,
@@ -1738,7 +1795,7 @@ pub fn render_text(o: &Output) -> String {
         o.top,
         |b| {
             format!(
-                "{:.2}  {}{}  surface {} (unused {}), hiding {:.2} ({} of {} hidden), bypass in {} of {}, leaks {}",
+                "{:.2}  {}{}  surface {} (unused {}), hiding {:.2} ({} of {} hidden), bypass in {} of {}{}, leaks {}",
                 b.score(),
                 shown(&b.dir),
                 if b.no_consumers() {
@@ -1753,15 +1810,15 @@ pub fn render_text(o: &Output) -> String {
                 b.declared,
                 b.bypass_in,
                 b.incoming,
+                match b.cross_package_in {
+                    0 => String::new(),
+                    n => format!(" ({n} cross-package)"),
+                },
                 b.leaks
             )
         },
     );
-    let edges: Vec<&Edge> = c
-        .edges
-        .iter()
-        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
-        .collect();
+    let edges = listed(o);
     let title = if o.all_edges {
         "Cross-boundary edges"
     } else {
@@ -1773,8 +1830,14 @@ pub fn render_text(o: &Output) -> String {
             .as_ref()
             .map(|v| format!(" (via {v})"))
             .unwrap_or_default();
+        let packages = if e.cross_package {
+            let name = |f: &String| c.packages.get(f).map_or("", |p| p.1.as_str());
+            format!("  [{} -> {}]", name(&e.importer), name(&e.target))
+        } else {
+            String::new()
+        };
         format!(
-            "{} -> {}{via}  ups={} downs={} bypass={}",
+            "{} -> {}{via}  ups={} downs={} bypass={}{packages}",
             e.importer, e.target, e.ups, e.downs, e.bypass
         )
     });
@@ -1825,8 +1888,13 @@ fn render_diff(
             0 => String::new(),
             n => format!(" ({n} prior importers)"),
         };
+        let cross = if ch.cross_package {
+            " (cross-package)"
+        } else {
+            ""
+        };
         format!(
-            "{}#{}  {} -> {}{reason}{grew}{prior}",
+            "{}#{}  {} -> {}{reason}{grew}{prior}{cross}",
             ch.importer,
             ch.symbol,
             side(&ch.before),
@@ -1893,6 +1961,8 @@ fn totals_json(c: &Coupling) -> Value {
         "edges": t.edges,
         "crossBoundaryEdges": t.cross_edges,
         "bypassEdges": t.bypass_edges,
+        "crossPackageBypassEdges": t.cross_package_bypass_edges,
+        "crossPackageBypassSymbols": t.cross_package_bypass_symbols,
         "bypassDepth": t.bypass_depth,
         "symbols": t.symbols,
         "crossBoundarySymbols": t.cross_symbols,
@@ -1945,20 +2015,21 @@ pub fn to_json(o: &Output) -> Value {
                 "hiding": b.hiding(),
                 "incoming": b.incoming,
                 "bypassIn": b.bypass_in,
+                "crossPackageBypassIn": b.cross_package_in,
                 "bypassRate": b.bypass_rate(),
                 "leaks": b.leaks,
                 "noConsumers": b.no_consumers(),
             })
         })
         .collect();
-    let edges: Vec<Value> = c
-        .edges
-        .iter()
-        .filter(|e| e.bypass > 0 || (o.all_edges && e.downs > 0))
+    let edges: Vec<Value> = listed(o)
+        .into_iter()
         .map(|e| {
             json!({
                 "importer": e.importer,
                 "target": e.target,
+                "importerPackage": c.packages.get(&e.importer).map(|p| &p.1),
+                "targetPackage": c.packages.get(&e.target).map(|p| &p.1),
                 "via": e.via,
                 "names": e.names,
                 "ups": e.ups,
@@ -1997,6 +2068,9 @@ pub fn to_json(o: &Output) -> Value {
                     }
                     if ch.grew {
                         v["grew"] = json!(true);
+                    }
+                    if ch.cross_package {
+                        v["crossPackage"] = json!(true);
                     }
                     if ch.prior_importers > 0 {
                         v["priorImporters"] = json!(ch.prior_importers);
