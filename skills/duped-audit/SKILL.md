@@ -13,7 +13,7 @@ Answers "what does this codebase duplicate?" with a ranked, verified cleanup lis
 
 The main noise is directories whose contents are *meant* to repeat each other: examples and demos, generated or vendored code, fixtures, versioned snapshots kept on purpose. Exclude them up front; globs are anchored at the scanned directory, so use `**/examples` for nested ones. If unsure, run once without, see what dominates the top, and rerun.
 
-Tests, mocks and fixtures (`*.test.*`, `tests/`, `__tests__/`, …) are skipped silently. `duped index <dir> | head -3` prints how many files hold a declaration; add `--include-tests` to see what the default leaves out, and pass it to `report` when test code is in scope. State which in the closing line.
+Tests, mocks and fixtures (`*.test.*`, `tests/`, `__tests__/`, …) are skipped by default. The report's `scannedFiles` and `skippedTestFiles` say how many: check them before concluding a repo is clean, and pass `--include-tests` when test code is in scope. State both counts in the closing line.
 
 ## 2. Run
 
@@ -60,7 +60,7 @@ The fix workflow lives in `duped-coupling`.
 Use the `duped` skill's report format, but rank by payoff (lines removable × how many places must stay in sync), not by score: a 0.7 pair spanning two packages beats a 0.95 pair inside one module. Close with:
 
 ```
-net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <dir>, tests included|skipped, excluded: <globs>.
+net: -<N> lines across <M> sites; <K> pairs confirmed by 2+ analyses. Scanned: <dir>, <scannedFiles> files, <skippedTestFiles> test files skipped, excluded: <globs>.
 coupling: score <s> (bypassRate <b>, unusedSurface <u>, hiding <h>); hotspots: <boundary> (<n> bypass in, <m> leaks, <term>), …
 ```
 

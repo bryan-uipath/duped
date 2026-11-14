@@ -25,7 +25,7 @@ Every command takes `[PATH]` (default `.`) plus `--exclude <glob>` (repeatable),
 | `duped index` | greppable markdown list of every top-level function and type | all |
 | `duped extract` | the same, as JSON Lines records | all |
 
-Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths are skipped by default. `duped index [PATH] | head -3` prints the number of files holding a declaration.
+Tests, mocks, fixtures, `node_modules`, `dist`, `build` and `.gitignore`d paths are skipped by default. `report` says how many: `scannedFiles`, `skippedTestFiles` (line 2 of the text); excluded, ignored and build-output paths are in neither.
 
 Flags that widen a scan:
 
