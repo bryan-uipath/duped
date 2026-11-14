@@ -235,7 +235,8 @@ fn sort_groups(groups: &mut [HelperGroup]) {
 /// names and positions can't collide. A destructured parameter keeps its keys by name, since
 /// callers pass those names. Text naming a parameter, such as shorthand `{ x }`, also records
 /// its position, so `{ x }` from the first parameter never matches `{ x }` from the second.
-/// `{ return x; }` becomes `x`, as an arrow function's expression body would be.
+/// `{ return x; }` becomes `x`, as an arrow function's expression body would be. Runs of pure
+/// boolean tests are sorted (see [`sort_pure_tests`]).
 fn normalised(f: &FunctionRecord) -> Vec<u64> {
     // Only a bare identifier is abstracted; a pattern (`{ user: u }`, `[a, b]`, `n = 10`) is
     // part of the signature callers see, so its text joins the key.
@@ -260,7 +261,7 @@ fn normalised(f: &FunctionRecord) -> Vec<u64> {
         .filter(|p| !(p.fields.is_empty() && plain(&p.name)))
         .map(|p| 4 << 48 | u64::from(token_hash(&p.name)));
     let position = |h: u32| params.iter().position(|&p| p == Some(h));
-    let tokens: Vec<u64> = f
+    let mut tokens: Vec<u64> = f
         .body
         .iter()
         .map(|&t| match t {
@@ -274,7 +275,7 @@ fn normalised(f: &FunctionRecord) -> Vec<u64> {
             },
         })
         .collect();
-    let text = |s| u64::from(token_hash(s));
+    sort_pure_tests(&mut tokens);
     let inner = match &tokens[..] {
         [open, ret, inner @ .., close]
             if [*open, *ret, *close] == [text("{"), text("return"), text("}")] =>
@@ -290,6 +291,88 @@ fn normalised(f: &FunctionRecord) -> Vec<u64> {
         inner.to_vec()
     };
     patterns.chain(body).collect()
+}
+
+fn text(s: &str) -> u64 {
+    u64::from(token_hash(s))
+}
+
+/// Sorts each run of adjacent pure tests joined by one of `&&`/`||`, so
+/// `typeof v === 'object' && v !== null` and `v !== null && typeof v === 'object'` match.
+/// A pure test is `p === x`, `p !== x`, `p == null`, `p != null` (either side may be `typeof p`)
+/// or `!p`, `!!p`, with `p` a plain parameter and `x` a parameter or literal: boolean, cannot
+/// throw, no effects, so order cannot matter. Anything else (`a.b`, `f(a)`, a bare `a`, other
+/// names) stays where it is, and tests are never moved across it.
+fn sort_pure_tests(tokens: &mut [u64]) {
+    let [and, or] = [text("&&"), text("||")];
+    let before = [text("("), text("return"), and, or];
+    let after = [text(")"), text(";"), and, or];
+    let mut i = 0;
+    while i < tokens.len() {
+        let ok_before = i == 0 || before.contains(&tokens[i - 1]);
+        let Some(first) = pure_test(&tokens[i..]).filter(|_| ok_before) else {
+            i += 1;
+            continue;
+        };
+        // Each test's (start, end), all joined by the operator after the first.
+        let mut run = vec![(i, i + first)];
+        let mut end = i + first;
+        let op = tokens.get(end).copied().filter(|t| [and, or].contains(t));
+        while let Some(op) = op
+            && tokens.get(end) == Some(&op)
+            && let Some(n) = pure_test(&tokens[end + 1..])
+        {
+            run.push((end + 1, end + 1 + n));
+            end += 1 + n;
+        }
+        // `a || b && c`: `&&` binds tighter, so a `||` run's edge operand next to `&&` isn't its own.
+        let binds = |t: Option<&u64>| op == Some(or) && t == Some(&and);
+        if i > 0 && binds(tokens.get(i - 1)) {
+            run.remove(0);
+        }
+        // The last test must end there: `a === b.c`, `a === b + 1` and `a || b && c` don't.
+        while let Some(&(_, stop)) = run.last()
+            && tokens
+                .get(stop)
+                .is_some_and(|t| !after.contains(t) || binds(Some(t)))
+        {
+            run.pop();
+        }
+        if let (Some(&(start, _)), Some(&(_, stop))) = (run.first(), run.last())
+            && let Some(op) = op
+            && run.len() > 1
+        {
+            let mut tests: Vec<Vec<u64>> =
+                run.iter().map(|&(a, b)| tokens[a..b].to_vec()).collect();
+            tests.sort();
+            tokens[start..stop].copy_from_slice(&tests.join(&op));
+            i = stop;
+        } else {
+            // A dropped test may start its own run: `a || b && c` sorts `b && c`.
+            i += first;
+        }
+    }
+}
+
+/// Token length of the pure test `tokens` starts with, if any.
+fn pure_test(tokens: &[u64]) -> Option<usize> {
+    let param = |t: u64| t >> 32 == 2;
+    // Text never names a variable; where an operand is complete this is a literal, e.g. `null`.
+    let atom = |t: u64| param(t) || t >> 32 == 0;
+    let strict = |t: u64| t == text("===") || t == text("!==");
+    let loose = |t: u64| t == text("==") || t == text("!=");
+    let cmp = |op: u64, a: u64, b: u64| {
+        strict(op) || loose(op) && (a == text("null") || b == text("null"))
+    };
+    let type_of = text("typeof");
+    match *tokens {
+        [t, p, op, x, ..] if t == type_of && param(p) && strict(op) && atom(x) => Some(4),
+        [x, op, t, p, ..] if t == type_of && param(p) && strict(op) && atom(x) => Some(4),
+        [a, op, b, ..] if (param(a) || param(b)) && atom(a) && atom(b) && cmp(op, a, b) => Some(3),
+        [n, m, p, ..] if n == text("!") && m == n && param(p) => Some(3),
+        [n, p, ..] if n == text("!") && param(p) => Some(2),
+        _ => None,
+    }
 }
 
 fn line_count(record: &Record) -> usize {
@@ -546,6 +629,55 @@ mod tests {
             groups(&find_helpers(&records, &loose, &NoJudge)),
             vec![vec!["id", "id"]]
         );
+    }
+
+    #[test]
+    fn pure_tests_match_in_any_order() {
+        let same = |a: &str, b: &str| {
+            let [a, b] = [a, b].map(|body| format!("export const f = (v, w) => {body};"));
+            let records = extract(&[("a.ts", &a), ("b.ts", &b)]);
+            find_helpers(&records, &options(), &NoJudge).groups.len() == 1
+        };
+        assert!(same(
+            "typeof v === 'object' && v !== null && !Array.isArray(v)",
+            "v !== null && typeof v === 'object' && !Array.isArray(v)",
+        ));
+        assert!(same(
+            "v === null || typeof v !== 'object' || w == null",
+            "w == null || v === null || typeof v !== 'object'",
+        ));
+        assert!(same(
+            "w.ok(v) || !!v && typeof v === 'object'",
+            "w.ok(v) || typeof v === 'object' && !!v",
+        ));
+        // A different test is a different behaviour: `!!v` also rejects `0`.
+        assert!(!same(
+            "typeof v === 'object' && v !== null && w !== v",
+            "typeof v === 'object' && !!v && w !== v",
+        ));
+        // Order-dependent: a guard before a property read, a call, or a value that is returned.
+        assert!(!same(
+            "v !== null && v.kind === 'object' && w !== null",
+            "v.kind === 'object' && v !== null && w !== null",
+        ));
+        assert!(!same(
+            "w.ok(v) && v !== null && typeof v === 'object'",
+            "v !== null && w.ok(v) && typeof v === 'object'",
+        ));
+        assert!(!same(
+            "typeof v === 'object' && v !== null && w",
+            "typeof v === 'object' && w && v !== null",
+        ));
+        // `&&` binds tighter: `a || b && c` is not `b || a && c`.
+        assert!(!same(
+            "v === null || w === null && typeof v === 'object'",
+            "w === null || v === null && typeof v === 'object'",
+        ));
+        // A free name may be undeclared, where only `typeof` is safe: not reordered.
+        assert!(!same(
+            "typeof v === 'object' && v !== undef && w !== null",
+            "v !== undef && typeof v === 'object' && w !== null",
+        ));
     }
 
     #[test]

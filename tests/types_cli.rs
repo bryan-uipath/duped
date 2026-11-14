@@ -156,3 +156,47 @@ fn invalid_name_glob_fails_before_touching_out() {
     assert_eq!(std::fs::read_to_string(&out).unwrap(), "previous report");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn cross_language_pairs_are_hidden_unless_asked() {
+    let root = std::env::temp_dir().join(format!("duped-types-e2e-cross-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // A Rust wire struct and its hand-written TypeScript mirror.
+    std::fs::write(
+        root.join("task.rs"),
+        "pub struct Task { pub id: String, pub title: String, pub done: bool, pub owner: String }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("task.ts"),
+        "export interface Task { id: string; title: string; done: boolean; owner: string }\n",
+    )
+    .unwrap();
+    let dir = root.to_str().unwrap();
+    let json = |args: &[&str]| -> serde_json::Value {
+        serde_json::from_str(&duped(&[args, &[dir, "--json"]].concat())).unwrap()
+    };
+
+    let hidden = json(&["types"]);
+    assert_eq!(hidden["summary"]["pairs"], 0);
+    assert_eq!(hidden["summary"]["hidden"]["cross_language"], 1);
+    let text = duped(&["types", dir]);
+    assert!(
+        text.contains("Hidden pairs: 1 cross-language (--cross-language)."),
+        "{text}"
+    );
+    assert_eq!(json(&["report"])["detectors"]["types"]["total"], 0);
+
+    let shown = json(&["types", "--cross-language"]);
+    assert_eq!(shown["summary"]["hidden"]["cross_language"], 0);
+    // `String` vs `string` is not a type difference.
+    assert_eq!(shown["pairs"][0]["relationship"], "exact");
+
+    // `[types] cross_language` is how `report` shows them.
+    std::fs::write(root.join("duped.toml"), "[types]\ncross_language = true\n").unwrap();
+    assert_eq!(json(&["types"])["summary"]["pairs"], 1);
+    assert_eq!(json(&["report"])["detectors"]["types"]["total"], 1);
+
+    std::fs::remove_dir_all(&root).unwrap();
+}

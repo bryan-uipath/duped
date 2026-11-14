@@ -31,9 +31,10 @@ duped report <root> --json > <temporary-file>               # whole codebase
 The report combines bodies, files (identical copies), imports, names, and types,
 grouped by file pair and ranked by `removableLines`, an estimate of what merging
 the pair removes, then `helpers`: small helpers copied N ways (`isRecord` in 30
-files), ranked apart by their own `removableLines`. The header total covers both.
+files), ranked apart by their own `removableLines`. The header total covers both, counting
+each line once, so it can be less than the groups' sum.
 Last, `families`: same-name helpers whose copies drifted (`isRecord`: 28
-definitions, 6 bodies), one list of copies per body.
+definitions, 4 bodies), one list of copies per body.
 Tests, fixtures, build output (`node_modules`, `dist`, `build`, `out`,
 `target`, …) and `.gitignore`d paths are skipped by default; checked-in
 generated code is not. Paths are relative to the scan root. Use a unique
@@ -41,7 +42,10 @@ temporary file per run and pass its literal path to later commands. Reuse a
 report only when the caller states it matches the current tree; else rerun.
 
 Read `directories` first: directory pairs linked by several file pairs, such
-as a ported feature folder; report those as one finding, not one per file.
+as a ported feature folder. Check its file pairs belong together; if so,
+report one finding, not one per file.
+Check `scannedFiles` and `skippedTestFiles` before concluding a repo is clean:
+a low total over few files is a narrow scan (`--include-tests` widens it).
 Inspect `detectors` statuses and counts (`kept` touches the change, `total` is
 repo-wide), `filePairs`, `helperGroups`, `helperFamilies`, and `truncated` (any list cut by
 `--top`), then select relevant `groups` and `helpers`; avoid dumping the full JSON. Failed detectors are gaps,

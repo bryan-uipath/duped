@@ -166,6 +166,41 @@ fn all_mode_needs_no_git_and_truncates_to_top() {
 }
 
 #[test]
+fn says_how_many_files_it_scanned_and_skipped_as_tests() {
+    let root = temp("scanned");
+    // `empty.ts` declares nothing but is still read; `node_modules` is never walked.
+    for file in [
+        "a.ts",
+        "empty.ts",
+        "a.test.ts",
+        "tests/b.ts",
+        "node_modules/p/c.ts",
+    ] {
+        let text = if file == "empty.ts" {
+            "// nothing\n"
+        } else {
+            "export const x = 1;\n"
+        };
+        write(&root, file, text);
+    }
+    let report = json(&root, &[]);
+    assert_eq!(report["scannedFiles"], 2);
+    assert_eq!(report["skippedTestFiles"], 2);
+    assert!(text(&root).contains(
+        "\nScanned 2 files; skipped 2 test, mock and fixture files (--include-tests).\n"
+    ));
+
+    let all = json(&root, &["--include-tests"]);
+    assert_eq!(
+        (&all["scannedFiles"], &all["skippedTestFiles"]),
+        (&4.into(), &0.into())
+    );
+    let all = String::from_utf8(duped(&root, &["--include-tests"]).stdout).unwrap();
+    assert!(all.contains("\nScanned 4 files.\n"), "{all}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn same_file_type_pairs_count_one_side() {
     // Two 6-line interfaces with the same fields in one file: one copy is removable, not both.
     let root = temp("same-file");
@@ -280,13 +315,13 @@ fn groups_rank_by_removable_lines_then_agreeing_analyses() {
         order[1]["evidence"]
             .as_str()
             .unwrap()
-            .starts_with("exact, 1 field overlap")
+            .starts_with("exact, 1.00 field overlap")
     );
 
     let text = text(&root);
     assert!(
         text.starts_with(
-            "4 file pairs and 0 helper groups, ~46 removable lines (bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
+            "4 file pairs and 0 helper groups, ~46 removable lines (findings: bodies 4; files 1; helpers 0; imports 0; names 1; types 1).\n"
         ),
         "{text}"
     );
@@ -542,6 +577,69 @@ fn hidden_pairs_are_counted_and_shown_by_flag() {
     assert!(
         text.contains("\n   packages/core/list.ts\n   - bodies function"),
         "{text}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn directories_skip_one_directory_and_pairs_with_nothing_removable() {
+    let root = temp("directories-skip");
+    // Two copied functions inside `c`: sibling pairs, not a port.
+    write(&root, "c/list.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "c/rows.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "c/http.ts", &RETRY.replace("NAME", "fetchJson"));
+    write(&root, "c/load.ts", &RETRY.replace("NAME", "loadJson"));
+    // `d` and `e` share only names, in two file pairs: nothing to remove.
+    for (file, x, y) in [
+        ("one.ts", "openDoor", "shutDoor"),
+        ("two.ts", "liftLid", "dropLid"),
+    ] {
+        write(
+            &root,
+            &format!("d/{file}"),
+            &format!(
+                "export function {x}(a: string) {{ return a.trim(); }}\nexport function {y}(n: number) {{ return n + 1; }}\n"
+            ),
+        );
+        write(
+            &root,
+            &format!("e/{file}"),
+            &format!(
+                "export function {x}(a: number[]) {{ return a.length; }}\nexport function {y}(s: string, t: string) {{ return s + t; }}\n"
+            ),
+        );
+    }
+
+    let report = json(&root, &[]);
+    let lines: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![11, 11, 0, 0]);
+    assert_eq!(report["directories"], serde_json::json!([]));
+    assert!(!text(&root).contains("Directories sharing"));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn header_and_directories_count_a_line_once_however_many_pairs_cover_it() {
+    let root = temp("once");
+    // One function in three files: three pairs of 11 lines, but only two copies to remove.
+    write(&root, "a/one.ts", &LIST.replace("NAME", "uniqueItems"));
+    write(&root, "a/two.ts", &LIST.replace("NAME", "dedupeRows"));
+    write(&root, "b/all.ts", &LIST.replace("NAME", "distinctRows"));
+
+    let report = json(&root, &[]);
+    let lines: Vec<u64> = groups(&report)
+        .iter()
+        .map(|g| g["removableLines"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![11, 11, 11]);
+    assert_eq!(report["removableLines"], 22);
+    // Both pairs between `a` and `b` match the same lines of `b/all.ts`.
+    assert_eq!(
+        report["directories"],
+        serde_json::json!([{ "a": "a", "b": "b", "filePairs": 2, "removableLines": 11 }])
     );
     std::fs::remove_dir_all(&root).unwrap();
 }

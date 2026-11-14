@@ -9,9 +9,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::fns::base_name;
+use super::names::family;
 use super::{Interner, Judge, components, jaccard, pair_notes, seed_pairs, tag_rank};
 use crate::modules::{Home, Tag};
-use crate::record::{Record, TypeKind, TypeRecord, qualified};
+use crate::record::{Language, Record, TypeKind, TypeRecord, qualified};
 use crate::rules::Rules;
 
 pub struct TypeOptions {
@@ -30,6 +31,8 @@ pub struct TypeOptions {
     pub include_same_module: bool,
     /// Report pairs acknowledged as deliberate.
     pub include_acknowledged: bool,
+    /// Report pairs across language families, e.g. a Rust struct and its TypeScript mirror.
+    pub cross_language: bool,
     /// Per-language rules; conventional members don't count toward similarity.
     pub rules: Rules,
 }
@@ -100,6 +103,8 @@ pub struct TypeReport {
     pub hidden_implementations: usize,
     /// Qualifying pairs left out because one side is `declare module '<the other's module>'`.
     pub hidden_ambient: usize,
+    /// Qualifying pairs left out because the two sides are in different language families.
+    pub hidden_cross_language: usize,
 }
 
 /// Which kinds are comparable: object shapes with each other, enums and unions with each other.
@@ -112,6 +117,8 @@ enum Group {
 struct Candidate<'r> {
     record: usize,
     group: Group,
+    /// Language family; type text is only compared within one.
+    language: Language,
     /// Field names in declaration order, deduplicated.
     fields: Vec<&'r str>,
     /// Sorted field-name ids.
@@ -159,6 +166,7 @@ pub fn find_duplicate_types(
         candidates.push(Candidate {
             record: index,
             group,
+            language: family(t.language),
             fields,
             names,
             types,
@@ -183,6 +191,7 @@ pub fn find_duplicate_types(
     let mut pairs = Vec::new();
     let (mut hidden_same_module, mut hidden_acknowledged) = (0, 0);
     let (mut hidden_implementations, mut hidden_ambient) = (0, 0);
+    let mut hidden_cross_language = 0;
     for group in [Group::Shape, Group::Members] {
         let members: Vec<&Candidate> = candidates.iter().filter(|c| c.group == group).collect();
         let sets: Vec<&[u32]> = members.iter().map(|c| c.names.as_slice()).collect();
@@ -201,6 +210,12 @@ pub fn find_duplicate_types(
                 }
                 if declares(a, judge.module(pair.b)) || declares(b, judge.module(pair.a)) {
                     hidden_ambient += 1;
+                    return;
+                }
+                // Off by default: a Rust struct and a TypeScript interface can't share one
+                // definition, so the pair is usually a wire-format mirror.
+                if members[i].language != members[j].language && !options.cross_language {
+                    hidden_cross_language += 1;
                     return;
                 }
                 let verdict = judge.verdict(pair.a, pair.b);
@@ -236,6 +251,7 @@ pub fn find_duplicate_types(
         hidden_acknowledged,
         hidden_implementations,
         hidden_ambient,
+        hidden_cross_language,
     }
 }
 
@@ -291,6 +307,8 @@ fn is_excluded(t: &TypeRecord, globs: &GlobSet) -> bool {
 
 fn score_pair(a: &Candidate, b: &Candidate, options: &TypeOptions) -> Option<TypePair> {
     // Walk both sorted name lists; a shared field's types match when equal or either is unknown.
+    // Across languages type text never matches (`String` vs `string`), so it counts as unknown.
+    let comparable = a.language == b.language;
     let (mut i, mut j, mut shared, mut matched) = (0, 0, 0, 0);
     while i < a.names.len() && j < b.names.len() {
         match a.names[i].cmp(&b.names[j]) {
@@ -299,7 +317,7 @@ fn score_pair(a: &Candidate, b: &Candidate, options: &TypeOptions) -> Option<Typ
             std::cmp::Ordering::Equal => {
                 shared += 1;
                 let (ta, tb) = (a.types[i], b.types[j]);
-                if ta.is_none() || tb.is_none() || ta == tb {
+                if !comparable || ta.is_none() || tb.is_none() || ta == tb {
                     matched += 1;
                 }
                 i += 1;
@@ -551,6 +569,12 @@ pub fn render_text(
             report.hidden_ambient
         ));
     }
+    if report.hidden_cross_language > 0 {
+        hidden.push(format!(
+            "{} cross-language (--cross-language)",
+            report.hidden_cross_language
+        ));
+    }
     if !hidden.is_empty() {
         writeln!(out, "Hidden pairs: {}.", hidden.join(", ")).ok();
     }
@@ -671,6 +695,7 @@ pub fn to_json(records: &[Record], report: &TypeReport, judge: &dyn Judge) -> Va
                 "acknowledged": report.hidden_acknowledged,
                 "implementations": report.hidden_implementations,
                 "ambient": report.hidden_ambient,
+                "cross_language": report.hidden_cross_language,
             },
         },
         "pairs": pairs,
@@ -755,7 +780,7 @@ fn member_json(records: &[Record], index: usize, judge: &dyn Judge) -> Value {
 mod tests {
     use super::*;
     use crate::analysis::NoJudge;
-    use crate::record::{Field, FieldKind, Language, Location};
+    use crate::record::{Field, FieldKind, Location};
     use globset::{Glob, GlobSetBuilder};
 
     fn options() -> TypeOptions {
@@ -769,6 +794,7 @@ mod tests {
             common_field_fraction: 0.1,
             include_same_module: false,
             include_acknowledged: false,
+            cross_language: false,
             rules: Rules::default(),
         }
     }
@@ -859,6 +885,58 @@ mod tests {
         shim.location.file = "types/core.d.ts".into();
         assert!(declares(&shim, Some("@x/core")));
         assert!(!declares(&shim, Some("@x/co")) && !declares(&shim, None));
+    }
+
+    #[test]
+    fn hides_cross_language_pairs_unless_asked() {
+        let fields = [
+            "id: string",
+            "name: string",
+            "age: number",
+            "tags: string[]",
+        ];
+        let in_language = |name: &str, language, fields: &[&str]| {
+            let Record::Type(mut t) = ty(name, TypeKind::Interface, fields) else {
+                unreachable!()
+            };
+            t.language = language;
+            Record::Type(t)
+        };
+        let records = vec![
+            in_language("Ts", Language::TypeScript, &fields),
+            in_language("Js", Language::JavaScript, &fields),
+            in_language(
+                "Rs",
+                Language::Rust,
+                &[
+                    "id: String",
+                    "name: String",
+                    "age: u32",
+                    "tags: Vec<String>",
+                ],
+            ),
+        ];
+        // TypeScript and JavaScript are one family; the Rust struct pairs with neither.
+        let report = find_duplicate_types(&records, &options(), &NoJudge);
+        let kept: Vec<_> = report.pairs.iter().map(|p| names(&records, p)).collect();
+        assert_eq!(
+            (kept, report.hidden_cross_language),
+            (vec![("Ts", "Js")], 2)
+        );
+
+        let shown = TypeOptions {
+            cross_language: true,
+            ..options()
+        };
+        let report = find_duplicate_types(&records, &shown, &NoJudge);
+        assert_eq!((report.pairs.len(), report.hidden_cross_language), (3, 0));
+        // `String` vs `string` is no type difference.
+        assert!(
+            report
+                .pairs
+                .iter()
+                .all(|p| p.typed == 1.0 && p.relationship == Relationship::Exact)
+        );
     }
 
     #[test]
